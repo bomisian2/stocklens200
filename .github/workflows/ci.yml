@@ -1,0 +1,43 @@
+name: Pull request validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run unit and Streamlit smoke tests
+        run: python -m pytest -q
+      - name: Validate committed Top-200 snapshot
+        run: python scripts/validate_snapshot.py --strict
+
+  live-collection:
+    # A temporary runner directory has no last-good cache. The job therefore
+    # succeeds only when the providers return a fresh, cross-validated Top 200.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Collect a fresh Top-200 snapshot without a cache
+        run: python scripts/update_data.py --data-dir "$RUNNER_TEMP/stocklens-live"
+      - name: Validate the fresh snapshot
+        run: python scripts/validate_snapshot.py --strict --data-dir "$RUNNER_TEMP/stocklens-live"
