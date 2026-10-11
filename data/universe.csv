@@ -1,0 +1,201 @@
+rank,ticker,name,sector,industry,country,market_cap,price,change_percent,volume,as_of,source,issuer_key
+1,NVDA,NVIDIA Corporation,Unknown,Unknown,Unknown,5536424132608.0,229.28,-0.520651,84307452.0,2026-10-09T20:00:00+00:00,yahoo_screener,nvidia
+2,AAPL,Apple Inc.,Unknown,Unknown,Unknown,4912984883200.0,336.64,-1.11039,37821157.0,2026-10-09T20:00:00+00:00,yahoo_screener,apple inc
+3,GOOGL,Alphabet Inc.,Unknown,Unknown,Unknown,4300779028480.0,351.66,0.967583,17231359.0,2026-10-09T20:00:00+00:00,yahoo_screener,alphabet inc
+4,MSFT,Microsoft Corporation,Unknown,Unknown,Unknown,3973186846720.0,535.07,2.38419,17890995.0,2026-10-09T20:00:01+00:00,yahoo_screener,microsoft
+5,AMZN,"Amazon.com, Inc.",Unknown,Unknown,Unknown,2830652145664.0,262.43,3.2945,33510286.0,2026-10-09T20:00:01+00:00,yahoo_screener,amazon com inc
+6,TSM,Taiwan Semiconductor Manufacturing Company Limited,Unknown,Unknown,Unknown,2351080407040.0,453.31,-1.02185,9207499.0,2026-10-09T20:00:02+00:00,yahoo_screener,taiwan semiconductor manufacturing
+7,SPCX,Space Exploration Technologies Corp.,Unknown,Unknown,Unknown,2142962057216.0,162.57,1.24556,92493813.0,2026-10-09T20:00:00+00:00,yahoo_screener,space exploration technologies
+8,META,"Meta Platforms, Inc.",Unknown,Unknown,Unknown,1830816186368.0,718.67,-0.307957,12586094.0,2026-10-09T20:00:01+00:00,yahoo_screener,meta platforms inc
+9,AVGO,Broadcom Inc.,Unknown,Unknown,Unknown,1725858185216.0,361.54,0.388736,16467294.0,2026-10-09T20:00:01+00:00,yahoo_screener,broadcom inc
+10,TSLA,"Tesla, Inc.",Unknown,Unknown,Unknown,1511491895296.0,382.7,2.05334,38834397.0,2026-10-09T20:00:00+00:00,yahoo_screener,tesla inc
+11,SKHY,SK hynix Inc.,Unknown,Unknown,Unknown,1201930895360.0,169.03,-0.862171,11994532.0,2026-10-09T20:00:00+00:00,yahoo_screener,sk hynix inc
+12,MU,"Micron Technology, Inc.",Unknown,Unknown,Unknown,1164234457088.0,1029.0,-0.66033036,19765706.0,2026-10-09T20:00:01+00:00,yahoo_screener,micron technology inc
+13,BRK-B,Berkshire Hathaway Inc.,Unknown,Unknown,Unknown,1103792701440.0,515.62,0.894239,4300868.0,2026-10-09T20:03:43+00:00,yahoo_screener,berkshire hathaway inc
+14,LLY,Eli Lilly and Company,Unknown,Unknown,Unknown,1051603894272.0,1179.27,0.826782,1384899.0,2026-10-09T20:00:02+00:00,yahoo_screener,eli lilly and
+15,AMD,"Advanced Micro Devices, Inc.",Unknown,Unknown,Unknown,992708001792.0,608.1,-2.02681,13664055.0,2026-10-09T20:00:01+00:00,yahoo_screener,advanced micro devices inc
+16,WMT,Walmart Inc.,Unknown,Unknown,Unknown,886132113408.0,111.35,0.714545,11823713.0,2026-10-09T20:00:00+00:00,yahoo_screener,walmart inc
+17,JPM,JPMorgan Chase & Co.,Unknown,Unknown,Unknown,885149401088.0,332.99,0.473712,4930606.0,2026-10-09T20:00:02+00:00,yahoo_screener,jpmorgan chase co
+18,V,Visa Inc.,Unknown,Unknown,Unknown,723626622976.0,385.45,2.75927,5826430.0,2026-10-09T20:00:02+00:00,yahoo_screener,visa inc
+19,XOM,ExxonMobil Holdings Corporation,Unknown,Unknown,Unknown,694666395648.0,168.94,0.261129,8078799.0,2026-10-09T20:02:30+00:00,yahoo_screener,exxonmobil holdings
+20,ASML,ASML Holding N.V.,Unknown,Unknown,Unknown,683828576256.0,1780.34,0.596112,1203224.0,2026-10-09T20:00:01+00:00,yahoo_screener,asml holding n v
+21,JNJ,Johnson & Johnson,Unknown,Unknown,Unknown,630043836416.0,261.44,1.93387,5460176.0,2026-10-09T20:00:02+00:00,yahoo_screener,johnson johnson
+22,INTC,Intel Corporation,Unknown,Unknown,Unknown,553455190016.0,104.7,-2.22264,74577145.0,2026-10-09T20:00:01+00:00,yahoo_screener,intel
+23,MA,Mastercard Incorporated,Unknown,Unknown,Unknown,516092493824.0,589.14,2.6573,2423360.0,2026-10-09T20:00:03+00:00,yahoo_screener,mastercard
+24,PLTR,Palantir Technologies Inc.,Unknown,Unknown,Unknown,502359359488.0,209.05,5.16652,37389859.0,2026-10-09T20:00:00+00:00,yahoo_screener,palantir technologies inc
+25,ABBV,AbbVie Inc.,Unknown,Unknown,Unknown,488554921984.0,276.47,1.48667,4263014.0,2026-10-09T20:01:20+00:00,yahoo_screener,abbvie inc
+26,CSCO,"Cisco Systems, Inc.",Unknown,Unknown,Unknown,466762858496.0,118.39,3.04639,11343626.0,2026-10-09T20:00:01+00:00,yahoo_screener,cisco systems inc
+27,ORCL,Oracle Corporation,Unknown,Unknown,Unknown,428654231552.0,141.4,4.59353,25467677.0,2026-10-09T20:03:26+00:00,yahoo_screener,oracle
+28,COST,Costco Wholesale Corporation,Unknown,Unknown,Unknown,419608035328.0,946.92,-0.105494,1493334.0,2026-10-09T20:00:01+00:00,yahoo_screener,costco wholesale
+29,CVX,Chevron Corporation,Unknown,Unknown,Unknown,415820677120.0,211.98,0.203258,6030702.0,2026-10-09T20:02:11+00:00,yahoo_screener,chevron
+30,AMAT,"Applied Materials, Inc.",Unknown,Unknown,Unknown,402377703424.0,507.03,-0.498461,3335378.0,2026-10-09T20:00:01+00:00,yahoo_screener,applied materials inc
+31,LRCX,Lam Research Corporation,Unknown,Unknown,Unknown,399004139520.0,318.84,-0.545869,4589061.0,2026-10-09T20:00:01+00:00,yahoo_screener,lam research
+32,BAC,Bank of America Corporation,Unknown,Unknown,Unknown,379846098944.0,54.32,1.32438,28715342.0,2026-10-09T20:00:02+00:00,yahoo_screener,bank of america
+33,KO,The Coca-Cola Company,Unknown,Unknown,Unknown,378839465984.0,88.05,0.319023,10350234.0,2026-10-09T20:00:02+00:00,yahoo_screener,the coca cola
+34,DELL,Dell Technologies Inc.,Unknown,Unknown,Unknown,372624424960.0,586.06,2.00331,5273949.0,2026-10-09T20:03:42+00:00,yahoo_screener,dell technologies inc
+35,CAT,Caterpillar Inc.,Unknown,Unknown,Unknown,367955935232.0,800.47,0.53882,1528071.0,2026-10-09T20:00:02+00:00,yahoo_screener,caterpillar inc
+36,MRK,"Merck & Co., Inc.",Unknown,Unknown,Unknown,359220183040.0,145.6,2.26155,7995154.0,2026-10-09T20:02:34+00:00,yahoo_screener,merck co inc
+37,PG,The Procter & Gamble Company,Unknown,Unknown,Unknown,351257722880.0,151.23,0.424995,6145400.0,2026-10-09T20:00:03+00:00,yahoo_screener,the procter gamble
+38,PANW,"Palo Alto Networks, Inc.",Unknown,Unknown,Unknown,342562045952.0,418.78,5.08908,3832323.0,2026-10-09T20:00:00+00:00,yahoo_screener,palo alto networks inc
+39,UNH,UnitedHealth Group Incorporated,Unknown,Unknown,Unknown,340457717760.0,379.3,2.25097,7443022.0,2026-10-09T20:00:03+00:00,yahoo_screener,unitedhealth group
+40,GE,GE Aerospace,Unknown,Unknown,Unknown,319776784384.0,308.2,0.844191,2947220.0,2026-10-09T20:00:02+00:00,yahoo_screener,ge aerospace
+41,HSBC,HSBC Holdings plc,Unknown,Unknown,Unknown,317985456128.0,92.98,0.399528,2016291.0,2026-10-09T20:00:02+00:00,yahoo_screener,hsbc holdings
+42,PM,Philip Morris International Inc.,Unknown,Unknown,Unknown,313577439232.0,201.19,0.344141,3237041.0,2026-10-09T20:00:02+00:00,yahoo_screener,philip morris international inc
+43,MS,Morgan Stanley,Unknown,Unknown,Unknown,298439016448.0,190.02,1.37644,4719400.0,2026-10-09T20:00:02+00:00,yahoo_screener,morgan stanley
+44,NFLX,"Netflix, Inc.",Unknown,Unknown,Unknown,292724965376.0,70.3,-1.77448,29022504.0,2026-10-09T20:00:00+00:00,yahoo_screener,netflix inc
+45,HD,"The Home Depot, Inc.",Unknown,Unknown,Unknown,290068267008.0,290.74,-1.60084,4560131.0,2026-10-09T20:00:03+00:00,yahoo_screener,the home depot inc
+46,SHEL,Shell plc,Unknown,Unknown,Unknown,285085990912.0,100.18,-0.0199567,8485391.0,2026-10-09T20:00:02+00:00,yahoo_screener,shell
+47,ARM,Arm Holdings plc,Unknown,Unknown,Unknown,284386656256.0,266.28,-3.27292,4248039.0,2026-10-09T20:00:01+00:00,yahoo_screener,arm holdings
+48,CRWD,"CrowdStrike Holdings, Inc.",Unknown,Unknown,Unknown,281623035904.0,275.04,4.57397,7041009.0,2026-10-09T20:00:01+00:00,yahoo_screener,crowdstrike holdings inc
+49,BABA,Alibaba Group Holding Limited,Unknown,Unknown,Unknown,277060157440.0,111.37,5.36424,12312876.0,2026-10-09T20:02:19+00:00,yahoo_screener,alibaba group holding
+50,ANET,"Arista Networks, Inc.",Unknown,Unknown,Unknown,273357848576.0,216.74,2.73499,4326938.0,2026-10-09T20:00:03+00:00,yahoo_screener,arista networks inc
+51,NVS,Novartis AG,Unknown,Unknown,Unknown,273227759616.0,143.75,0.447208,1900903.0,2026-10-09T20:00:02+00:00,yahoo_screener,novartis ag
+52,GEV,GE Vernova Inc.,Unknown,Unknown,Unknown,267593334784.0,1004.73,0.53835,1113125.0,2026-10-09T20:00:02+00:00,yahoo_screener,ge vernova inc
+53,RY,Royal Bank of Canada,Unknown,Unknown,Unknown,265685925888.0,191.91,0.708441,691507.0,2026-10-09T20:00:02+00:00,yahoo_screener,royal bank of canada
+54,GS,"The Goldman Sachs Group, Inc.",Unknown,Unknown,Unknown,260691574784.0,895.32,1.44234,1857084.0,2026-10-09T20:00:03+00:00,yahoo_screener,the goldman sachs group inc
+55,TXN,Texas Instruments Incorporated,Unknown,Unknown,Unknown,259124887552.0,283.74,-1.54754,4026281.0,2026-10-09T20:00:00+00:00,yahoo_screener,texas instruments
+56,KLAC,KLA Corporation,Unknown,Unknown,Unknown,255220121600.0,195.57,-0.584584,5293176.0,2026-10-09T20:00:01+00:00,yahoo_screener,kla
+57,WFC,Wells Fargo & Company,Unknown,Unknown,Unknown,252655140864.0,83.55,1.85299,22320147.0,2026-10-09T20:00:37+00:00,yahoo_screener,wells fargo
+58,MUFG,"Mitsubishi UFJ Financial Group, Inc.",Unknown,Unknown,Unknown,251904016384.0,22.38,-0.444842,2480313.0,2026-10-09T20:00:02+00:00,yahoo_screener,mitsubishi ufj financial group inc
+59,RTX,RTX Corporation,Unknown,Unknown,Unknown,250642579456.0,185.97,0.895179,3344904.0,2026-10-09T20:00:02+00:00,yahoo_screener,rtx
+60,SAP,SAP SE,Unknown,Unknown,Unknown,247899996160.0,214.78,1.12053,2235891.0,2026-10-09T20:00:02+00:00,yahoo_screener,sap se
+61,MRVL,"Marvell Technology, Inc.",Unknown,Unknown,Unknown,247395418112.0,275.28,0.24763,15024644.0,2026-10-09T20:00:01+00:00,yahoo_screener,marvell technology inc
+62,AZN,AstraZeneca PLC,Unknown,Unknown,Unknown,246904193024.0,159.2,0.264516,2058882.0,2026-10-09T20:00:02+00:00,yahoo_screener,astrazeneca
+63,TMO,Thermo Fisher Scientific Inc.,Unknown,Unknown,Unknown,243301122048.0,658.02,0.926415,1575194.0,2026-10-09T20:00:02+00:00,yahoo_screener,thermo fisher scientific inc
+64,SNDK,Sandisk Corporation,Unknown,Unknown,Unknown,228616585216.0,1581.82,-1.71735,5558695.0,2026-10-09T20:00:00+00:00,yahoo_screener,sandisk
+65,AMGN,Amgen Inc.,Unknown,Unknown,Unknown,224291995648.0,414.87,1.82358,2009199.0,2026-10-09T20:00:01+00:00,yahoo_screener,amgen inc
+66,LIN,Linde plc,Unknown,Unknown,Unknown,222989942784.0,483.73,0.421424,1576874.0,2026-10-09T20:00:01+00:00,yahoo_screener,linde
+67,SHOP,Shopify Inc.,Unknown,Unknown,Unknown,221704306688.0,170.85,3.82232,6727472.0,2026-10-09T20:00:00+00:00,yahoo_screener,shopify inc
+68,BHP,BHP Group Limited,Unknown,Unknown,Unknown,220447703040.0,86.74,2.25156,2650632.0,2026-10-09T20:00:02+00:00,yahoo_screener,bhp group
+69,TM,Toyota Motor Corporation,Unknown,Unknown,Unknown,219429191680.0,185.3,-0.376342,351936.0,2026-10-09T20:00:02+00:00,yahoo_screener,toyota motor
+70,C,Citigroup Inc.,Unknown,Unknown,Unknown,217462898688.0,129.64,1.21799,6505327.0,2026-10-09T20:03:17+00:00,yahoo_screener,citigroup inc
+71,APH,Amphenol Corporation,Unknown,Unknown,Unknown,215130947584.0,87.24,2.25035,8338841.0,2026-10-09T20:00:03+00:00,yahoo_screener,amphenol
+72,IBM,International Business Machines Corporation,Unknown,Unknown,Unknown,213986983936.0,227.13,0.229471,3347106.0,2026-10-09T20:00:03+00:00,yahoo_screener,international business machines
+73,AXP,American Express Company,Unknown,Unknown,Unknown,208110239744.0,308.17,0.332092,2577801.0,2026-10-09T20:02:07+00:00,yahoo_screener,american express
+74,ADI,"Analog Devices, Inc.",Unknown,Unknown,Unknown,196825645056.0,406.19,0.0640529,2003799.0,2026-10-09T20:00:01+00:00,yahoo_screener,analog devices inc
+75,SAN,"Banco Santander, S.A.",Unknown,Unknown,Unknown,195029041152.0,13.49,0.0741857,7354707.0,2026-10-09T20:00:02+00:00,yahoo_screener,banco santander s a
+76,TTE,TotalEnergies SE,Unknown,Unknown,Unknown,190085644288.0,86.11,0.104631,4110565.0,2026-10-09T20:00:03+00:00,yahoo_screener,totalenergies se
+77,CRM,"Salesforce, Inc.",Unknown,Unknown,Unknown,188573990912.0,229.13,0.583846,4678244.0,2026-10-09T20:00:03+00:00,yahoo_screener,salesforce inc
+78,TD,The Toronto-Dominion Bank,Unknown,Unknown,Unknown,187960213504.0,115.1,1.63014,837420.0,2026-10-09T20:00:02+00:00,yahoo_screener,the toronto dominion bank
+79,GILD,"Gilead Sciences, Inc.",Unknown,Unknown,Unknown,187444019200.0,151.17,2.76682,5333423.0,2026-10-09T20:00:01+00:00,yahoo_screener,gilead sciences inc
+80,QCOM,QUALCOMM Incorporated,Unknown,Unknown,Unknown,187405828096.0,175.5,-0.289753,7555158.0,2026-10-09T20:00:00+00:00,yahoo_screener,qualcomm
+81,DIS,The Walt Disney Company,Unknown,Unknown,Unknown,186568523776.0,108.05,0.962443,7094123.0,2026-10-09T20:01:56+00:00,yahoo_screener,the walt disney
+82,STX,Seagate Technology Holdings plc,Unknown,Unknown,Unknown,178048729088.0,783.0,1.05508,3919769.0,2026-10-09T20:00:00+00:00,yahoo_screener,seagate technology holdings
+83,SCCO,Southern Copper Corporation,Unknown,Unknown,Unknown,176645144576.0,209.21,5.31058,832031.0,2026-10-09T20:00:02+00:00,yahoo_screener,southern copper
+84,BLK,"BlackRock, Inc.",Unknown,Unknown,Unknown,175862611968.0,1082.39,1.59948,376723.0,2026-10-09T20:00:02+00:00,yahoo_screener,blackrock inc
+85,VZ,Verizon Communications Inc.,Unknown,Unknown,Unknown,173046398976.0,41.65,-8.74733,94888715.0,2026-10-09T20:00:02+00:00,yahoo_screener,verizon communications inc
+86,ABT,Abbott Laboratories,Unknown,Unknown,Unknown,172346179584.0,99.6,1.12702,6961418.0,2026-10-09T20:02:42+00:00,yahoo_screener,abbott laboratories
+87,PEP,"PepsiCo, Inc.",Unknown,Unknown,Unknown,171664506880.0,125.97,-1.84665,9853204.0,2026-10-09T20:00:00+00:00,yahoo_screener,pepsico inc
+88,NVO,Novo Nordisk A/S,Unknown,Unknown,Unknown,170570678272.0,38.64,1.20482,9381643.0,2026-10-09T20:00:02+00:00,yahoo_screener,novo nordisk a s
+89,DE,Deere & Company,Unknown,Unknown,Unknown,167418494976.0,620.93,-4.84998,1870598.0,2026-10-09T20:00:02+00:00,yahoo_screener,deere
+90,SCHW,The Charles Schwab Corporation,Unknown,Unknown,Unknown,167226753024.0,96.7,-0.175499,6498186.0,2026-10-09T20:00:02+00:00,yahoo_screener,the charles schwab
+91,ETN,Eaton Corporation plc,Unknown,Unknown,Unknown,166876053504.0,429.65,1.2108,1632666.0,2026-10-09T20:00:03+00:00,yahoo_screener,eaton
+92,MCD,McDonald's Corporation,Unknown,Unknown,Unknown,166458523648.0,235.23,-0.704938,5946968.0,2026-10-09T20:00:03+00:00,yahoo_screener,mcdonald s
+93,UNP,Union Pacific Corporation,Unknown,Unknown,Unknown,165354979328.0,278.34,0.0503178,1362936.0,2026-10-09T20:00:02+00:00,yahoo_screener,union pacific
+94,PBR,Petróleo Brasileiro S.A. - Petrobras,Unknown,Unknown,Unknown,163042459648.0,25.3,2.47063,26057787.0,2026-10-09T20:00:02+00:00,yahoo_screener,petr leo brasileiro s a petrobras
+95,WELL,Welltower Inc.,Unknown,Unknown,Unknown,162467381248.0,225.47,1.08949,2834302.0,2026-10-09T20:01:05+00:00,yahoo_screener,welltower inc
+96,NEE,"NextEra Energy, Inc.",Unknown,Unknown,Unknown,161412988928.0,77.38,0.0129178,6613469.0,2026-10-09T20:00:03+00:00,yahoo_screener,nextera energy inc
+97,PFE,Pfizer Inc.,Unknown,Unknown,Unknown,161186775040.0,28.28,1.65349,22604129.0,2026-10-09T20:01:58+00:00,yahoo_screener,pfizer inc
+98,COP,ConocoPhillips,Unknown,Unknown,Unknown,161099366400.0,134.1,-0.0670663,3834399.0,2026-10-09T20:00:02+00:00,yahoo_screener,conocophillips
+99,TMUS,"T-Mobile US, Inc.",Unknown,Unknown,Unknown,159377555456.0,148.58,-13.2683,18955439.0,2026-10-09T20:00:00+00:00,yahoo_screener,t mobile us inc
+100,SMFG,"Sumitomo Mitsui Financial Group, Inc.",Unknown,Unknown,Unknown,157621125120.0,25.13,-0.711183,1021879.0,2026-10-09T20:00:02+00:00,yahoo_screener,sumitomo mitsui financial group inc
+101,DHR,Danaher Corporation,Unknown,Unknown,Unknown,154523369472.0,219.81,1.08065,3185046.0,2026-10-09T20:03:23+00:00,yahoo_screener,danaher
+102,RIO,Rio Tinto Group,Unknown,Unknown,Unknown,154149208064.0,94.78,1.54275,1301749.0,2026-10-09T20:00:02+00:00,yahoo_screener,rio tinto group
+103,TJX,"The TJX Companies, Inc.",Unknown,Unknown,Unknown,152632393728.0,138.76,0.00720325,4362822.0,2026-10-09T20:00:57+00:00,yahoo_screener,the tjx companies inc
+104,BUD,Anheuser-Busch InBev SA/NV,Unknown,Unknown,Unknown,152272732160.0,77.33,-0.103348,1228028.0,2026-10-09T20:00:02+00:00,yahoo_screener,anheuser busch inbev sa nv
+105,T,AT&T Inc.,Unknown,Unknown,Unknown,151985913856.0,22.18,-9.8099,150217381.0,2026-10-09T20:02:07+00:00,yahoo_screener,at t inc
+106,BA,The Boeing Company,Unknown,Unknown,Unknown,150462742528.0,190.37,1.39547,5081545.0,2026-10-09T20:00:03+00:00,yahoo_screener,the boeing
+107,ISRG,"Intuitive Surgical, Inc.",Unknown,Unknown,Unknown,149775761408.0,423.96,2.0582,1761570.0,2026-10-09T20:00:01+00:00,yahoo_screener,intuitive surgical inc
+108,WDC,Western Digital Corporation,Unknown,Unknown,Unknown,148711145472.0,397.28,1.00938,7021810.0,2026-10-09T20:00:00+00:00,yahoo_screener,western digital
+109,UBS,UBS Group AG,Unknown,Unknown,Unknown,147361644544.0,48.13,2.27369,1657425.0,2026-10-09T20:00:02+00:00,yahoo_screener,ubs group ag
+110,UBER,"Uber Technologies, Inc.",Unknown,Unknown,Unknown,146063474688.0,71.51,1.80809,16530388.0,2026-10-09T20:00:03+00:00,yahoo_screener,uber technologies inc
+111,NOW,"ServiceNow, Inc.",Unknown,Unknown,Unknown,145629806592.0,140.86,0.794276,6272232.0,2026-10-09T20:00:03+00:00,yahoo_screener,servicenow inc
+112,BBVA,"Banco Bilbao Vizcaya Argentaria, S.A.",Unknown,Unknown,Unknown,143659548672.0,26.12,-0.191056,1937487.0,2026-10-09T20:00:02+00:00,yahoo_screener,banco bilbao vizcaya argentaria s a
+113,FTNT,"Fortinet, Inc.",Unknown,Unknown,Unknown,142890729472.0,194.75,2.98783,2068351.0,2026-10-09T20:00:01+00:00,yahoo_screener,fortinet inc
+114,SONY,Sony Group Corporation,Unknown,Unknown,Unknown,140823199744.0,24.12,0.709812,3195104.0,2026-10-09T20:00:02+00:00,yahoo_screener,sony group
+115,BX,Blackstone Inc.,Unknown,Unknown,Unknown,136610586624.0,114.29,1.42883,3959865.0,2026-10-09T20:03:56+00:00,yahoo_screener,blackstone inc
+116,GLW,Corning Incorporated,Unknown,Unknown,Unknown,134962323456.0,156.68,2.51913,6663557.0,2026-10-09T20:03:57+00:00,yahoo_screener,corning
+117,UL,Unilever PLC,Unknown,Unknown,Unknown,134079340544.0,62.26,0.516629,2083308.0,2026-10-09T20:00:02+00:00,yahoo_screener,unilever
+118,CB,Chubb Limited,Unknown,Unknown,Unknown,131634921472.0,341.2,-0.750476,1032151.0,2026-10-09T20:00:03+00:00,yahoo_screener,chubb
+119,SNOW,Snowflake Inc.,Unknown,Unknown,Unknown,130144395264.0,368.89,7.42284,8022555.0,2026-10-09T20:00:03+00:00,yahoo_screener,snowflake inc
+120,VRTX,Vertex Pharmaceuticals Incorporated,Unknown,Unknown,Unknown,129285349376.0,510.08,1.35718,1469287.0,2026-10-09T20:00:00+00:00,yahoo_screener,vertex pharmaceuticals
+121,NET,"Cloudflare, Inc.",Unknown,Unknown,Unknown,128519847936.0,360.93,5.56904,2621605.0,2026-10-09T20:03:38+00:00,yahoo_screener,cloudflare inc
+122,MFG,"Mizuho Financial Group, Inc.",Unknown,Unknown,Unknown,128413237248.0,10.61,-0.562328,2529202.0,2026-10-09T20:00:02+00:00,yahoo_screener,mizuho financial group inc
+123,ACN,Accenture plc,Unknown,Unknown,Unknown,127932612608.0,209.06,0.335956,4875161.0,2026-10-09T20:00:02+00:00,yahoo_screener,accenture
+124,MPC,Marathon Petroleum Corporation,Unknown,Unknown,Unknown,127783690240.0,455.03,-1.7935,1965400.0,2026-10-09T20:00:02+00:00,yahoo_screener,marathon petroleum
+125,PGR,The Progressive Corporation,Unknown,Unknown,Unknown,126196367360.0,217.43,-0.594341,1466088.0,2026-10-09T20:00:02+00:00,yahoo_screener,the progressive
+126,PLD,"Prologis, Inc.",Unknown,Unknown,Unknown,125876117504.0,129.49,0.1547,3310448.0,2026-10-09T20:00:03+00:00,yahoo_screener,prologis inc
+127,VLO,Valero Energy Corporation,Unknown,Unknown,Unknown,124888530944.0,433.75,-2.26453,3337871.0,2026-10-09T20:00:02+00:00,yahoo_screener,valero energy
+128,NEM,Newmont Corporation,Unknown,Unknown,Unknown,124167094272.0,117.84,1.98182,4830284.0,2026-10-09T20:00:02+00:00,yahoo_screener,newmont
+129,COF,Capital One Financial Corporation,Unknown,Unknown,Unknown,122242990080.0,199.26,-0.0702103,2786020.0,2026-10-09T20:00:03+00:00,yahoo_screener,capital one financial
+130,PH,Parker-Hannifin Corporation,Unknown,Unknown,Unknown,121390768128.0,962.56,1.64737,354579.0,2026-10-09T20:00:02+00:00,yahoo_screener,parker hannifin
+131,BMY,Bristol-Myers Squibb Company,Unknown,Unknown,Unknown,120765284352.0,59.12,-0.772076,9252193.0,2026-10-09T20:00:02+00:00,yahoo_screener,bristol myers squibb
+132,BKNG,Booking Holdings Inc.,Unknown,Unknown,Unknown,120476344320.0,160.34,0.23129,4218321.0,2026-10-09T20:00:01+00:00,yahoo_screener,booking holdings inc
+133,SPGI,S&P Global Inc.,Unknown,Unknown,Unknown,120225341440.0,407.82,1.26387,1376542.0,2026-10-09T20:00:02+00:00,yahoo_screener,s p global inc
+134,MO,"Altria Group, Inc.",Unknown,Unknown,Unknown,119687241728.0,71.68,0.364047,8369675.0,2026-10-09T20:02:15+00:00,yahoo_screener,altria group inc
+135,BTI,British American Tobacco p.l.c.,Unknown,Unknown,Unknown,119384825856.0,55.5,0.126285,2601268.0,2026-10-09T20:00:02+00:00,yahoo_screener,british american tobacco p l c
+136,BP,BP p.l.c.,Unknown,Unknown,Unknown,119121100800.0,46.25,-0.237275,8422406.0,2026-10-09T20:00:02+00:00,yahoo_screener,bp p l c
+137,LMT,Lockheed Martin Corporation,Unknown,Unknown,Unknown,117608660992.0,509.59,0.334715,801350.0,2026-10-09T20:00:02+00:00,yahoo_screener,lockheed martin
+138,PDD,PDD Holdings Inc.,Unknown,Unknown,Unknown,115793297408.0,81.35,3.94837,6810145.0,2026-10-09T20:00:00+00:00,yahoo_screener,pdd holdings inc
+139,HDB,HDFC Bank Limited,Unknown,Unknown,Unknown,114507915264.0,22.28,1.22672,4019444.0,2026-10-09T20:00:02+00:00,yahoo_screener,hdfc bank
+140,MDT,Medtronic plc,Unknown,Unknown,Unknown,113178124288.0,88.48,0.831913,38860319.0,2026-10-09T20:00:02+00:00,yahoo_screener,medtronic
+141,BMO,Bank of Montreal,Unknown,Unknown,Unknown,113015046144.0,162.59,1.1761,388277.0,2026-10-09T20:00:02+00:00,yahoo_screener,bank of montreal
+142,ITUB,Itaú Unibanco Holding S.A.,Unknown,Unknown,Unknown,111983779840.0,10.16,3.35707,45486777.0,2026-10-09T20:00:02+00:00,yahoo_screener,ita unibanco holding s a
+143,PSX,Phillips 66,Unknown,Unknown,Unknown,111532097536.0,278.18,-1.21449,2819322.0,2026-10-09T20:00:03+00:00,yahoo_screener,phillips 66
+144,CVS,CVS Health Corporation,Unknown,Unknown,Unknown,110196088832.0,86.16,-1.86788,11650453.0,2026-10-09T20:00:03+00:00,yahoo_screener,cvs health
+145,MCK,McKesson Corporation,Unknown,Unknown,Unknown,109459693568.0,938.84,0.923411,482892.0,2026-10-09T20:00:02+00:00,yahoo_screener,mckesson
+146,SPOT,Spotify Technology S.A.,Unknown,Unknown,Unknown,108782829568.0,529.14,0.516704,1320449.0,2026-10-09T20:00:03+00:00,yahoo_screener,spotify technology s a
+147,BNS,The Bank of Nova Scotia,Unknown,Unknown,Unknown,107805507584.0,88.45,0.981848,841372.0,2026-10-09T20:00:02+00:00,yahoo_screener,the bank of nova scotia
+148,ADP,"Automatic Data Processing, Inc.",Unknown,Unknown,Unknown,107336622080.0,270.88,0.0554035,1097705.0,2026-10-09T20:00:01+00:00,yahoo_screener,automatic data processing inc
+149,SYK,Stryker Corporation,Unknown,Unknown,Unknown,106376306688.0,277.33,0.129973,1476433.0,2026-10-09T20:00:02+00:00,yahoo_screener,stryker
+150,PWR,"Quanta Services, Inc.",Unknown,Unknown,Unknown,106133413888.0,705.94,3.00731,685339.0,2026-10-09T20:00:02+00:00,yahoo_screener,quanta services inc
+151,FCX,Freeport-McMoRan Inc.,Unknown,Unknown,Unknown,105820135424.0,73.69,3.58449,6978566.0,2026-10-09T20:00:02+00:00,yahoo_screener,freeport mcmoran inc
+152,CEG,Constellation Energy Corporation,Unknown,Unknown,Unknown,105608404992.0,298.07,4.560283,3785046.0,2026-10-09T20:00:01+00:00,yahoo_screener,constellation energy
+153,DDOG,"Datadog, Inc.",Unknown,Unknown,Unknown,105302343680.0,293.26,7.10739,3703089.0,2026-10-09T20:00:01+00:00,yahoo_screener,datadog inc
+154,TT,Trane Technologies plc,Unknown,Unknown,Unknown,104946663424.0,476.98,1.49807,1078278.0,2026-10-09T20:02:07+00:00,yahoo_screener,trane technologies
+155,LOW,"Lowe's Companies, Inc.",Unknown,Unknown,Unknown,104356044800.0,186.0,-1.50914,2645934.0,2026-10-09T20:00:02+00:00,yahoo_screener,lowe s companies inc
+156,ENB,Enbridge Inc.,Unknown,Unknown,Unknown,103864107008.0,46.6,0.128916,3598516.0,2026-10-09T20:00:03+00:00,yahoo_screener,enbridge inc
+157,SBUX,Starbucks Corporation,Unknown,Unknown,Unknown,103454998528.0,90.75,-2.6392,12757343.0,2026-10-09T20:00:00+00:00,yahoo_screener,starbucks
+158,CNQ,Canadian Natural Resources Limited,Unknown,Unknown,Unknown,102353477632.0,49.65,1.22325,3693265.0,2026-10-09T20:00:02+00:00,yahoo_screener,canadian natural resources
+159,ASX,"ASE Technology Holding Co., Ltd.",Unknown,Unknown,Unknown,102091014144.0,46.43,2.58507,5370435.0,2026-10-09T20:00:02+00:00,yahoo_screener,ase technology holding co
+160,EQNR,Equinor ASA,Unknown,Unknown,Unknown,101896052736.0,43.01,0.186345,5966433.0,2026-10-09T20:00:02+00:00,yahoo_screener,equinor asa
+161,EQIX,"Equinix, Inc.",Unknown,Unknown,Unknown,101243076608.0,1026.06,1.47356,318078.0,2026-10-09T20:00:01+00:00,yahoo_screener,equinix inc
+162,CME,CME Group Inc.,Unknown,Unknown,Unknown,100883554304.0,280.56,1.49038,2593040.0,2026-10-09T20:00:01+00:00,yahoo_screener,cme group inc
+163,IBN,ICICI Bank Limited,Unknown,Unknown,Unknown,100106870784.0,27.89,-0.0358431,3627420.0,2026-10-09T20:00:02+00:00,yahoo_screener,icici bank
+164,LITE,Lumentum Holdings Inc.,Unknown,Unknown,Unknown,99944595456.0,1103.35,5.22172,5235815.0,2026-10-09T20:00:01+00:00,yahoo_screener,lumentum holdings inc
+165,ABNB,"Airbnb, Inc.",Unknown,Unknown,Unknown,99320578048.0,165.87,1.61735,2035485.0,2026-10-09T20:00:01+00:00,yahoo_screener,airbnb inc
+166,CM,Canadian Imperial Bank of Commerce,Unknown,Unknown,Unknown,99146547200.0,109.2,0.94287,477976.0,2026-10-09T20:00:03+00:00,yahoo_screener,canadian imperial bank of commerce
+167,SO,The Southern Company,Unknown,Unknown,Unknown,99126779904.0,86.17,0.0232114,3130024.0,2026-10-09T20:00:02+00:00,yahoo_screener,the southern
+168,HOOD,"Robinhood Markets, Inc.",Unknown,Unknown,Unknown,98017951744.0,109.02,1.87832,13683634.0,2026-10-09T20:00:01+00:00,yahoo_screener,robinhood markets inc
+169,SNPS,"Synopsys, Inc.",Unknown,Unknown,Unknown,97732771840.0,509.99,2.45906,1665280.0,2026-10-09T20:00:00+00:00,yahoo_screener,synopsys inc
+170,HCA,"HCA Healthcare, Inc.",Unknown,Unknown,Unknown,97661665280.0,451.09,1.36626,980821.0,2026-10-09T20:00:02+00:00,yahoo_screener,hca healthcare inc
+171,HPE,Hewlett Packard Enterprise Company,Unknown,Unknown,Unknown,97515569152.0,73.46,3.46479,13440804.0,2026-10-09T20:02:38+00:00,yahoo_screener,hewlett packard enterprise
+172,CDNS,"Cadence Design Systems, Inc.",Unknown,Unknown,Unknown,97169661952.0,352.84,1.14666,1292737.0,2026-10-09T20:00:01+00:00,yahoo_screener,cadence design systems inc
+173,BNY,The Bank of New York Mellon Corporation,Unknown,Unknown,Unknown,96829325312.0,142.71,-0.626693,2884020.0,2026-10-09T20:03:04+00:00,yahoo_screener,the bank of new york mellon
+174,SNY,Sanofi,Unknown,Unknown,Unknown,96013230080.0,40.07,-0.397713,2101570.0,2026-10-09T20:00:00+00:00,yahoo_screener,sanofi
+175,MELI,"MercadoLibre, Inc.",Unknown,Unknown,Unknown,95809347584.0,1889.85,1.78762,313134.0,2026-10-09T20:00:01+00:00,yahoo_screener,mercadolibre inc
+176,AEM,Agnico Eagle Mines Limited,Unknown,Unknown,Unknown,95713091584.0,189.02,2.8009,1634355.0,2026-10-09T20:00:03+00:00,yahoo_screener,agnico eagle mines
+177,MAR,"Marriott International, Inc.",Unknown,Unknown,Unknown,95409168384.0,365.88,1.32935,834024.0,2026-10-09T20:00:01+00:00,yahoo_screener,marriott international inc
+178,JCI,Johnson Controls International plc,Unknown,Unknown,Unknown,95367929856.0,157.44,2.23377,2551423.0,2026-10-09T20:00:02+00:00,yahoo_screener,johnson controls international
+179,ING,ING Groep N.V.,Unknown,Unknown,Unknown,94300102656.0,33.37,-0.179484,3340607.0,2026-10-09T20:00:02+00:00,yahoo_screener,ing groep n v
+180,ADBE,Adobe Inc.,Unknown,Unknown,Unknown,94291484672.0,242.27,0.50612,3881488.0,2026-10-09T20:00:01+00:00,yahoo_screener,adobe inc
+181,VRT,Vertiv Holdings Co,Unknown,Unknown,Unknown,93467426816.0,242.78,-0.389774,3419680.0,2026-10-09T20:00:03+00:00,yahoo_screener,vertiv holdings co
+182,GSK,GSK plc,Unknown,Unknown,Unknown,93163462656.0,46.5,-0.0859495,8431411.0,2026-10-09T20:00:02+00:00,yahoo_screener,gsk
+183,APP,AppLovin Corporation,Unknown,Unknown,Unknown,93068689408.0,277.04,-1.09952,3282034.0,2026-10-09T20:00:01+00:00,yahoo_screener,applovin
+184,DUK,Duke Energy Corporation,Unknown,Unknown,Unknown,90952261632.0,116.65,-0.162611,2805504.0,2026-10-09T20:00:02+00:00,yahoo_screener,duke energy
+185,EMR,Emerson Electric Co.,Unknown,Unknown,Unknown,90268778496.0,161.83,1.74148,2430732.0,2026-10-09T20:01:34+00:00,yahoo_screener,emerson electric co
+186,HWM,Howmet Aerospace Inc.,Unknown,Unknown,Unknown,89834004480.0,225.26,1.21315,2670594.0,2026-10-09T20:04:05+00:00,yahoo_screener,howmet aerospace inc
+187,MRNA,"Moderna, Inc.",Unknown,Unknown,Unknown,89828081664.0,225.0,14.2132,28817183.0,2026-10-09T20:00:01+00:00,yahoo_screener,moderna inc
+188,GD,General Dynamics Corporation,Unknown,Unknown,Unknown,89627475968.0,331.27,0.901584,1123193.0,2026-10-09T20:00:03+00:00,yahoo_screener,general dynamics
+189,ELV,"Elevance Health, Inc.",Unknown,Unknown,Unknown,89501958144.0,412.7,2.93311,2076983.0,2026-10-09T20:00:02+00:00,yahoo_screener,elevance health inc
+190,USB,U.S. Bancorp,Unknown,Unknown,Unknown,88933580800.0,57.08,0.0876785,5214743.0,2026-10-09T20:00:02+00:00,yahoo_screener,u s bancorp
+191,WMB,"The Williams Companies, Inc.",Unknown,Unknown,Unknown,88887582720.0,72.67,0.456182,6882805.0,2026-10-09T20:00:03+00:00,yahoo_screener,the williams companies inc
+192,ICE,"Intercontinental Exchange, Inc.",Unknown,Unknown,Unknown,87684210688.0,156.19,0.540712,2429268.0,2026-10-09T20:00:03+00:00,yahoo_screener,intercontinental exchange inc
+193,CSX,CSX Corporation,Unknown,Unknown,Unknown,87547961344.0,47.26,-0.168994,5070191.0,2026-10-09T20:00:01+00:00,yahoo_screener,csx
+194,PNC,"The PNC Financial Services Group, Inc.",Unknown,Unknown,Unknown,87452450816.0,219.21,-0.213941,1147129.0,2026-10-09T20:00:02+00:00,yahoo_screener,the pnc financial services group inc
+195,MNST,Monster Beverage Corporation,Unknown,Unknown,Unknown,85493014528.0,43.64,-0.0229144,6381423.0,2026-10-09T20:00:01+00:00,yahoo_screener,monster beverage
+196,SU,Suncor Energy Inc.,Unknown,Unknown,Unknown,85285232640.0,72.23,1.86151,3523079.0,2026-10-09T20:00:02+00:00,yahoo_screener,suncor energy inc
+197,DASH,"DoorDash, Inc.",Unknown,Unknown,Unknown,85143044096.0,196.5,2.49856,2332220.0,2026-10-09T20:00:01+00:00,yahoo_screener,doordash inc
+198,AMT,American Tower Corporation,Unknown,Unknown,Unknown,84916568064.0,182.24,9.30247,8468306.0,2026-10-09T20:00:03+00:00,yahoo_screener,american tower
+199,KKR,KKR & Co. Inc.,Unknown,Unknown,Unknown,84000555008.0,90.95,1.55203,4338294.0,2026-10-09T20:00:02+00:00,yahoo_screener,kkr co inc
+200,MRSH,"Marsh & McLennan Companies, Inc.",Unknown,Unknown,Unknown,83874652160.0,175.76,-0.515087,1966386.0,2026-10-09T20:00:02+00:00,yahoo_screener,marsh mclennan companies inc

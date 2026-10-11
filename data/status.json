@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-11T14:12:05+00:00",
+  "data_generated_at_utc": "2026-10-11T14:12:05+00:00",
+  "market_data_as_of_utc": "2026-10-09T20:04:05+00:00",
+  "source": "yahoo_screener",
+  "candidate_count": 7328,
+  "company_count": 200,
+  "used_cache": false,
+  "degraded": false,
+  "provider_errors": [],
+  "validation": {
+    "exactly_200_companies": true,
+    "unique_tickers": true,
+    "unique_issuers": true,
+    "positive_market_caps": true,
+    "market_caps_descending": true
+  }
+}
