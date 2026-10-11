@@ -1,19 +1,69 @@
 {
-  "schema_version": 1,
-  "generated_at_utc": "2026-10-11T14:12:05+00:00",
-  "data_generated_at_utc": "2026-10-11T14:12:05+00:00",
-  "market_data_as_of_utc": "2026-10-09T20:04:05+00:00",
+  "schema_version": 2,
+  "generated_at_utc": "2026-10-11T15:36:07+00:00",
+  "data_generated_at_utc": "2026-10-11T15:36:07+00:00",
+  "market_session_date": "2026-10-09",
+  "market_data_as_of_utc": "2026-10-09T20:00:02+00:00",
+  "market_time_min_utc": "2026-10-09T20:00:00+00:00",
+  "market_time_max_utc": "2026-10-09T20:04:05+00:00",
+  "collected_at_min_utc": "2026-10-11T15:36:10+00:00",
+  "collected_at_max_utc": "2026-10-11T15:36:10+00:00",
   "source": "yahoo_screener",
+  "data_source": "yahoo_screener",
+  "verification_source": "nasdaq_screener",
+  "verification_source_freshness_state": "unverified",
   "candidate_count": 7328,
   "company_count": 200,
   "used_cache": false,
+  "data_state": "healthy",
+  "freshness_state": "verified",
   "degraded": false,
+  "eligible_for_signals": true,
   "provider_errors": [],
+  "freshness": {
+    "state": "verified",
+    "expected_session_date": "2026-10-09",
+    "observed_session_dates": [
+      "2026-10-09"
+    ],
+    "valid_time_count": 200,
+    "missing_time_count": 0,
+    "invalid_time_count": 0,
+    "market_time_min_utc": "2026-10-09T20:00:00+00:00",
+    "market_time_median_utc": "2026-10-09T20:00:02+00:00",
+    "market_time_max_utc": "2026-10-09T20:04:05+00:00",
+    "reason": "all market timestamps match the latest completed XNYS session"
+  },
+  "cross_validation": {
+    "passed": true,
+    "primary_count": 200,
+    "reference_count": 200,
+    "overlapping_tickers": 193,
+    "overlap_ratio": 0.965,
+    "comparable_market_caps": 193,
+    "market_caps_within_35_percent": 192,
+    "market_cap_agreement_ratio": 0.9948,
+    "reason": "independent Top-200 membership and market-cap checks passed"
+  },
+  "quality": {
+    "row_count": 200,
+    "price_coverage": 1.0,
+    "market_cap_coverage": 1.0,
+    "volume_coverage": 1.0,
+    "market_time_coverage": 1.0,
+    "sector_coverage": 0.96,
+    "country_coverage": 0.965,
+    "nonpositive_price_count": 0,
+    "nonpositive_market_cap_count": 0,
+    "negative_volume_count": 0
+  },
   "validation": {
     "exactly_200_companies": true,
     "unique_tickers": true,
     "unique_issuers": true,
     "positive_market_caps": true,
-    "market_caps_descending": true
+    "market_caps_descending": true,
+    "market_times_verified": true,
+    "independent_source_passed": true
   }
 }

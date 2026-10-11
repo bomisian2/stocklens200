@@ -4,8 +4,10 @@ from dataclasses import replace
 
 from stocklens.providers import (
     JsonHttpClient,
+    NasdaqUniverseProvider,
     UniverseRecord,
     YahooUniverseProvider,
+    _utc_from_epoch,
     is_company_security,
     issuer_key,
     rank_companies,
@@ -23,8 +25,10 @@ def record(ticker: str, name: str, cap: float, volume: float = 1) -> UniverseRec
         price=100,
         change_percent=1,
         volume=volume,
-        as_of="2026-01-01T00:00:00+00:00",
+        market_time_utc="2026-01-02T21:00:00+00:00",
+        collected_at_utc="2026-01-03T12:00:00+00:00",
         source="test",
+        metadata_source="test",
         issuer_key=issuer_key(name, ticker),
     )
 
@@ -98,3 +102,38 @@ def test_yahoo_retries_incomplete_payload() -> None:
     provider = YahooUniverseProvider(screen=fake_screen, attempts=2, backoff_seconds=0, sleep=lambda _: None)
     assert len(provider.fetch().records) == 200
     assert calls == 2
+
+
+def test_missing_yahoo_market_time_stays_missing() -> None:
+    assert _utc_from_epoch(None) is None
+    assert _utc_from_epoch("") is None
+
+
+class FakeClient:
+    def get(self, *args, **kwargs):
+        return {
+            "data": {
+                "asOf": None,
+                "rows": [
+                    {
+                        "symbol": f"N{i:03d}",
+                        "name": f"Nasdaq Company {i} Common Stock",
+                        "marketCap": 1_000_000 - i,
+                        "lastsale": "$10.00",
+                        "pctchange": "0.0%",
+                        "volume": "1000",
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "country": "United States",
+                    }
+                    for i in range(200)
+                ],
+            }
+        }
+
+
+def test_nasdaq_collection_time_is_not_used_as_market_time() -> None:
+    result = NasdaqUniverseProvider(client=FakeClient()).fetch()
+    assert len(result.records) == 200
+    assert all(record.market_time_utc is None for record in result.records)
+    assert all(record.collected_at_utc for record in result.records)

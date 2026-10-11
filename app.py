@@ -65,8 +65,18 @@ except (OSError, SnapshotError) as exc:
     st.stop()
 
 source = str(status.get("source") or frame["source"].iloc[0])
-data_time = str(status.get("market_data_as_of_utc") or frame["as_of"].max())
-if status.get("used_cache"):
+fallback_market_time = pd.to_datetime(frame["market_time_utc"], utc=True).median().isoformat()
+data_time = str(status.get("market_data_as_of_utc") or fallback_market_time)
+data_state = str(status.get("data_state") or ("degraded" if status.get("degraded") else "healthy"))
+market_session = str(status.get("market_session_date") or "확인 불가")
+if data_state == "stale":
+    st.error(
+        "신규 수집 검증에 실패했고 저장 데이터도 최신 완료 거래일보다 오래되었습니다. "
+        "이 스냅샷은 신규 매매 신호 계산에 사용할 수 없습니다."
+    )
+elif data_state == "unverified":
+    st.error("거래 시각을 검증할 수 없어 마지막 정상 스냅샷만 표시합니다. 신규 매매 신호는 보류됩니다.")
+elif status.get("used_cache"):
     st.warning(
         "외부 공급원이 모두 실패하여 마지막 정상 스냅샷을 표시합니다. "
         f"데이터 기준: {kst_display(data_time)}"
@@ -78,12 +88,14 @@ metrics = st.columns(4)
 metrics[0].metric("검증 기업 수", f"{len(frame):,}개")
 metrics[1].metric("후보 상장증권", f"{int(status.get('candidate_count') or 0):,}개")
 metrics[2].metric("200위 시가총액", f"${frame['market_cap'].iloc[-1] / 1e9:,.1f}B")
-metrics[3].metric("데이터 기준", kst_display(data_time).split(" KST")[0])
+metrics[3].metric("거래 세션", market_session)
 
 with st.sidebar:
     st.header("데이터 상태")
     st.write(SOURCE_LABELS.get(source, source))
-    st.caption(f"스냅샷: {kst_display(data_time)}")
+    st.caption(f"상태: {data_state} · 거래 세션: {market_session}")
+    st.caption(f"시장 시각 중앙값: {kst_display(data_time)}")
+    st.caption(f"수집 시각: {kst_display(status.get('data_generated_at_utc'))}")
     st.caption("앱 화면에서는 외부 금융 API를 호출하지 않습니다.")
     if st.button("저장 데이터 다시 읽기", width="stretch"):
         st.cache_data.clear()

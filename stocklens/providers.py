@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Protocol
 
@@ -32,8 +32,10 @@ class UniverseRecord:
     price: float | None
     change_percent: float | None
     volume: float | None
-    as_of: str
+    market_time_utc: str | None
+    collected_at_utc: str
     source: str
+    metadata_source: str
     issuer_key: str
 
 
@@ -95,10 +97,10 @@ def issuer_key(name: str, ticker: str) -> str:
     return cleaned or normalize_ticker(ticker)
 
 
-def _utc_from_epoch(value: Any) -> str:
+def _utc_from_epoch(value: Any) -> str | None:
     epoch = _number(value)
     if not epoch:
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return None
     return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -119,7 +121,7 @@ class JsonHttpClient:
         last_error = "unknown error"
         for attempt in range(self.attempts):
             try:
-                response = self.session.get(url, params=params, headers=headers, timeout=(5, 15))
+                response = self.session.get(url, params=params, headers=headers, timeout=(5, 45))
                 if 200 <= response.status_code < 300:
                     payload = response.json()
                     if not isinstance(payload, dict):
@@ -148,14 +150,19 @@ class NasdaqUniverseProvider:
             headers={
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.9",
-                "User-Agent": "Mozilla/5.0 (compatible; StockLens200/2.0; +https://github.com/bomisian2/stocklens200)",
+                "Origin": "https://www.nasdaq.com",
+                "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/140 Safari/537.36 StockLens200/2.0"
+                ),
             },
         )
         rows = ((payload.get("data") or {}).get("rows") or [])
         if not isinstance(rows, list) or len(rows) < 200:
             raise ProviderError("Nasdaq response did not contain a complete equity universe")
 
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         records: list[UniverseRecord] = []
         for row in rows:
             symbol = normalize_ticker(row.get("symbol"))
@@ -174,8 +181,14 @@ class NasdaqUniverseProvider:
                     price=_number(row.get("lastsale")),
                     change_percent=_number(row.get("pctchange")),
                     volume=_number(row.get("volume")),
-                    as_of=now,
+                    # The free Nasdaq screener exposes no authoritative quote timestamp
+                    # (`data.asOf` is currently null). Collection time is never treated
+                    # as market time; this result can verify/enrich a Yahoo snapshot but
+                    # cannot independently replace a fresh last-good snapshot.
+                    market_time_utc=None,
+                    collected_at_utc=collected_at,
                     source=self.name,
+                    metadata_source=self.name,
                     issuer_key=issuer_key(name, symbol),
                 )
             )
@@ -240,6 +253,7 @@ class YahooUniverseProvider:
         rows = payload.get("quotes") or []
         if not isinstance(rows, list) or len(rows) < 200:
             raise ProviderError("Yahoo response did not contain at least 200 equities")
+        collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         records: list[UniverseRecord] = []
         for row in rows:
             symbol = normalize_ticker(row.get("symbol"))
@@ -259,8 +273,10 @@ class YahooUniverseProvider:
                     price=_number(row.get("regularMarketPrice")),
                     change_percent=_number(row.get("regularMarketChangePercent")),
                     volume=_number(row.get("regularMarketVolume")),
-                    as_of=_utc_from_epoch(row.get("regularMarketTime")),
+                    market_time_utc=_utc_from_epoch(row.get("regularMarketTime")),
+                    collected_at_utc=collected_at,
                     source=self.name,
+                    metadata_source=self.name,
                     issuer_key=issuer_key(name, symbol),
                 )
             )
@@ -275,3 +291,26 @@ def rank_companies(records: Iterable[UniverseRecord], limit: int = 200) -> list[
         if current is None or (record.volume or 0) > (current.volume or 0):
             best_by_issuer[record.issuer_key] = record
     return sorted(best_by_issuer.values(), key=lambda row: row.market_cap, reverse=True)[:limit]
+
+
+def enrich_metadata(
+    records: Iterable[UniverseRecord], metadata_records: Iterable[UniverseRecord]
+) -> list[UniverseRecord]:
+    """Fill descriptive fields from an independent exact-ticker source."""
+    metadata_by_ticker = {record.ticker: record for record in metadata_records}
+    enriched: list[UniverseRecord] = []
+    for record in records:
+        metadata = metadata_by_ticker.get(record.ticker)
+        if metadata is None:
+            enriched.append(record)
+            continue
+        enriched.append(
+            replace(
+                record,
+                sector=metadata.sector if metadata.sector != "Unknown" else record.sector,
+                industry=metadata.industry if metadata.industry != "Unknown" else record.industry,
+                country=metadata.country if metadata.country != "Unknown" else record.country,
+                metadata_source=metadata.source,
+            )
+        )
+    return enriched

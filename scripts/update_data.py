@@ -20,7 +20,8 @@ def main() -> int:
     result = update_universe(SnapshotStore(args.data_dir))
     print(
         f"universe_count={len(result.frame)} source={result.source} "
-        f"used_cache={str(result.used_cache).lower()} provider_errors={len(result.errors)}"
+        f"state={result.state} used_cache={str(result.used_cache).lower()} "
+        f"provider_errors={len(result.errors)}"
     )
     for error in result.errors:
         print(f"warning={error}")
