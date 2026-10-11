@@ -18,12 +18,18 @@ SOURCE_LABELS = {
     "last_good_cache": "마지막 정상 스냅샷(캐시)",
 }
 
-st.set_page_config(page_title="StockLens 200 v2", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="StockLens 200 v2",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 st.markdown(
     """
     <style>
     .block-container {padding-top: 1.2rem; max-width: 1500px;}
     div[data-testid="stMetric"] {background: #13283a; border: 1px solid #24445c; border-radius: 14px; padding: 14px;}
+    div[data-testid="stMetric"] * {color: #f8fafc !important;}
     @media (max-width: 700px) {
       .block-container {padding: .8rem .65rem 4rem;}
       div[data-testid="stMetric"] {padding: 10px;}
