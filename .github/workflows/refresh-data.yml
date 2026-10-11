@@ -33,6 +33,10 @@ jobs:
         run: python scripts/update_data.py
       - name: Validate refreshed snapshot
         run: python scripts/validate_snapshot.py --strict
+      - name: Refresh SEC financials and valuations
+        run: python scripts/update_valuations.py
+      - name: Validate valuation snapshot
+        run: python scripts/validate_valuations.py
       - name: Commit changed snapshots
         run: |
           if git diff --quiet -- data/; then
@@ -41,6 +45,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/universe.csv data/status.json
+          git add data/universe.csv data/status.json data/financials.csv data/valuations.csv data/valuation_history.csv data/valuation_status.json
           git commit -m "data: refresh StockLens 200 snapshot"
           git push

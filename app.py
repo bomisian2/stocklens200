@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import json
 
 import pandas as pd
 import streamlit as st
@@ -163,10 +164,84 @@ with tab_universe:
 with tab_value:
     valuation_path = DATA_DIR / "valuations.csv"
     if valuation_path.exists():
-        st.dataframe(pd.read_csv(valuation_path), hide_index=True, width="stretch")
+        valuations = pd.read_csv(valuation_path)
+        valuation_status_path = DATA_DIR / "valuation_status.json"
+        valuation_status = (
+            json.loads(valuation_status_path.read_text(encoding="utf-8"))
+            if valuation_status_path.exists()
+            else {}
+        )
+        evaluated = valuations[valuations["status"] == "evaluated"].copy()
+        value_metrics = st.columns(4)
+        value_metrics[0].metric("분석 완료", f"{len(evaluated):,}개")
+        value_metrics[1].metric("판단 보류", f"{len(valuations) - len(evaluated):,}개")
+        value_metrics[2].metric("저평가 판정", f"{int(evaluated['judgement'].eq('저평가').sum()):,}개")
+        value_metrics[3].metric("모델 버전", str(valuation_status.get("model_version") or "확인 불가"))
+
+        st.caption(
+            f"평가 시장 기준: {kst_display(valuation_status.get('valuation_as_of_market_utc'))} · "
+            "SEC 제출 재무와 공식 미 국채금리를 사용하며 현재 주가는 적정가 계산식에 넣지 않습니다."
+        )
+        view_columns = [
+            "ticker", "company_name", "price", "conservative_value", "base_value",
+            "optimistic_value", "upside_to_base", "favorable_buy_low", "favorable_buy_high",
+            "confidence_score", "judgement", "status",
+        ]
+        table = valuations[view_columns].rename(
+            columns={
+                "ticker": "티커", "company_name": "기업명", "price": "현재가",
+                "conservative_value": "보수 적정가", "base_value": "기본 적정가",
+                "optimistic_value": "낙관 적정가", "upside_to_base": "기본 대비 여력",
+                "favorable_buy_low": "매수 구간 하단", "favorable_buy_high": "매수 구간 상단",
+                "confidence_score": "신뢰도", "judgement": "판단", "status": "상태",
+            }
+        )
+        table["기본 대비 여력"] = table["기본 대비 여력"] * 100
+        st.dataframe(
+            table,
+            hide_index=True,
+            width="stretch",
+            height=500,
+            column_config={
+                "현재가": st.column_config.NumberColumn(format="$%.2f"),
+                "보수 적정가": st.column_config.NumberColumn(format="$%.2f"),
+                "기본 적정가": st.column_config.NumberColumn(format="$%.2f"),
+                "낙관 적정가": st.column_config.NumberColumn(format="$%.2f"),
+                "기본 대비 여력": st.column_config.NumberColumn(format="%+.1f%%"),
+                "매수 구간 하단": st.column_config.NumberColumn(format="$%.2f"),
+                "매수 구간 상단": st.column_config.NumberColumn(format="$%.2f"),
+                "신뢰도": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+            },
+        )
+
+        selected_ticker = st.selectbox("상세 계산 확인", valuations["ticker"].tolist())
+        selected = valuations[valuations["ticker"] == selected_ticker].iloc[0]
+        st.subheader(f"{selected_ticker} · {selected['company_name']}")
+        if selected["status"] != "evaluated":
+            st.warning(f"판단 보류: {selected['change_reason']}")
+        else:
+            st.write(f"**성장 동력:** {selected['growth_drivers']}")
+            st.write(f"**위험 요인:** {selected['risk_factors']}")
+            st.write(f"**사용 모델:** {selected['methods_used']} · 신뢰도 {int(selected['confidence_score'])}/100")
+            st.write(f"**EPS 전망 수정 추세:** {selected['eps_revision_trend']}")
+            with st.expander("모델별 계산 근거"):
+                st.json(json.loads(selected["model_details_json"]))
+
+        history_path = DATA_DIR / "valuation_history.csv"
+        if history_path.exists():
+            history = pd.read_csv(history_path)
+            history = history[history["ticker"] == selected_ticker].sort_values("evaluated_at_utc")
+            if not history.empty:
+                st.caption("날짜별 적정가 변화")
+                st.dataframe(history, hide_index=True, width="stretch")
+        limitations = valuation_status.get("limitations") or []
+        if limitations:
+            with st.expander("현재 데이터 제약"):
+                for limitation in limitations:
+                    st.write(f"- {limitation}")
     else:
-        st.warning("2단계 미완료: 재무 항목 교차검증과 적정가 엔진은 아직 운영 데이터로 검증되지 않았습니다.")
-        st.write("예정 검증: EPS 일관성 · 이익/매출 성장 · 잉여현금흐름 · 순부채 · 업종별 PER 범위")
+        st.warning("2단계 개발 중: 검증된 적정가 스냅샷이 아직 생성되지 않았습니다.")
+        st.write("SEC 재무 수집·시점 검증·모델 입력 게이트를 통과한 결과만 이 탭에 표시합니다.")
 
 with tab_signal:
     signals_path = DATA_DIR / "signals.csv"

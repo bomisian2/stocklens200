@@ -41,3 +41,39 @@ jobs:
         run: python scripts/update_data.py --data-dir "$RUNNER_TEMP/stocklens-live"
       - name: Validate the fresh snapshot
         run: python scripts/validate_snapshot.py --strict --data-dir "$RUNNER_TEMP/stocklens-live"
+
+  live-valuation-sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Prepare isolated snapshot directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/stocklens-valuation"
+          cp data/universe.csv data/status.json "$RUNNER_TEMP/stocklens-valuation/"
+      - name: Calculate point-in-time sample valuations
+        run: >-
+          python scripts/update_valuations.py
+          --data-dir "$RUNNER_TEMP/stocklens-valuation"
+          --tickers GOOGL AMAT AVGO QCOM
+          --allow-partial
+      - name: Validate the four-company sample
+        run: >-
+          python scripts/validate_valuations.py
+          --data-dir "$RUNNER_TEMP/stocklens-valuation"
+          --allow-partial
+          --require-tickers GOOGL AMAT AVGO QCOM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: valuation-sample
+          path: |
+            ${{ runner.temp }}/stocklens-valuation/financials.csv
+            ${{ runner.temp }}/stocklens-valuation/valuations.csv
+            ${{ runner.temp }}/stocklens-valuation/valuation_status.json
+          retention-days: 7

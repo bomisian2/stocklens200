@@ -2,7 +2,7 @@
 
 미국 거래소 상장기업 전체에서 시가총액 상위 200개 **기업**을 매일 선정하고, 저장된 결과만 빠르게 보여 주는 Streamlit 대시보드입니다.
 
-## 현재 완료 범위: v2 1단계
+## 현재 완료 범위
 
 - Yahoo 거래소 스크리너를 1차 공급원으로 사용합니다.
 - Nasdaq 미국 상장증권 전체 스크리너를 독립 시총·구성 검증 및 섹터·국가 보강 소스로 사용합니다.
@@ -20,13 +20,26 @@
 
 Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시각을 제공하지 않으므로 수집 실행 시각을 거래 시각으로 대체하지 않습니다. 따라서 Nasdaq 결과만으로 최신 스냅샷을 덮어쓰지 않으며, Yahoo 결과의 독립 검증과 메타데이터 보강에 사용합니다.
 
-`engine.py`의 기존 적정가/신호 코드는 프로토타입 참고용이며 v2 앱에 연결되어 있지 않습니다. 재무 데이터의 시점 일관성, QQQ 벤치마크, 워크포워드 검증이 끝나기 전까지 정상 기능으로 표시하지 않습니다.
+`engine.py`의 기존 적정가/신호 코드는 프로토타입 참고용이며 v2 앱에 연결하지 않습니다. 2단계 적정가는 `stocklens/valuation.py`의 버전 고정 모델만 사용하고, 3단계 신호는 QQQ 벤치마크와 워크포워드 검증이 끝나기 전까지 정상 기능으로 표시하지 않습니다.
+
+### v2 2단계 Draft: 자동 적정가 엔진
+
+- 공식 SEC EDGAR `companyfacts`와 `submissions`에서 최근 5개 연도의 GAAP 재무와 실제 이용 가능 시각을 수집합니다.
+- 공식 U.S. Treasury 10년 금리를 시장 기준일 이전의 할인율 입력으로 사용합니다.
+- 정규화 EPS×PER, FCF DCF, EV/EBITDA 및 금융업 전용 residual P/B 중 입력 게이트를 통과한 모델만 자동 선택합니다.
+- 모델 버전, 원천 URL, 제출일, 접수시각, 보수/기본/낙관 값, 자동 안전마진, 신뢰도와 보류 사유를 저장합니다.
+- 현재 주가는 적정가 계산식에서 제외하고 계산이 끝난 뒤 저평가율과 판단에만 사용합니다.
+- REIT의 검증된 FFO/AFFO, IFRS ADR, 재배포 가능한 분석가 컨센서스가 없으면 정상 값으로 대체하지 않고 판단을 보류합니다.
+- 앱은 `data/valuations.csv`와 이력 파일만 읽으며 SEC나 Treasury에 직접 접속하지 않습니다.
+
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md)에 기록했습니다.
 
 ## 로컬 실행
 
 ```bash
 python -m pip install -r requirements.txt
 python scripts/update_data.py
+python scripts/update_valuations.py
 streamlit run app.py
 ```
 
@@ -36,12 +49,17 @@ streamlit run app.py
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python scripts/validate_snapshot.py --strict
+python scripts/validate_valuations.py
 ```
 
 ## 데이터 파일
 
 - `data/universe.csv`: 순위, 티커, 기업명, 섹터/국가, 시가총액, 최근가, 거래 시각, 별도 수집 시각, 데이터·메타데이터 공급원
 - `data/status.json`: 거래 세션, 시각 범위와 중앙값, 수집 시각, `healthy/degraded/stale/unverified`, 캐시 여부, 품질·교차검증 결과
+- `data/financials.csv`: SEC 제출 재무, 회계연도·양식·접수번호·시장 이용 가능 시각과 검증 상태
+- `data/valuations.csv`: 기업별 시나리오 적정가, 매수 유리 구간, 신뢰도, 판단과 모델 근거
+- `data/valuation_history.csv`: 날짜별 적정가 변화 이력
+- `data/valuation_status.json`: 모델 버전, 평가/보류 수, 공식 금리 입력, 공급원 오류와 알려진 제약
 
 스냅샷 저장은 임시 파일 작성 후 교체하는 원자적 방식입니다. 200개 미만, 중복 기업, 비정상 순위, 음수/누락 시가총액, 가격·거래량 커버리지 미달, 거래·수집 시각 오류, 독립 검증 실패, 섹터·국가 커버리지 80% 미만이면 새 스냅샷으로 인정하지 않습니다. 실패 시 CSV를 덮어쓰지 않고 상태만 갱신하며 `eligible_for_signals=false`로 기록합니다.
 
@@ -77,11 +95,11 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
 
 ## 다음 단계(아직 미완료)
 
-1. SEC 재무 원천과 보조 공급원을 이용한 EPS·실적·FCF·성장률·PER 교차검증
-2. 보수/기본/낙관 적정가, 저평가율, 자동 매수 유리 구간, 신뢰도와 근거의 날짜별 저장
-3. 가격 이력의 point-in-time 저장과 EMA Crossback, 돌파, 눌림목, RSI 회복 워크포워드 검증
-4. 5/10/20거래일 승률·평균수익·손익비·최대낙폭·QQQ 초과수익 및 최소 표본 게이트
-5. 검증 통과 신호만 상단에 표시하고 모바일 카드형 기록 화면 제공
+1. 재배포 가능한 독립 재무 공급원을 확보해 SEC 재무를 교차검증
+2. 무료·point-in-time 분석가 컨센서스 및 기업 가이던스 출처 확보
+3. IFRS ADR 태그와 REIT FFO/AFFO 전용 정규화
+4. 가격 이력의 point-in-time 저장과 EMA Crossback, 돌파, 눌림목, RSI 회복 워크포워드 검증
+5. 5/10/20거래일 승률·평균수익·손익비·최대낙폭·QQQ 초과수익 및 최소 표본 게이트
 
 ## 데이터 한계
 
