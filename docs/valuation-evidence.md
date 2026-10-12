@@ -30,6 +30,14 @@ with `allow_fixture=False`, so fixture data cannot enter an operational valuatio
 GOOGL, AMAT, AVGO, QCOM and INTC remain on hold until official financial inputs and a non-fixture,
 source-attributed evidence bundle are both available.
 
+## Legacy asset boundary
+
+Use `scripts/audit_legacy_assets.py SOURCE_ROOT` before proposing a legacy-data migration. The command
+is read-only, counts actual JSON observations separately from code-name matches, and never emits
+valuation evidence. A legacy source becomes adapter-ready only after its original schema and
+provenance are visible. The current audit found no accessible 39-stock `bandTable` or
+`analystLog.oneTime` dataset; see `docs/legacy-stocklens-asset-audit.md`.
+
 ## Band and state transition
 
 The engine combines model scenario width, disagreement among models, forecast dispersion, historical
