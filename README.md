@@ -39,7 +39,7 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
 - 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
-설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), FCFF·WACC·주주가치 변환 게이트는 [`docs/adr/0003-fcff-economic-definition-gate.md`](docs/adr/0003-fcff-economic-definition-gate.md), 연구 시나리오의 증거 상태 경계는 [`docs/adr/0004-research-scenario-evidence-states.md`](docs/adr/0004-research-scenario-evidence-states.md), EV→보통주 가치 게이트는 [`docs/adr/0005-enterprise-to-common-equity-bridge.md`](docs/adr/0005-enterprise-to-common-equity-bridge.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), GOOGL 공식 IR·TTM 실증은 [`docs/googl-ir-pilot.md`](docs/googl-ir-pilot.md), DCF·역산 DCF 감사는 [`docs/googl-dcf-audit.md`](docs/googl-dcf-audit.md), FCFF v2.2 감사는 [`docs/googl-fcff-v2.2-audit.md`](docs/googl-fcff-v2.2-audit.md), v2.3 연구 시나리오 결과는 [`docs/googl-scenario-v2.3-audit.md`](docs/googl-scenario-v2.3-audit.md), v2.4 주주가치 브리지 감사는 [`docs/googl-equity-bridge-v2.4-audit.md`](docs/googl-equity-bridge-v2.4-audit.md), v2.4.1 실무형 참고 가치 검증은 [`docs/googl-practical-value-v2.4.1.md`](docs/googl-practical-value-v2.4.1.md), 외부 라이브러리 격리 PoC는 [`docs/open-source-library-poc.md`](docs/open-source-library-poc.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), FCFF·WACC·주주가치 변환 게이트는 [`docs/adr/0003-fcff-economic-definition-gate.md`](docs/adr/0003-fcff-economic-definition-gate.md), 연구 시나리오의 증거 상태 경계는 [`docs/adr/0004-research-scenario-evidence-states.md`](docs/adr/0004-research-scenario-evidence-states.md), EV→보통주 가치 게이트는 [`docs/adr/0005-enterprise-to-common-equity-bridge.md`](docs/adr/0005-enterprise-to-common-equity-bridge.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), GOOGL 공식 IR·TTM 실증은 [`docs/googl-ir-pilot.md`](docs/googl-ir-pilot.md), DCF·역산 DCF 감사는 [`docs/googl-dcf-audit.md`](docs/googl-dcf-audit.md), FCFF v2.2 감사는 [`docs/googl-fcff-v2.2-audit.md`](docs/googl-fcff-v2.2-audit.md), v2.3 연구 시나리오 결과는 [`docs/googl-scenario-v2.3-audit.md`](docs/googl-scenario-v2.3-audit.md), v2.4 주주가치 브리지 감사는 [`docs/googl-equity-bridge-v2.4-audit.md`](docs/googl-equity-bridge-v2.4-audit.md), v2.4.1 실무형 참고 가치 검증은 [`docs/googl-practical-value-v2.4.1.md`](docs/googl-practical-value-v2.4.1.md), 격리 연구 UI는 [`docs/googl-research-preview.md`](docs/googl-research-preview.md), 외부 라이브러리 격리 PoC는 [`docs/open-source-library-poc.md`](docs/open-source-library-poc.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
 
 ## 로컬 실행
 
@@ -59,6 +59,12 @@ Remove-Item Env:STOCKLENS_SEC_CONTACT
 ```
 
 첫 GOOGL Company Facts 요청이 403이면 재시도, 프록시, IP 변경, Submissions 및 다른 기업 요청 없이 종료합니다. 성공하면 공식 ticker map과 GOOGL·AMAT·AVGO·QCOM·INTC의 Company Facts/Submissions를 0.6초 이상 간격으로 각각 한 번만 받아 SHA-256 manifest 및 검증 결과를 `data/sec-import/<UTC 실행시각>/`에 저장합니다. 이 원본 디렉터리는 Git에서 제외됩니다.
+
+GOOGL B등급 연구 결과를 운영 앱과 분리해 확인하려면 다음 명령을 사용합니다. 이 앱은 `research/`의 비운영 스냅샷만 읽으며 `data/valuations.csv`, 신호, 알림 및 Top 200 정렬에 연결되지 않습니다.
+
+```powershell
+streamlit run research_preview.py
+```
 
 테스트:
 
