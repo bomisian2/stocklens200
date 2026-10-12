@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,16 +14,78 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from stocklens.history import YahooHistoryCollector  # noqa: E402
+from stocklens.market_calendar import next_session_date  # noqa: E402
 from stocklens.signal_storage import SignalStore  # noqa: E402
 from stocklens.signals import (  # noqa: E402
     HORIZONS,
     SIGNAL_VERSION,
     STRATEGIES,
     apply_fdr,
+    calculate_signals,
     evaluate_strategy,
     latest_active_signals,
+    strategy_overlap,
 )
 from stocklens.storage import SnapshotStore  # noqa: E402
+
+
+def historical_concentration(
+    universe: pd.DataFrame, frames: dict[str, pd.DataFrame]
+) -> dict:
+    sector_by_ticker = universe.set_index("ticker")["sector"].to_dict()
+    events: list[dict] = []
+    for ticker, history in frames.items():
+        if ticker == "QQQ":
+            continue
+        calculated = calculate_signals(history)
+        for strategy in STRATEGIES:
+            for signal_date in calculated.loc[calculated[strategy], "date"]:
+                events.append({
+                    "date": pd.Timestamp(signal_date).date().isoformat(),
+                    "ticker": ticker,
+                    "sector": sector_by_ticker.get(ticker, "Unknown"),
+                    "strategy": strategy,
+                })
+    if not events:
+        return {
+            "signal_days": 0,
+            "maximum_same_day_tickers": 0,
+            "p95_same_day_tickers": 0.0,
+            "multi_strategy_ticker_day_ratio": 0.0,
+            "median_largest_sector_share": None,
+            "maximum_sector_signal_count_correlation": None,
+        }
+    frame = pd.DataFrame(events)
+    ticker_day = frame.groupby(["date", "ticker"]).size()
+    daily_tickers = ticker_day.groupby("date").size()
+    sector_daily = (
+        frame.drop_duplicates(["date", "ticker"])
+        .groupby(["date", "sector"])["ticker"]
+        .nunique()
+        .unstack(fill_value=0)
+    )
+    largest_sector_shares = sector_daily.max(axis=1) / sector_daily.sum(axis=1)
+    correlations = sector_daily.corr(min_periods=20)
+    if len(correlations) > 1:
+        mask = ~pd.DataFrame(
+            np.eye(len(correlations), dtype=bool),
+            index=correlations.index,
+            columns=correlations.columns,
+        )
+        correlation_values = correlations.where(mask).stack()
+        max_correlation = (
+            float(correlation_values.abs().max()) if not correlation_values.empty else None
+        )
+    else:
+        max_correlation = None
+    return {
+        "signal_days": int(len(daily_tickers)),
+        "maximum_same_day_tickers": int(daily_tickers.max()),
+        "p95_same_day_tickers": float(daily_tickers.quantile(0.95)),
+        "multi_strategy_ticker_day_ratio": float((ticker_day > 1).mean()),
+        "median_largest_sector_share": float(largest_sector_shares.median()),
+        "maximum_sector_signal_count_correlation": max_correlation,
+    }
 
 
 def main() -> int:
@@ -81,6 +144,7 @@ def main() -> int:
 
     result_objects = []
     for ticker in available_tickers:
+        overlap = strategy_overlap(collection.frames[ticker])
         for strategy in STRATEGIES:
             for horizon in HORIZONS:
                 result, _ = evaluate_strategy(
@@ -89,19 +153,26 @@ def main() -> int:
                     benchmark=qqq,
                     strategy=strategy,
                     horizon=horizon,
+                    maximum_strategy_overlap=overlap[strategy],
                 )
                 result_objects.append(result)
 
     result_objects = apply_fdr(result_objects)
     backtests = [result.to_dict() for result in result_objects]
     signals = []
+    expected_entry_date = next_session_date(expected_session)
+    complete_cross_section = len(available_tickers) == len(tickers) and qqq is not None
     for ticker in available_tickers:
         ticker_results = [result for result in result_objects if result.ticker == ticker]
         signals.extend(latest_active_signals(
             ticker=ticker,
             asset=collection.frames[ticker],
             backtests=ticker_results,
+            next_session_date=expected_entry_date,
         ))
+
+    if not complete_cross_section:
+        signals = []
 
     backtest_frame = pd.DataFrame(backtests)
     signal_frame = pd.DataFrame(signals)
@@ -112,9 +183,36 @@ def main() -> int:
     store = SignalStore(args.data_dir)
     if backtest_frame.empty:
         raise RuntimeError("no backtest output was produced")
+    validated_count = int(backtest_frame["validated"].astype(bool).sum())
+    research_candidate_count = int(backtest_frame["research_candidate"].astype(bool).sum())
+    state_counts = {
+        str(key): int(value)
+        for key, value in backtest_frame["validation_state"].value_counts().items()
+    }
+    historical_concentration_summary = historical_concentration(
+        universe, {ticker: collection.frames[ticker] for ticker in available_tickers}
+    )
+    if signal_frame.empty:
+        concentration = {
+            "active_tickers": 0,
+            "active_sectors": 0,
+            "largest_sector_share": None,
+            "same_ticker_multi_strategy_count": 0,
+        }
+    else:
+        sector_by_ticker = universe.set_index("ticker")["sector"].to_dict()
+        signal_frame["sector"] = signal_frame["ticker"].map(sector_by_ticker).fillna("Unknown")
+        sector_counts = signal_frame.drop_duplicates("ticker")["sector"].value_counts()
+        concentration = {
+            "active_tickers": int(signal_frame["ticker"].nunique()),
+            "active_sectors": int(len(sector_counts)),
+            "largest_sector_share": float(sector_counts.max() / sector_counts.sum()),
+            "same_ticker_multi_strategy_count": int(
+                signal_frame.loc[signal_frame["signal_cluster_size"] > 1, "ticker"].nunique()
+            ),
+        }
     store.save_backtests(backtest_frame)
     store.save_signals(signal_frame, expected_session=expected_session)
-    validated_count = int(backtest_frame["validated"].astype(bool).sum())
     status = {
         "schema_version": 1,
         "signal_version": SIGNAL_VERSION,
@@ -129,36 +227,46 @@ def main() -> int:
         "fresh_history_ticker_count": len(collection.fresh_tickers & set(tickers)),
         "cached_history_ticker_count": len(collection.cached_tickers & set(tickers)),
         "backtest_count": len(backtest_frame),
+        "research_candidate_count": research_candidate_count,
         "validated_backtest_count": validated_count,
         "active_validated_signal_count": len(signal_frame),
+        "validation_state_counts": state_counts,
+        "signal_concentration": concentration,
+        "historical_signal_concentration": historical_concentration_summary,
         "provider_errors": collection.errors[:200],
         "universe_bias_state": "current_constituents_only",
         "limitations": [
             "Historical Top-200 membership is not yet available; results have survivorship and selection bias.",
             "Yahoo/yfinance history is approved for development validation only; production redistribution review is pending.",
             "Adjusted history can be revised by later corporate actions; point-in-time adjustment factors are not yet archived.",
-            "Maximum drawdown is measured on closed-trade equity and excludes intratrade mark-to-market drawdown.",
+            "Daily close MTM drawdown and intratrade low/high MAE/MFE are estimates from daily bars, not intraday execution records.",
             "A validated backtest is a statistical research result, not a recommendation or guaranteed forecast.",
         ],
         "data_state": (
             "healthy" if len(available_tickers) == len(tickers) and qqq is not None
             else "degraded" if available_tickers and qqq is not None else "unverified"
         ),
-        "eligible_for_display": bool(len(signal_frame)),
+        "eligible_for_display": bool(len(signal_frame)) and complete_cross_section,
         "methodology": {
             "signal_time": "session close",
             "entry": "next aligned session open",
             "exit": "close after 5, 10, or 20 trading sessions from signal",
             "round_trip_cost": 0.002,
+            "stressed_round_trip_cost": 0.006,
+            "benchmark_cost": "QQQ receives the same entry/exit cost assumption",
             "split": (
-                "chronological 70% training / 30% out-of-sample test; "
-                "test segment checked in up to three sequential stability folds"
+                "first 80% development period with expanding chronological walk-forward folds; "
+                "last 20% untouched final confirmation period"
+            ),
+            "dependence_control": (
+                "circular moving-block bootstrap p-values and Benjamini-Yekutieli FDR; "
+                "same-day strategy overlap recorded with Jaccard similarity"
             ),
             "non_overlapping_trades": True,
             "publication_gate": (
-                "minimum samples, positive train/test QQQ excess return, test payoff > 1, "
-                "positive 95% bootstrap lower bound, positive excess return in at least "
-                "two-thirds of sequential test folds, and Benjamini-Hochberg FDR q <= 0.05"
+                "development research gate, at least 80 total and 20 untouched-final trades, "
+                "positive final QQQ excess lower bound, payoff > 1, positive return at 60 bps, "
+                "and dependence-robust FDR q <= 0.05"
             ),
         },
     }
@@ -168,6 +276,7 @@ def main() -> int:
         "history_available": len(available_tickers),
         "backtests": len(backtest_frame),
         "validated_backtests": validated_count,
+        "research_candidates": research_candidate_count,
         "active_signals": len(signal_frame),
         "data_state": status["data_state"],
     }, ensure_ascii=False, sort_keys=True))

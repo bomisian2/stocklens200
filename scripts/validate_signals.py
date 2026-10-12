@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from stocklens.signals import MIN_FINAL_SAMPLES, MIN_INDEPENDENT_TOTAL
 
 
 def main() -> int:
@@ -25,24 +31,30 @@ def main() -> int:
         raise RuntimeError(f"backtest count {len(backtests)} != {expected_backtests}")
     validated = backtests["validated"].astype(str).str.lower().eq("true")
     required = {
-        "test_fold_count", "positive_test_folds", "test_excess_ci_low",
-        "test_excess_pvalue", "fdr_qvalue",
+        "walk_forward_fold_count", "positive_walk_forward_folds",
+        "final_samples", "final_period_start", "final_mtm_max_drawdown", "final_excess_ci_low",
+        "final_excess_pvalue", "fdr_qvalue", "validation_state",
+        "independent_validated",
     }
     missing = required - set(backtests.columns)
     if missing:
         raise RuntimeError(f"backtest validation columns missing: {sorted(missing)}")
     if pd.to_numeric(backtests.loc[validated, "fdr_qvalue"], errors="coerce").gt(0.05).any():
         raise RuntimeError("validated backtest failed the FDR gate")
-    required_folds = (
-        pd.to_numeric(backtests.loc[validated, "test_fold_count"]) * 2 / 3
-    ).apply(math.ceil)
-    if (
-        pd.to_numeric(backtests.loc[validated, "positive_test_folds"]).to_numpy()
-        < required_folds.to_numpy()
-    ).any():
-        raise RuntimeError("validated backtest failed the sequential-fold gate")
+    if pd.to_numeric(
+        backtests.loc[validated, "total_samples"], errors="coerce"
+    ).lt(MIN_INDEPENDENT_TOTAL).any():
+        raise RuntimeError("validated backtest failed the total-sample gate")
+    if pd.to_numeric(
+        backtests.loc[validated, "final_samples"], errors="coerce"
+    ).lt(MIN_FINAL_SAMPLES).any():
+        raise RuntimeError("validated backtest failed the untouched-final gate")
+    if not backtests.loc[validated, "validation_state"].eq("independent_validated").all():
+        raise RuntimeError("validated backtest has an inconsistent state")
+    if available != selected and not signals.empty:
+        raise RuntimeError("active signals must be held when cross-sectional coverage is partial")
     if not signals.empty:
-        if not signals["status"].eq("validated").all():
+        if not signals["status"].eq("current_active").all():
             raise RuntimeError("unvalidated active signal was published")
         if pd.to_numeric(signals["excess_ci_low"], errors="coerce").le(0).any():
             raise RuntimeError("active signal failed the excess-return confidence gate")

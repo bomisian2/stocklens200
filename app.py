@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,7 +12,7 @@ from stocklens.storage import SnapshotError, SnapshotStore
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("STOCKLENS_DATA_DIR", ROOT / "data"))
 SOURCE_LABELS = {
     "nasdaq_screener": "Nasdaq 전체 상장 종목",
     "yahoo_screener": "Yahoo 거래소 스크리너",
@@ -128,15 +129,18 @@ if not top_signals.empty:
     )
     top_view = top_signals[
         [
-            "ticker", "strategy_label", "signal_date", "best_horizon", "test_samples",
-            "win_rate", "average_return", "payoff_ratio", "max_drawdown",
-            "average_excess_return",
+            "ticker", "strategy_label", "signal_date", "entry_expected_date",
+            "best_horizon", "validation_samples", "win_rate", "expected_return",
+            "average_excess_return", "payoff_ratio", "mtm_max_drawdown",
+            "average_mae", "confidence",
         ]
     ].rename(columns={
         "ticker": "티커", "strategy_label": "전략", "signal_date": "신호일",
-        "best_horizon": "검증기간", "test_samples": "검증표본", "win_rate": "승률",
-        "average_return": "평균수익", "payoff_ratio": "손익비",
-        "max_drawdown": "최대낙폭", "average_excess_return": "QQQ 초과수익",
+        "entry_expected_date": "진입 예정일", "best_horizon": "검증기간",
+        "validation_samples": "독립표본", "win_rate": "승률",
+        "expected_return": "기대수익", "average_excess_return": "QQQ 초과수익",
+        "payoff_ratio": "손익비", "mtm_max_drawdown": "보유 중 MTM 낙폭",
+        "average_mae": "평균 MAE", "confidence": "신뢰도",
     })
     st.dataframe(top_view, hide_index=True, width="stretch")
 
@@ -222,14 +226,26 @@ with tab_signal:
         else:
             st.dataframe(top_signals, hide_index=True, width="stretch")
         backtests = pd.read_csv(backtests_path)
-        st.subheader("전략별 시점 외 검증")
+        state_labels = {
+            "research_candidate": "연구 후보",
+            "independent_validated": "독립 검증 통과",
+            "data_insufficient": "데이터 불충분",
+            "not_validated": "검증 미통과",
+        }
+        if "validation_state" in backtests:
+            backtests["validation_state_label"] = backtests["validation_state"].map(
+                state_labels
+            ).fillna(backtests["validation_state"])
+        st.subheader("전략별 워크포워드·최종 독립 검증")
         st.dataframe(
             backtests[
                 [
-                    "ticker", "strategy_label", "horizon", "train_samples", "test_samples",
-                    "test_win_rate", "test_average_return", "test_payoff_ratio",
-                    "test_max_drawdown", "test_average_excess_return", "fdr_qvalue",
-                    "positive_test_folds", "test_fold_count", "validated", "hold_reason",
+                    "ticker", "strategy_label", "horizon", "train_samples",
+                    "walk_forward_samples", "final_samples", "final_win_rate",
+                    "final_average_return", "final_payoff_ratio",
+                    "final_mtm_max_drawdown", "final_average_mae", "final_average_mfe",
+                    "final_average_excess_return", "fdr_qvalue",
+                    "validation_state_label", "hold_reason",
                 ]
             ],
             hide_index=True,
@@ -237,7 +253,8 @@ with tab_signal:
         )
         st.caption(
             "신호일 종가까지의 정보만 사용하고 다음 거래일 시가에 진입합니다. "
-            "최근 30% 구간은 시점 외 검증이며 거래비용 0.2%와 다중검정 보정을 반영합니다. "
+            "개발 구간의 순차 워크포워드와 마지막 20% 독립 확인 구간을 분리합니다. "
+            "거래비용 0.2%, 0.6% 스트레스, 블록 부트스트랩과 의존성 보수 FDR을 반영합니다. "
             "현재 Top 200을 과거 전체에 적용하므로 과거 구성종목 편향은 아직 남아 있습니다."
         )
     else:

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from scripts.calibrate_signal_samples import calibrate
 from stocklens.history import YahooHistoryCollector, history_error_category, validate_history
 from stocklens.signal_storage import SignalStore, SignalStoreError
 from stocklens.signals import (
@@ -71,12 +72,14 @@ def test_backtest_enters_at_next_session_open_and_has_no_overlapping_trades() ->
     assert first["entry_date"] == asset.iloc[first_signal + 1]["date"]
     assert first["exit_date"] == asset.iloc[first_signal + 5]["date"]
     expected = (
-        asset.iloc[first_signal + 5]["close"]
-        / asset.iloc[first_signal + 1]["open"]
+        asset.iloc[first_signal + 5]["close"] * 0.999
+        / (asset.iloc[first_signal + 1]["open"] * 1.001)
         - 1
-        - 0.002
     )
     assert abs(first["asset_return"] - expected) < 1e-12
+    assert first["stressed_cost_return"] < first["asset_return"] < first["zero_cost_return"]
+    assert first["mae"] <= first["mfe"]
+    assert len(first["mtm_multipliers"]) == 5
     assert (trades["signal_date"].iloc[1:].reset_index(drop=True) > trades["exit_date"].iloc[:-1].reset_index(drop=True)).all()
 
 
@@ -90,16 +93,19 @@ def test_strategy_reports_all_metrics_but_holds_if_any_gate_fails() -> None:
         horizon=5,
     )
     assert len(trades) >= 30
-    assert result.test_win_rate is not None
-    assert result.test_average_return is not None
-    assert result.test_average_excess_return is not None
-    assert result.test_max_drawdown is not None
-    assert result.test_excess_ci_low is not None
-    assert result.test_fold_count == 3
-    assert 0 <= result.positive_test_folds <= result.test_fold_count
+    assert result.final_win_rate is not None
+    assert result.final_average_return is not None
+    assert result.final_average_excess_return is not None
+    assert result.final_trade_equity_max_drawdown is not None
+    assert result.final_mtm_max_drawdown is not None
+    assert result.final_average_mae is not None
+    assert result.final_average_mfe is not None
+    assert result.walk_forward_fold_count == 3
+    assert 0 <= result.positive_walk_forward_folds <= result.walk_forward_fold_count
     assert result.validated is False
-    assert result.preliminary_validated is False
-    assert "payoff ratio" in result.hold_reason
+    assert result.validation_state in {
+        "research_candidate", "data_insufficient", "not_validated"
+    }
 
 
 def test_fdr_counts_every_strategy_comparison() -> None:
@@ -120,9 +126,24 @@ def test_chronological_stability_folds_cover_only_out_of_sample_trades() -> None
         ticker="TEST", asset=asset, benchmark=_benchmark(asset),
         strategy="ema_crossback", horizon=10,
     )
-    assert result.train_samples + result.test_samples == len(trades)
-    assert result.test_fold_count == min(3, result.test_samples)
-    assert result.positive_test_folds <= result.test_fold_count
+    assert result.train_samples + result.walk_forward_samples + result.final_samples == len(trades)
+    assert result.walk_forward_fold_count == min(3, result.walk_forward_samples)
+    assert result.positive_walk_forward_folds <= result.walk_forward_fold_count
+    assert trades.iloc[-result.final_samples]["signal_date"] <= trades.iloc[-1]["signal_date"]
+
+
+def test_independent_period_is_a_fixed_calendar_cutoff_across_strategies() -> None:
+    asset = _history()
+    benchmark = _benchmark(asset)
+    first, _ = evaluate_strategy(
+        ticker="TEST", asset=asset, benchmark=benchmark,
+        strategy="ema_crossback", horizon=5,
+    )
+    second, _ = evaluate_strategy(
+        ticker="TEST", asset=asset, benchmark=benchmark,
+        strategy="rsi_recovery", horizon=20,
+    )
+    assert first.final_period_start == second.final_period_start
 
 
 def test_history_validation_rejects_stale_latest_session() -> None:
@@ -174,23 +195,38 @@ def test_cache_only_mode_marks_missing_history_without_network(tmp_path: Path, m
     assert result.errors[0]["category"] == "verified_cache_unavailable"
 
 
+def test_sample_gate_calibration_covers_heavy_tail_and_dependence_models() -> None:
+    rows = calibrate(trials=2, bootstrap_repetitions=100, seed=7)
+    assert len(rows) == 16
+    assert {row["null_model"] for row in rows} == {
+        "normal", "heavy_tail", "ar1", "volatility_cluster"
+    }
+    assert all(0 <= row["false_positive_rate"] <= 1 for row in rows)
+
+
 def test_store_rejects_unvalidated_active_signal(tmp_path: Path) -> None:
     store = SignalStore(tmp_path)
     invalid = pd.DataFrame([{
         "ticker": "TEST",
         "signal_date": date(2025, 1, 2).isoformat(),
+        "entry_expected_date": date(2025, 1, 3).isoformat(),
         "strategy": "ema_crossback",
         "best_horizon": 5,
-        "test_samples": 30,
+        "validation_samples": 30,
+        "expected_return": 0.03,
         "average_excess_return": 0.02,
+        "mtm_max_drawdown": -0.10,
+        "average_mae": -0.05,
+        "average_mfe": 0.08,
         "excess_ci_low": -0.01,
+        "confidence": "research_only",
         "status": "candidate",
         "signal_version": SIGNAL_VERSION,
     }])
     try:
         store.save_signals(invalid, expected_session="2025-01-02")
     except SignalStoreError as exc:
-        assert "only validated" in str(exc)
+        assert "independently validated" in str(exc)
     else:
         raise AssertionError("unvalidated signal must not be published")
 

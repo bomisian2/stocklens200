@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import tempfile
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from .signals import MIN_TEST_SAMPLES, SIGNAL_VERSION
+from .signals import MIN_FINAL_SAMPLES, MIN_INDEPENDENT_TOTAL, SIGNAL_VERSION
 
 
 class SignalStoreError(RuntimeError):
@@ -26,10 +25,11 @@ class SignalStore:
 
     def save_backtests(self, frame: pd.DataFrame) -> None:
         required = {
-            "ticker", "strategy", "horizon", "signal_version", "test_samples",
-            "test_average_excess_return", "test_payoff_ratio", "test_excess_pvalue",
-            "fdr_qvalue", "test_fold_count", "positive_test_folds", "validated",
-            "hold_reason",
+            "ticker", "strategy", "horizon", "signal_version", "total_samples",
+            "final_samples", "final_period_start", "final_average_excess_return", "final_payoff_ratio",
+            "final_mtm_max_drawdown", "final_excess_pvalue", "fdr_qvalue",
+            "research_candidate", "independent_validated", "validation_state",
+            "validated", "hold_reason",
         }
         missing = required - set(frame.columns)
         if missing:
@@ -40,23 +40,23 @@ class SignalStore:
         validated = frame["validated"].astype(bool)
         if (frame.loc[validated, "signal_version"] != SIGNAL_VERSION).any():
             raise SignalStoreError("validated output has an unexpected signal version")
-        if (pd.to_numeric(frame.loc[validated, "test_samples"]) < MIN_TEST_SAMPLES).any():
-            raise SignalStoreError("validated output does not meet the sample gate")
-        required_folds = (
-            pd.to_numeric(frame.loc[validated, "test_fold_count"]) * 2 / 3
-        ).apply(math.ceil)
-        if (
-            pd.to_numeric(frame.loc[validated, "positive_test_folds"]).to_numpy()
-            < required_folds.to_numpy()
-        ).any():
-            raise SignalStoreError("validated output failed the chronological stability gate")
+        if (pd.to_numeric(frame.loc[validated, "total_samples"]) < MIN_INDEPENDENT_TOTAL).any():
+            raise SignalStoreError("validated output does not meet the total-sample gate")
+        if (pd.to_numeric(frame.loc[validated, "final_samples"]) < MIN_FINAL_SAMPLES).any():
+            raise SignalStoreError("validated output does not meet the untouched-final gate")
+        if not frame.loc[validated, "independent_validated"].astype(bool).all():
+            raise SignalStoreError("published validation must pass the independent period")
+        if not frame.loc[validated, "validation_state"].eq("independent_validated").all():
+            raise SignalStoreError("validated output has an inconsistent state")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._atomic_csv(frame, self.backtests_path)
 
     def save_signals(self, frame: pd.DataFrame, *, expected_session: str) -> None:
         required = {
-            "ticker", "signal_date", "strategy", "best_horizon", "test_samples",
-            "average_excess_return", "excess_ci_low", "status", "signal_version",
+            "ticker", "signal_date", "entry_expected_date", "strategy", "best_horizon",
+            "validation_samples", "expected_return", "average_excess_return",
+            "mtm_max_drawdown", "average_mae", "average_mfe", "excess_ci_low",
+            "confidence", "status", "signal_version",
         }
         if frame.empty:
             frame = pd.DataFrame(columns=sorted(required))
@@ -64,8 +64,10 @@ class SignalStore:
         if missing:
             raise SignalStoreError(f"signal columns missing: {sorted(missing)}")
         if not frame.empty:
-            if not frame["status"].eq("validated").all():
-                raise SignalStoreError("only validated signals may be published")
+            if not frame["status"].eq("current_active").all():
+                raise SignalStoreError("only current independently validated signals may be published")
+            if not frame["confidence"].eq("independent_validation_passed").all():
+                raise SignalStoreError("active signal confidence is not independently validated")
             if not frame["signal_version"].eq(SIGNAL_VERSION).all():
                 raise SignalStoreError("signal version mismatch")
             dates = pd.to_datetime(frame["signal_date"], errors="coerce")

@@ -26,8 +26,8 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 자동 게시 기능으로 간주하지 않습니다.
 
 단기 신호는 EMA Crossback·추세 돌파·눌림목 반등·RSI 회복을 5·10·20거래일 기준으로
-평가합니다. 다음 거래일 시가 진입, 왕복비용 0.2%, QQQ 동기간 비교, 시간순 70/30 분리,
-연속 검증 폴드, 최소 표본, 부트스트랩 신뢰구간, Benjamini-Hochberg 다중검정 보정을 모두
+평가합니다. 다음 거래일 시가 진입, QQQ 동일 비용 비교, 개발구간 순차 워크포워드,
+마지막 20% 독립 확인, MTM 낙폭·MAE·MFE, 블록 부트스트랩, 의존성 보수 FDR을 모두
 통과하고 현재 세션에 발생한 신호만 상단 후보가 됩니다. 자세한 결정과 한계는
 [`docs/adr/0003-point-in-time-short-term-signals.md`](docs/adr/0003-point-in-time-short-term-signals.md)와
 [`docs/short-term-signals.md`](docs/short-term-signals.md)에 기록했습니다.
