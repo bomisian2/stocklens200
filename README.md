@@ -12,8 +12,12 @@
 - AMAT·AVGO·QCOM: 검증된 시장 데이터와 필요한 공식 자료만 표시하고 적정가를 생성하지 않습니다.
 - PR #2·#3의 엔진을 병합하지 않으며 검토된 연구 요약 계약만 `research/`에 격리합니다.
 - 연구 가격으로 종목을 정렬하거나 추천하지 않고, 독립 검증 통과 신호와 활성 신호는 0개로 표시합니다.
+- 저장 당시 최신성과 앱 실행 시점 최신성을 분리하고, 마지막 완료 XNYS 세션보다 오래된
+  스냅샷은 자동으로 `stale` 처리해 신규 신호 자격을 차단합니다.
 
 설계와 안전 경계는 [`docs/mvp-analysis-shell.md`](docs/mvp-analysis-shell.md)에 기록했습니다.
+운영 전 기준선, 최신성·예약 수집·데이터 이용권 검토와 복구 절차는
+[`docs/predeployment-review.md`](docs/predeployment-review.md)를 참고하세요.
 
 ## 현재 완료 범위: v2 1단계
 

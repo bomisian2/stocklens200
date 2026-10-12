@@ -115,10 +115,11 @@ def build_analysis_catalog(
     status: dict[str, Any],
     overlays: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    current_freshness = status.get("runtime_freshness_state") or status.get("freshness_state")
     market_state = "verified"
-    if status.get("data_state") == "stale":
+    if current_freshness == "stale":
         market_state = "stale"
-    elif status.get("freshness_state") != "verified":
+    elif current_freshness != "verified":
         market_state = "blocked"
 
     catalog: list[dict[str, Any]] = []

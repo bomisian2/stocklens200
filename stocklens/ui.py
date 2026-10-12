@@ -38,11 +38,15 @@ def render_area_details(title: str, area: dict[str, Any], *, expanded: bool = Fa
 
 
 def render_market_alert(status: dict[str, Any]) -> None:
-    state = str(status.get("data_state") or "unverified")
-    if state == "stale":
-        st.error("시장 스냅샷이 오래되어 신규 분석이나 신호에 사용할 수 없습니다.")
-    elif state == "unverified":
+    freshness = str(status.get("runtime_freshness_state") or status.get("freshness_state") or "unverified")
+    if freshness == "stale":
+        expected = status.get("runtime_expected_session_date") or "확인 불가"
+        observed = status.get("market_session_date") or "확인 불가"
+        st.error(f"시장 스냅샷이 현재 시점 기준 오래되었습니다. 저장 기준일 {observed} · 마지막 완료 거래일 {expected} · 신규 분석·신호 사용 불가")
+    elif freshness == "unverified":
         st.error("시장 시각을 검증할 수 없어 신규 분석과 신호를 보류합니다.")
+    elif freshness == "degraded":
+        st.warning("현재 시점 최신성 검증에 일부 문제가 있어 신규 분석과 신호를 보류합니다.")
     elif status.get("used_cache"):
         st.warning("공급원 장애로 마지막 정상 시장 스냅샷을 표시합니다.")
     elif status.get("degraded"):

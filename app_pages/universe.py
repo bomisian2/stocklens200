@@ -16,7 +16,9 @@ render_market_alert(status)
 
 metrics = st.columns(4, border=True)
 metrics[0].metric("표시 기업", f"{len(table):,}개")
-metrics[1].metric("시장 상태", str(status.get("data_state") or "확인 불가"))
+quality = str(status.get("data_state") or "확인 불가")
+freshness = str(status.get("runtime_freshness_state") or status.get("freshness_state") or "확인 불가")
+metrics[1].metric("품질 / 현재 최신성", f"{quality} / {freshness}")
 metrics[2].metric("시장 기준일", str(status.get("market_session_date") or "확인 불가"))
 metrics[3].metric("정식 적정가", "0개")
 

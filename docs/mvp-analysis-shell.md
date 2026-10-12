@@ -77,3 +77,7 @@ PR CI does not misclassify an active-session quote as a completed close. During 
 session and the 15-minute settlement grace, the cacheless provider request is deferred and the
 committed last-completed snapshot is strictly validated instead. Outside that window, CI performs
 the cacheless live collection and strict validation.
+
+The app independently reassesses the committed snapshot against the latest completed XNYS session
+at runtime. Persisted collection quality remains visible, while runtime freshness can become stale;
+in that case all market areas are marked stale and `runtime_eligible_for_signals` is false.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from stocklens.analysis import (
     load_analysis_overlays,
     load_signal_research,
 )
+from stocklens.mvp_context import with_runtime_freshness
 from stocklens.storage import SnapshotStore
 
 
@@ -97,3 +99,31 @@ def test_signal_summary_rejects_false_operational_success(tmp_path: Path) -> Non
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(AnalysisSchemaError, match="cannot publish active"):
         load_signal_research(path)
+
+
+def test_runtime_freshness_separates_snapshot_quality_from_current_staleness() -> None:
+    store = SnapshotStore(ROOT / "data")
+    universe = store.load()
+    recorded = store.load_status()
+
+    same_session = with_runtime_freshness(
+        universe,
+        recorded,
+        datetime(2026, 10, 10, 12, tzinfo=timezone.utc),
+    )
+    assert same_session["data_state"] == "healthy"
+    assert same_session["recorded_freshness_state"] == "verified"
+    assert same_session["runtime_freshness_state"] == "verified"
+    assert same_session["runtime_eligible_for_signals"] is True
+
+    next_completed_session = with_runtime_freshness(
+        universe,
+        recorded,
+        datetime(2026, 10, 12, 22, tzinfo=timezone.utc),
+    )
+    assert next_completed_session["data_state"] == "healthy"
+    assert next_completed_session["runtime_expected_session_date"] == "2026-10-12"
+    assert next_completed_session["runtime_freshness_state"] == "stale"
+    assert next_completed_session["runtime_eligible_for_signals"] is False
+    catalog = build_analysis_catalog(universe, next_completed_session, {})
+    assert {company["areas"]["market"]["state"] for company in catalog} == {"stale"}
