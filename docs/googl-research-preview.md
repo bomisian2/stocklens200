@@ -48,6 +48,12 @@ Visual inspection found and fixed two issues before commit: the warning badge ov
 UTC market timestamp was being converted into a next-day KST date. The final screen uses extra header clearance and displays
 the official U.S. market-session date (`2026-10-09`) separately from timestamps.
 
+The first post-preview CI run occurred during the October 12 XNYS regular session. A cacheless provider request correctly
+returned current-session timestamps, while StockLens correctly expected the latest *completed* October 9 session, so the
+fresh-collection job failed. PR CI now detects an active regular session and the first 15 post-close minutes, records a notice,
+and validates the committed last-completed snapshot instead. Outside that window it still performs the cacheless live
+collection. The production freshness gate is unchanged and never accepts an incomplete session as completed data.
+
 ## Local preview
 
 ```powershell

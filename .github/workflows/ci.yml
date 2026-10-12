@@ -37,10 +37,24 @@ jobs:
           cache: pip
       - name: Install runtime dependencies
         run: pip install -r requirements.txt
+      - name: Determine whether a completed-session live snapshot is available
+        id: market-window
+        run: python scripts/check_live_collection_window.py >> "$GITHUB_OUTPUT"
+      - name: Explain market-hours live collection guard
+        if: steps.market-window.outputs.collect == 'false'
+        run: >-
+          echo "::notice title=Live collection deferred::Regular XNYS session
+          ${{ steps.market-window.outputs.active_session_date }} is active or settling;
+          validating the committed last-completed snapshot instead."
       - name: Collect a fresh Top-200 snapshot without a cache
+        if: steps.market-window.outputs.collect == 'true'
         run: python scripts/update_data.py --data-dir "$RUNNER_TEMP/stocklens-live"
       - name: Validate the fresh snapshot
+        if: steps.market-window.outputs.collect == 'true'
         run: python scripts/validate_snapshot.py --strict --data-dir "$RUNNER_TEMP/stocklens-live"
+      - name: Validate the committed last-completed snapshot during market hours
+        if: steps.market-window.outputs.collect == 'false'
+        run: python scripts/validate_snapshot.py --strict
 
   offline-valuation-safety-gate:
     runs-on: ubuntu-latest
