@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "dataset_kind": "signal_research_summary",
+  "signal_version": "signals-v2.1.0",
+  "source_branch": "feat/v2-short-term-signals",
+  "source_commit": "b3a6b24043995c415042d40da2d010fe9e2323fd",
+  "source_pr": "https://github.com/bomisian2/stocklens200/pull/3",
+  "market_session_date": "2026-10-09",
+  "operational_eligible": false,
+  "history_coverage": {"available": 191, "universe": 200},
+  "strategy_horizon_combinations": 2292,
+  "development_candidate_count": 4,
+  "independent_validated_count": 0,
+  "active_signal_count": 0,
+  "strategies": ["EMA Crossback", "추세 돌파", "눌림목 반등", "RSI 회복"],
+  "costs": {"base_round_trip": 0.002, "stress_round_trip": 0.006},
+  "lrcx_case": {
+    "ticker": "LRCX",
+    "strategy": "EMA Crossback",
+    "horizon": 10,
+    "total_samples": 36,
+    "train_samples": 11,
+    "walk_forward_samples": 11,
+    "final_samples": 14,
+    "final_win_rate": 0.7857,
+    "final_average_return": 0.1032,
+    "final_average_excess_return": 0.0833,
+    "final_mtm_max_drawdown": -0.1629,
+    "final_average_mae": -0.0428,
+    "final_average_mfe": 0.1511,
+    "final_worst_entry_gap": -0.0593,
+    "final_stressed_cost_average_return": 0.0988,
+    "validation_state": "data_insufficient",
+    "hold_reason": "총 80건·최종 20건 기준과 개발·워크포워드 통계 게이트를 통과하지 못했습니다."
+  },
+  "limitations": [
+    "현재 Top 200 구성종목을 과거 기간 전체에 적용한 편향이 있습니다.",
+    "날짜별 분할·배당 조정계수와 상장폐지·합병 종목이 완전한 point-in-time 상태가 아닙니다.",
+    "Yahoo/yfinance 원시 이력과 파생 신호의 공개 운영 범위가 확정되지 않았습니다.",
+    "원시 가격 이력은 이 MVP 저장소에 복사하거나 재배포하지 않습니다."
+  ]
+}
