@@ -24,7 +24,7 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 
 ### v2 2단계 Draft: 자동 적정가 엔진
 
-- 공식 SEC EDGAR `companyfacts`와 `submissions`에서 최근 5개 연도의 GAAP 재무와 실제 이용 가능 시각을 수집합니다.
+- 공식 SEC EDGAR `companyfacts`와 `submissions` 파일에서 최근 5개 연도의 GAAP 재무와 실제 이용 가능 시각을 수집합니다.
 - 공식 U.S. Treasury 10년 금리를 시장 기준일 이전의 할인율 입력으로 사용합니다.
 - 정규화 EPS×PER, FCF DCF, EV/EBITDA 및 금융업 전용 residual P/B 중 입력 게이트를 통과한 모델만 자동 선택합니다.
 - 모델 버전, 원천 URL, 제출일, 접수시각, 보수/기본/낙관 값, 자동 안전마진, 신뢰도와 보류 사유를 저장합니다.
@@ -32,18 +32,19 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - REIT의 검증된 FFO/AFFO, IFRS ADR, 재배포 가능한 분석가 컨센서스가 없으면 정상 값으로 대체하지 않고 판단을 보류합니다.
 - 앱은 `data/valuations.csv`와 이력 파일만 읽으며 SEC나 Treasury에 직접 접속하지 않습니다.
 - SEC API 403은 재시도하지 않으며 HTTP 상태·도메인·DNS/TLS/timeout·허용된 응답 헤더만 진단합니다. 응답 본문과 쿠키는 로그에 남기지 않습니다.
-- 공식 SEC 벌크 ZIP은 `--sec-companyfacts-zip`/`--sec-submissions-zip`으로 별도 제공할 때만 사용합니다. 자동 대용량 다운로드나 접근제한 우회는 하지 않습니다.
+- 기본 경로는 사용자가 합법적으로 내려받은 공식 SEC 개별 JSON 또는 벌크 ZIP을 SHA-256 manifest로 검증하는 오프라인 import입니다. 직접 API는 명시적 `--financial-source sec-api` 선택 때만 사용하며 403 뒤 자동 재시도·우회·벌크 전환을 하지 않습니다.
+- 원본 파일 해시·출처 URL·획득 시각과 정규화 결과 해시·버전을 기록하며, `fixture=false`가 아닌 manifest는 운영 입력으로 거부합니다.
 - acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
 - 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
-설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md)에 기록했습니다.
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md)에 기록했습니다.
 
 ## 로컬 실행
 
 ```bash
 python -m pip install -r requirements.txt
 python scripts/update_data.py
-python scripts/update_valuations.py
+python scripts/update_valuations.py --financial-source offline --sec-manifest data/sec-import/manifest.json
 streamlit run app.py
 ```
 
@@ -64,6 +65,7 @@ python scripts/validate_valuations.py
 - `data/valuations.csv`: 기업별 시나리오 적정가, 매수 유리 구간, 신뢰도, 판단과 모델 근거
 - `data/valuation_history.csv`: 날짜별 적정가 변화 이력
 - `data/valuation_status.json`: 모델 버전, 평가/보류 수, 공식 금리 입력, 공급원 오류와 알려진 제약
+- `data/financial_provenance.json`: 공식 SEC 원본 파일 SHA-256, 출처·획득시각, 정규화 버전과 결과 SHA-256
 
 스냅샷 저장은 임시 파일 작성 후 교체하는 원자적 방식입니다. 200개 미만, 중복 기업, 비정상 순위, 음수/누락 시가총액, 가격·거래량 커버리지 미달, 거래·수집 시각 오류, 독립 검증 실패, 섹터·국가 커버리지 80% 미만이면 새 스냅샷으로 인정하지 않습니다. 실패 시 CSV를 덮어쓰지 않고 상태만 갱신하며 `eligible_for_signals=false`로 기록합니다.
 
@@ -109,4 +111,4 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
 
 무료 공급원의 시가총액, 가격, 기업 분류는 지연되거나 정정될 수 있습니다. 미국 거래소 상장 여부와 기업 소재국은 서로 다른 개념이므로 해외 기업의 ADR도 포함될 수 있습니다. 이 프로젝트는 연구용이며 투자 권유가 아닙니다.
 
-Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가와 3단계 단기 신호는 아직 구현·검증되지 않았으며, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.
+Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft로 구현됐지만 공식 SEC 원본 파일이 아직 제공되지 않아 GOOGL·AMAT·AVGO·QCOM의 실데이터 평가는 0/4이며 모두 판단 보류입니다. 3단계 단기 신호도 아직 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.

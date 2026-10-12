@@ -19,16 +19,21 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--require-tickers", nargs="*", default=[])
+    parser.add_argument(
+        "--expect-unverified-hold",
+        action="store_true",
+        help="Verify the safe no-source state without claiming a successful valuation",
+    )
     args = parser.parse_args()
 
     path = args.data_dir / "valuations.csv"
     status_path = args.data_dir / "valuation_status.json"
     financials_path = args.data_dir / "financials.csv"
-    if not path.exists() or not status_path.exists() or not financials_path.exists():
-        raise RuntimeError("valuation, financial, or status snapshot missing")
+    if not path.exists() or not status_path.exists():
+        raise RuntimeError("valuation or status snapshot missing")
     frame = pd.read_csv(path)
     status = json.loads(status_path.read_text(encoding="utf-8"))
-    financials = pd.read_csv(financials_path)
+    financials = pd.read_csv(financials_path) if financials_path.exists() else pd.DataFrame()
     if not args.allow_partial and len(frame) != 200:
         raise RuntimeError(f"expected 200 valuation rows, got {len(frame)}")
     if frame["ticker"].duplicated().any():
@@ -37,6 +42,21 @@ def main() -> int:
     if not required.issubset(set(frame["ticker"])):
         raise RuntimeError(f"required tickers missing: {sorted(required - set(frame['ticker']))}")
     evaluated = frame[frame["status"] == "evaluated"]
+    if args.expect_unverified_hold:
+        if not evaluated.empty:
+            raise RuntimeError("unverified hold gate unexpectedly produced evaluated rows")
+        if set(frame["status"]) != {"hold"}:
+            raise RuntimeError("unverified sample must contain hold rows only")
+        if status.get("eligible_for_new_valuation") or status.get("eligible_for_new_signals"):
+            raise RuntimeError("unverified sample must be blocked from valuation and signals")
+        categories = {item.get("category") for item in status.get("provider_errors", [])}
+        if "manifest_not_configured" not in categories:
+            raise RuntimeError("missing explicit manifest_not_configured status")
+        print(
+            f"valuation_count={len(frame)} evaluated=0 hold={len(frame)} "
+            f"model={MODEL_VERSION} source=unverified"
+        )
+        return 0
     if required and not required.issubset(set(evaluated["ticker"])):
         raise RuntimeError(f"sample tickers were not evaluated: {sorted(required - set(evaluated['ticker']))}")
     if evaluated.empty:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from stocklens.macro import fetch_ten_year_rate
+import pytest
+import requests
+
+from stocklens.macro import MacroDataError, fetch_ten_year_rate
 
 
 class _Response:
@@ -23,4 +26,14 @@ def test_treasury_rate_is_limited_to_valuation_date() -> None:
     result = fetch_ten_year_rate(year=2025, as_of_date=date(2025, 1, 2), session=_Session())
     assert result.as_of == "2025-01-02"
     assert result.rate == 0.045
+
+
+class _FailedSession:
+    def get(self, *args, **kwargs):
+        raise requests.ConnectionError("network unavailable")
+
+
+def test_treasury_network_failure_is_bounded() -> None:
+    with pytest.raises(MacroDataError, match="ConnectionError"):
+        fetch_ten_year_rate(year=2025, as_of_date=date(2025, 1, 2), session=_FailedSession())
 

@@ -7,11 +7,11 @@ from pathlib import Path
 
 from stocklens.financials import (
     FinancialDataError,
-    SecBulkZipProvider,
     SecClient,
     build_cik_map,
     extract_financial_periods,
 )
+from stocklens.sec_files import SecFileProvider, normalized_periods_sha256, sha256_file
 
 
 def _fact(label: str, rows: list[dict], unit: str = "USD") -> dict:
@@ -115,6 +115,7 @@ def test_missing_acceptance_uses_marked_conservative_next_day_end() -> None:
     assert rows[0].available_at_utc == "2024-02-02T23:59:59+00:00"
     assert rows[0].availability_estimated is True
     assert rows[0].availability_basis == "estimated_end_of_next_utc_day_from_filed_date"
+    assert rows[0].validation_state == "degraded"
 
 
 class _Response:
@@ -160,7 +161,7 @@ def test_sec_transient_error_is_bounded_and_can_recover() -> None:
     assert session.calls == 2
 
 
-def test_official_bulk_zip_adapter_uses_same_point_in_time_rules(tmp_path: Path) -> None:
+def test_official_offline_manifest_uses_same_point_in_time_rules(tmp_path: Path) -> None:
     row = _annual(2023, 100.0, filed="2024-02-01", accn="a", start="2023-01-01")
     facts = {"entityName": "Example", "facts": {"us-gaap": {
         "RevenueFromContractWithCustomerExcludingAssessedTax": _fact("Revenue", [row]),
@@ -177,12 +178,93 @@ def test_official_bulk_zip_adapter_uses_same_point_in_time_rules(tmp_path: Path)
         archive.writestr("CIK0000000001.json", json.dumps(facts))
     with zipfile.ZipFile(submissions_zip, "w") as archive:
         archive.writestr("CIK0000000001.json", json.dumps(submissions))
-    rows = SecBulkZipProvider(facts_zip, submissions_zip).fetch_periods(
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "provider": "sec_edgar_official_files",
+        "obtained_at_utc": "2024-03-01T12:00:00+00:00",
+        "fixture": False,
+        "artifacts": [
+            {
+                "role": "companyfacts", "path": facts_zip.name,
+                "source_url": "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip",
+                "sha256": sha256_file(facts_zip),
+            },
+            {
+                "role": "submissions", "path": submissions_zip.name,
+                "source_url": "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
+                "sha256": sha256_file(submissions_zip),
+            },
+        ],
+    }), encoding="utf-8")
+    provider = SecFileProvider.from_manifest(manifest)
+    rows = provider.fetch_periods(
         "EX", 1, as_of=datetime(2024, 3, 1, tzinfo=timezone.utc),
     )
     assert len(rows) == 1
-    assert rows[0].source == "sec_edgar_bulk"
+    assert rows[0].source == "sec_edgar_offline_import"
     assert rows[0].availability_estimated is False
+    assert len(rows[0].source_artifact_sha256) == 64
+    provenance = provider.provenance(periods=rows)
+    assert provenance["normalized_sha256"] == normalized_periods_sha256(rows)
+    assert provenance["fixture"] is False
+
+
+def test_offline_manifest_rejects_fixture_and_hash_mismatch(tmp_path: Path) -> None:
+    facts = tmp_path / "CIK0000000001.json"
+    facts.write_text(json.dumps({"cik": 1, "facts": {}}), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    base = {
+        "schema_version": 1,
+        "provider": "sec_edgar_official_files",
+        "obtained_at_utc": "2024-03-01T12:00:00+00:00",
+        "fixture": True,
+        "artifacts": [{
+            "role": "companyfacts", "path": facts.name,
+            "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000000001.json",
+            "sha256": sha256_file(facts), "cik": 1,
+        }],
+    }
+    manifest.write_text(json.dumps(base), encoding="utf-8")
+    try:
+        SecFileProvider.from_manifest(manifest)
+    except ValueError as exc:
+        assert "fixture=false" in str(exc)
+    else:
+        raise AssertionError("fixture manifest must not be treated as operational data")
+
+    base["fixture"] = False
+    base["artifacts"][0]["sha256"] = "0" * 64
+    manifest.write_text(json.dumps(base), encoding="utf-8")
+    try:
+        SecFileProvider.from_manifest(manifest)
+    except ValueError as exc:
+        assert "SHA-256 mismatch" in str(exc)
+    else:
+        raise AssertionError("hash mismatch must be rejected")
+
+
+def test_offline_manifest_rejects_non_sec_source_url(tmp_path: Path) -> None:
+    facts = tmp_path / "CIK0000000001.json"
+    facts.write_text(json.dumps({"cik": 1, "facts": {}}), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "provider": "sec_edgar_official_files",
+        "obtained_at_utc": "2024-03-01T12:00:00+00:00",
+        "fixture": False,
+        "artifacts": [{
+            "role": "companyfacts", "path": facts.name,
+            "source_url": "https://example.com/companyfacts.json",
+            "sha256": sha256_file(facts), "cik": 1,
+        }],
+    }), encoding="utf-8")
+    try:
+        SecFileProvider.from_manifest(manifest)
+    except ValueError as exc:
+        assert "official HTTPS SEC URL" in str(exc)
+    else:
+        raise AssertionError("non-SEC provenance URL must be rejected")
 
 
 def test_non_annual_duration_is_rejected_during_fiscal_year_change() -> None:

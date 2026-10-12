@@ -38,3 +38,10 @@ def test_empty_financial_cache_round_trips(tmp_path: Path) -> None:
     store.save_financials([])
     assert store.load_financials() == []
 
+
+def test_provenance_round_trips(tmp_path: Path) -> None:
+    store = ValuationStore(tmp_path)
+    payload = {"provider": "sec_edgar_official_files", "normalized_sha256": "a" * 64}
+    store.save_provenance(payload)
+    assert store.load_provenance() == payload
+

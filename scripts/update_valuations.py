@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import fields, replace
-from datetime import date, datetime, timezone
+from dataclasses import fields
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -17,15 +17,19 @@ from stocklens.financials import (  # noqa: E402
     SEC_COMPANY_TICKERS_URL,
     KNOWN_CIKS,
     FinancialDataError,
+    FinancialProvider,
     SecClient,
     SecApiProvider,
-    SecBulkZipProvider,
     build_cik_map,
 )
 from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
+from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
 from stocklens.valuation import MODEL_VERSION, ValuationResult, evaluate_company  # noqa: E402
 from stocklens.valuation_storage import ValuationStore  # noqa: E402
+
+
+MAX_FINANCIAL_AGE_DAYS = 190
 
 
 def _safe_error(ticker: str, exc: Exception) -> dict:
@@ -84,14 +88,27 @@ def _hold_result(row: pd.Series, evaluated_at: datetime, reason: str) -> Valuati
     )
 
 
+def _latest_available_at(periods: list) -> datetime | None:
+    values = []
+    for period in periods:
+        try:
+            values.append(datetime.fromisoformat(period.available_at_utc).astimezone(timezone.utc))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh point-in-time SEC financials and valuations")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--tickers", nargs="*", help="Optional development subset")
     parser.add_argument("--max-companies", type=int, default=None)
     parser.add_argument("--allow-partial", action="store_true", help="Allow fewer than 200 outputs for development")
-    parser.add_argument("--sec-companyfacts-zip", type=Path, default=None, help="Optional official SEC companyfacts bulk ZIP")
-    parser.add_argument("--sec-submissions-zip", type=Path, default=None, help="Optional official SEC submissions bulk ZIP")
+    parser.add_argument(
+        "--financial-source", choices=("offline", "sec-api"), default="offline",
+        help="Offline is the safe default; sec-api must be selected explicitly",
+    )
+    parser.add_argument("--sec-manifest", type=Path, default=None, help="Hash-verified manifest for official SEC files")
     args = parser.parse_args()
 
     snapshot_store = SnapshotStore(args.data_dir)
@@ -116,13 +133,30 @@ def main() -> int:
     for period in cached_periods:
         cached_by_ticker.setdefault(period.ticker, []).append(period)
 
-    sec = SecClient()
     errors: list[dict] = []
-    try:
-        cik_map = {**KNOWN_CIKS, **build_cik_map(sec.get_json(SEC_COMPANY_TICKERS_URL))}
-    except FinancialDataError as exc:
-        cik_map = dict(KNOWN_CIKS)
-        errors.append(_safe_error("SEC ticker map", exc))
+    providers: list[FinancialProvider] = []
+    offline_provider: SecFileProvider | None = None
+    cik_map = dict(KNOWN_CIKS)
+    if args.financial_source == "sec-api":
+        sec = SecClient()
+        try:
+            cik_map.update(build_cik_map(sec.get_json(SEC_COMPANY_TICKERS_URL)))
+        except FinancialDataError as exc:
+            errors.append(_safe_error("SEC ticker map", exc))
+        providers.append(SecApiProvider(sec))
+    elif args.sec_manifest is None:
+        errors.append({
+            "ticker": "offline import",
+            "provider": "sec_offline_files",
+            "category": "manifest_not_configured",
+        })
+    else:
+        try:
+            offline_provider = SecFileProvider.from_manifest(args.sec_manifest)
+            cik_map.update(offline_provider.cik_map())
+            providers.append(offline_provider)
+        except (ValueError, FinancialDataError) as exc:
+            errors.append(_safe_error("offline import", exc))
     try:
         risk_free = fetch_ten_year_rate(as_of_date=date.fromisoformat(str(universe_status["market_session_date"])))
     except MacroDataError as exc:
@@ -152,20 +186,16 @@ def main() -> int:
         print(json.dumps({"preserved_last_good": True, "provider_error_count": len(errors)}, sort_keys=True))
         return 0
 
-    providers = []
-    if args.sec_companyfacts_zip:
-        providers.append(SecBulkZipProvider(args.sec_companyfacts_zip, args.sec_submissions_zip))
-    providers.append(SecApiProvider(sec))
-
     refreshed_by_ticker: dict[str, list] = {}
     cached_tickers: set[str] = set()
     unavailable_tickers: set[str] = set()
+    stale_tickers: set[str] = set()
     fresh_tickers: set[str] = set()
     for row in universe.itertuples(index=False):
         ticker = str(row.ticker)
         cik = cik_map.get(ticker.replace("-", "."))
         if cik is None:
-            refreshed_by_ticker[ticker] = [replace(period, validation_state="degraded", validation_notes="cached after CIK lookup failure") for period in cached_by_ticker.get(ticker, [])]
+            refreshed_by_ticker[ticker] = list(cached_by_ticker.get(ticker, []))
             if refreshed_by_ticker[ticker]:
                 cached_tickers.add(ticker)
             unavailable_tickers.add(ticker)
@@ -182,14 +212,25 @@ def main() -> int:
                 errors.append(_safe_error(ticker, exc))
         if periods:
             refreshed_by_ticker[ticker] = periods
-            fresh_tickers.add(ticker)
+            latest = _latest_available_at(periods)
+            if latest is None or evaluated_at - latest > timedelta(days=MAX_FINANCIAL_AGE_DAYS):
+                stale_tickers.add(ticker)
+                errors.append({
+                    "ticker": ticker,
+                    "provider": providers[0].name if providers else args.financial_source,
+                    "category": "stale_financials",
+                    "latest_available_at_utc": None if latest is None else latest.isoformat(),
+                    "maximum_age_days": MAX_FINANCIAL_AGE_DAYS,
+                })
+            else:
+                fresh_tickers.add(ticker)
         else:
-            refreshed_by_ticker[ticker] = [replace(period, validation_state="degraded", validation_notes="cached after SEC provider failure") for period in cached_by_ticker.get(ticker, [])]
+            refreshed_by_ticker[ticker] = list(cached_by_ticker.get(ticker, []))
             if refreshed_by_ticker[ticker]:
                 cached_tickers.add(ticker)
             unavailable_tickers.add(ticker)
 
-    if not fresh_tickers and not previous.empty:
+    if not fresh_tickers and (not previous.empty or cached_periods):
         prior_status = valuation_store.load_status()
         valuation_store.save_status({
             **prior_status,
@@ -199,6 +240,7 @@ def main() -> int:
             "used_cache": True,
             "provider_error_count": len(errors),
             "provider_errors": errors[:200],
+            "stale_ticker_count": len(stale_tickers),
             "eligible_for_new_valuation": False,
             "eligible_for_new_signals": False,
         })
@@ -209,6 +251,12 @@ def main() -> int:
     retained = [period for period in cached_periods if period.ticker not in selected_tickers]
     all_periods = retained + [period for periods in refreshed_by_ticker.values() for period in periods]
     valuation_store.save_financials(all_periods)
+    if offline_provider is not None:
+        imported_periods = [period for periods in refreshed_by_ticker.values() for period in periods]
+        provenance = offline_provider.provenance(periods=imported_periods)
+        provenance["valuation_as_of_utc"] = evaluated_at.replace(microsecond=0).isoformat()
+        provenance["stale_tickers"] = sorted(stale_tickers)
+        valuation_store.save_provenance(provenance)
 
     previous_by_ticker = previous.set_index("ticker").to_dict(orient="index") if not previous.empty else {}
     results: list[ValuationResult] = []
@@ -219,6 +267,13 @@ def main() -> int:
             result = _stale_prior_result(prior, "provider refresh failed; prior verified valuation retained and blocked from new signals")
         elif ticker in unavailable_tickers:
             result = _hold_result(row, evaluated_at, "no verified financial provider and no prior snapshot")
+        elif ticker in stale_tickers:
+            latest = _latest_available_at(refreshed_by_ticker.get(ticker, []))
+            reason = (
+                f"financial data is stale; latest availability "
+                f"{latest.isoformat() if latest else 'unverified'} exceeds {MAX_FINANCIAL_AGE_DAYS} days"
+            )
+            result = _hold_result(row, evaluated_at, reason)
         elif risk_free is None:
             result = _hold_result(row, evaluated_at, "official risk-free rate unavailable")
         else:
@@ -256,7 +311,11 @@ def main() -> int:
         "evaluated_count": evaluated,
         "hold_count": int(len(output) - evaluated),
         "financial_period_count": int(sum(len(value) for value in refreshed_by_ticker.values())),
-        "financial_source": "SEC EDGAR companyfacts/submissions",
+        "financial_source": (
+            "SEC EDGAR official offline files" if args.financial_source == "offline"
+            else "SEC EDGAR companyfacts/submissions API"
+        ),
+        "financial_source_mode": args.financial_source,
         "independent_financial_crosscheck": "not_configured",
         "consensus_source": "not_configured",
         "risk_free_rate": None if risk_free is None else {
@@ -269,11 +328,12 @@ def main() -> int:
         "provider_error_count": len(errors),
         "provider_errors": errors[:200],
         "cached_ticker_count": len(cached_tickers),
+        "stale_ticker_count": len(stale_tickers),
         "used_cache": bool(cached_tickers),
-        "financial_freshness_state": "stale" if cached_tickers else "unverified" if unavailable_tickers else "verified",
+        "financial_freshness_state": "stale" if cached_tickers or stale_tickers else "unverified" if unavailable_tickers else "verified",
         "data_state": "degraded" if errors else "healthy",
-        "eligible_for_new_valuation": risk_free is not None and evaluated > 0 and not unavailable_tickers,
-        "eligible_for_new_signals": risk_free is not None and evaluated > 0 and not unavailable_tickers,
+        "eligible_for_new_valuation": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
+        "eligible_for_new_signals": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
         "eligible_for_display": evaluated > 0,
         "limitations": [
             "Consensus EPS/revenue revisions remain unavailable without a redistribution-safe free source.",

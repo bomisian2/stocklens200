@@ -13,11 +13,12 @@ availability is required so later backtests cannot use a filing before the marke
 
 ## Decision
 
-1. Historical GAAP facts come from the official SEC EDGAR `companyfacts` API. Filing metadata and
-   `acceptanceDateTime` come from the SEC `submissions` API. Both APIs require no key. The collector
-   uses a repository URL and contact mailbox in its User-Agent, stays at or below 2.5 requests per
-   second, retries only bounded transient failures, stops immediately on HTTP 403, and never logs
-   response bodies, cookies, authorization headers, or request secrets.
+1. Historical GAAP facts come only from official SEC EDGAR Company Facts data. Filing metadata and
+   `acceptanceDateTime` come from official SEC Submissions data. The safe default is an offline,
+   hash-verified manifest of operator-supplied official JSON or nightly ZIP files. Direct API access
+   is an explicit opt-in adapter, never a fallback: it uses an identifying User-Agent, stays below
+   2.5 requests per second, retries only bounded transient failures, stops immediately on HTTP 403,
+   and never logs response bodies, cookies, authorization headers, or request secrets.
 2. The 10-year risk-free rate comes from the U.S. Treasury Daily Par Yield Curve XML feed. The
    latest observation on or before the universe market date is selected.
 3. Every normalized period stores fiscal year, original period dates, form, accession, filed date,
@@ -49,11 +50,11 @@ availability is required so later backtests cannot use a filing before the marke
 10. SEC internal consistency (`net income / diluted shares` versus reported diluted EPS) is checked,
     but this is not represented as an independent financial-source cross-check. Confidence remains
     lower until such a source is configured.
-11. Financial collection is provider-adapted. The default adapter is the per-company SEC API; an
-    optional `SecBulkZipProvider` reads the official nightly `companyfacts.zip` and `submissions.zip`
-    supplied by a separately approved download/cache step. The adapter never converts an API 403
-    into an automatic bulk download because the archives are large and may be blocked by the same
-    policy layer.
+11. Financial collection is provider-adapted. `SecFileProvider` reads individual official files or
+    nightly `companyfacts.zip` and `submissions.zip` archives supplied by the operator. It verifies
+    canonical SEC source URLs, local path containment, CIK, acquisition time, and SHA-256 before
+    normalizing. Raw and normalized hashes and the normalization version are persisted. Operational
+    manifests must declare `fixture=false`; test fixtures cannot silently enter an operational run.
 12. A failed refresh may retain a prior verified snapshot only as `stale`. A complete outage does
     not overwrite valuation or financial CSVs. Partial stale rows are labelled `판단 보류`, and the
     run records `eligible_for_new_signals=false`.
@@ -62,10 +63,14 @@ availability is required so later backtests cannot use a filing before the marke
 
 | Candidate | Access / coverage | Redistribution finding | Decision |
 | --- | --- | --- | --- |
-| SEC EDGAR APIs | Official US-GAAP/IFRS taxonomy facts and acceptance metadata; no key | SEC says sec.gov public information may be copied or further distributed with attribution | Primary, subject to fair-access policy |
-| SEC nightly bulk ZIPs | Official full Company Facts and Submissions archives; republished nightly | Same SEC public-information policy | Supported as an operator-supplied bulk adapter; not auto-downloaded in PR CI |
+| SEC EDGAR APIs | Official US-GAAP/IFRS taxonomy facts and acceptance metadata; no key | SEC says sec.gov public information may be copied or further distributed with attribution | Explicit opt-in only; not retried after the observed 403 |
+| SEC nightly bulk ZIPs / individual JSON | Official full Company Facts and Submissions data; bulk files republished nightly | Same SEC public-information policy | Primary operator-supplied offline input; never auto-downloaded in PR CI |
+| SEC quarterly Financial Statement Data Sets | Official, as-filed numeric face statements in quarterly flattened packages | Same SEC public-information policy | Approved for manual acquisition; this PR does not yet parse the TSV schema |
 | Issuer investor-relations filings | Official annual/quarterly reports, but formats and site automation rules differ | Public documents are useful for manual cross-check; site-specific automated reuse terms require per-issuer review | Cross-check candidate, not a general adapter yet |
 | SimFin free/basic | Structured statements and publish/restatement dates | Free license restricts data to personal research and prohibits sharing/distribution | Rejected for the public dashboard |
+| Alpha Vantage free/demo | Endpoint reachable in a one-time probe | Personal, non-commercial use unless separately agreed | Rejected for public dashboard use |
+| Twelve Data free/demo | Endpoint reachable in a one-time probe | External display/redistribution requires an add-on or separate agreement | Rejected |
+| Financial Modeling Prep / Polygon no-key | Returned HTTP 401 in a one-time probe | No free public-display right was established | Rejected; no subscription started |
 | Yahoo/Nasdaq consumer financial endpoints | Technically broad but unofficial/consumer-facing for this use | No redistribution-safe license was established for stored fundamental statements | Rejected as a financial-statement source |
 
 The 2026-10-12 local probe returned HTTP 403 from `data.sec.gov` Company Facts and Submissions and
@@ -82,14 +87,17 @@ Official references:
 - SimFin data license (rejected): https://www.simfin.com/en/commercial-license/
 - U.S. Treasury daily rate feed: https://home.treasury.gov/treasury-daily-interest-rate-xml-feed
 
+The detailed access and licensing matrix is in `docs/financial-source-review.md`. Offline import
+instructions and integrity gates are in `docs/sec-offline-import.md`.
+
 ## Consequences
 
 - Results are reproducible from committed inputs and a model version, and can be reconstructed as of
   a past market timestamp.
 - U.S. GAAP domestic issuers have the best coverage. IFRS ADRs, companies with ambiguous XBRL tags,
   short fiscal transition years, and REITs without verified FFO/AFFO are expected to be held.
-- The scheduled job makes roughly two SEC requests per mapped issuer and is deliberately rate-limited;
-  it remains within the existing 15-minute GitHub Actions job under normal network conditions.
+- The scheduled job does not make SEC requests by default. It skips valuation refresh when no
+  operator-supplied verified manifest is present, while the independent Top-200 refresh continues.
 - A total provider outage preserves the last valid valuation snapshot, marks financial freshness
   stale, disables new signals, and records a degraded refresh attempt instead of overwriting good values.
 - Forecast consensus, guidance text extraction, segment-level validation, and an independent licensed

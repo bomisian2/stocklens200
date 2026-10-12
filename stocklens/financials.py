@@ -4,10 +4,8 @@ import json
 import socket
 import ssl
 import time
-import zipfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 from urllib.parse import urlparse
 
@@ -142,6 +140,9 @@ class FinancialPeriod:
     taxonomy: str = "us-gaap"
     validation_state: str = "unverified"
     validation_notes: str = ""
+    source_artifact_sha256: str = ""
+    source_obtained_at_utc: str = ""
+    normalization_version: str = "sec-gaap-v1"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -317,42 +318,6 @@ class SecApiProvider:
         return fetch_company_periods(self.client, ticker, cik, as_of=as_of)
 
 
-class SecBulkZipProvider:
-    """Read official nightly SEC ZIPs supplied by an approved download step."""
-
-    name = "sec_bulk_zip"
-
-    def __init__(self, companyfacts_zip: str | Path, submissions_zip: str | Path | None = None) -> None:
-        self.companyfacts_zip = Path(companyfacts_zip)
-        self.submissions_zip = Path(submissions_zip) if submissions_zip else None
-
-    @staticmethod
-    def _read_json(archive_path: Path, cik: int) -> dict[str, Any]:
-        member = f"CIK{cik:010d}.json"
-        try:
-            with zipfile.ZipFile(archive_path) as archive:
-                with archive.open(member) as handle:
-                    payload = json.load(handle)
-        except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
-            raise FinancialDataError(ProviderDiagnostic(
-                provider="sec_bulk_zip", domain="local", endpoint=archive_path.name,
-                category="bulk_archive", error_type=type(exc).__name__,
-            )) from exc
-        if not isinstance(payload, dict):
-            raise FinancialDataError(ProviderDiagnostic("sec_bulk_zip", "local", archive_path.name, "bulk_schema"))
-        return payload
-
-    def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]:
-        facts = self._read_json(self.companyfacts_zip, cik)
-        submissions: dict[str, Any] = {}
-        if self.submissions_zip:
-            submissions = self._read_json(self.submissions_zip, cik)
-        return extract_financial_periods(
-            ticker=ticker, cik=cik, companyfacts=facts, submissions=submissions,
-            as_of=as_of, source="sec_edgar_bulk",
-        )
-
-
 def normalize_sec_ticker(ticker: str) -> str:
     return str(ticker).strip().upper().replace("-", ".")
 
@@ -512,6 +477,8 @@ def extract_financial_periods(
     as_of: datetime,
     annual_years: int = 5,
     source: str = SEC_SOURCE,
+    source_artifact_sha256: str = "",
+    source_obtained_at_utc: str = "",
 ) -> list[FinancialPeriod]:
     """Normalize point-in-time annual SEC facts and the latest standalone quarter."""
     if as_of.tzinfo is None:
@@ -561,6 +528,8 @@ def extract_financial_periods(
         if availability > as_of:
             continue
         notes: list[str] = []
+        if availability_record.estimated:
+            notes.append("SEC acceptance timestamp unavailable; availability uses a conservative estimate")
         derived_eps = None
         if values.get("net_income") is not None and values.get("diluted_shares") not in {None, 0}:
             derived_eps = values["net_income"] / values["diluted_shares"]
@@ -599,6 +568,8 @@ def extract_financial_periods(
                 validation_notes="; ".join(notes),
                 source=source,
                 source_url=source_url,
+                source_artifact_sha256=source_artifact_sha256,
+                source_obtained_at_utc=source_obtained_at_utc,
                 **values,
             )
         )
@@ -645,6 +616,14 @@ def extract_financial_periods(
                 q_cfo, q_capex = q_values.get("cfo"), q_values.get("capex")
                 q_fcf = q_cfo - q_capex if q_cfo is not None and q_capex is not None else None
                 accession_q = str(latest_q.get("accn") or "")
+                quarter_notes = ["standalone latest quarter; guidance is not inferred from XBRL"]
+                if availability_q_record.estimated:
+                    quarter_notes.append(
+                        "SEC acceptance timestamp unavailable; availability uses a conservative estimate"
+                    )
+                quarter_complete = all(
+                    q_values.get(metric) is not None for metric in ("revenue", "net_income")
+                )
                 periods.append(
                     FinancialPeriod(
                         ticker=ticker,
@@ -663,10 +642,16 @@ def extract_financial_periods(
                         currency="USD",
                         fcf=q_fcf,
                         total_debt=q_debt,
-                        validation_state="verified" if all(q_values.get(metric) is not None for metric in ("revenue", "net_income")) else "degraded",
-                        validation_notes="standalone latest quarter; guidance is not inferred from XBRL",
+                        validation_state=(
+                            "verified"
+                            if quarter_complete and not availability_q_record.estimated
+                            else "degraded"
+                        ),
+                        validation_notes="; ".join(quarter_notes),
                         source=source,
                         source_url=(f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_q.replace('-', '')}/" if accession_q else ""),
+                        source_artifact_sha256=source_artifact_sha256,
+                        source_obtained_at_utc=source_obtained_at_utc,
                         **q_values,
                     )
                 )

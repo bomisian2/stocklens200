@@ -32,12 +32,15 @@ def fetch_ten_year_rate(
 ) -> RiskFreeRate:
     as_of_date = as_of_date or date.today()
     year = year or as_of_date.year
-    response = (session or requests.Session()).get(
-        TREASURY_XML_URL,
-        params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": str(year)},
-        headers={"User-Agent": "StockLens200/2.0 bomisian2@users.noreply.github.com"},
-        timeout=(5, 45),
-    )
+    try:
+        response = (session or requests.Session()).get(
+            TREASURY_XML_URL,
+            params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": str(year)},
+            headers={"User-Agent": "StockLens200/2.0 bomisian2@users.noreply.github.com"},
+            timeout=(5, 45),
+        )
+    except requests.RequestException as exc:
+        raise MacroDataError(f"Treasury request failed ({type(exc).__name__})") from exc
     if response.status_code != 200:
         raise MacroDataError(f"Treasury request failed (HTTP {response.status_code})")
     try:

@@ -24,6 +24,7 @@ class ValuationStore:
         self.valuations_path = self.data_dir / "valuations.csv"
         self.history_path = self.data_dir / "valuation_history.csv"
         self.status_path = self.data_dir / "valuation_status.json"
+        self.provenance_path = self.data_dir / "financial_provenance.json"
 
     def load_financials(self) -> list[FinancialPeriod]:
         if not self.financials_path.exists():
@@ -36,6 +37,9 @@ class ValuationStore:
         compatibility_defaults = {
             "availability_basis": "legacy_unknown",
             "availability_estimated": True,
+            "source_artifact_sha256": "",
+            "source_obtained_at_utc": "",
+            "normalization_version": "legacy_unknown",
         }
         for column, default in compatibility_defaults.items():
             if column not in frame.columns:
@@ -125,6 +129,21 @@ class ValuationStore:
             return {}
         try:
             return json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_provenance(self, provenance: dict[str, Any]) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._atomic_text(
+            json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            self.provenance_path,
+        )
+
+    def load_provenance(self) -> dict[str, Any]:
+        if not self.provenance_path.exists():
+            return {}
+        try:
+            return json.loads(self.provenance_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
 

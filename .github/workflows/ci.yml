@@ -42,7 +42,7 @@ jobs:
       - name: Validate the fresh snapshot
         run: python scripts/validate_snapshot.py --strict --data-dir "$RUNNER_TEMP/stocklens-live"
 
-  live-valuation-sample:
+  offline-valuation-safety-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -57,20 +57,20 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/stocklens-valuation"
           cp data/universe.csv data/status.json "$RUNNER_TEMP/stocklens-valuation/"
-      - name: Diagnose official financial sources without response bodies
-        run: python scripts/diagnose_financial_sources.py
-      - name: Calculate point-in-time sample valuations
+      - name: Run sample with no operator-supplied SEC manifest
         run: >-
           python scripts/update_valuations.py
           --data-dir "$RUNNER_TEMP/stocklens-valuation"
           --tickers GOOGL AMAT AVGO QCOM
+          --financial-source offline
           --allow-partial
-      - name: Validate the four-company sample
+      - name: Verify all four remain explicitly held
         run: >-
           python scripts/validate_valuations.py
           --data-dir "$RUNNER_TEMP/stocklens-valuation"
           --allow-partial
           --require-tickers GOOGL AMAT AVGO QCOM
+          --expect-unverified-hold
       - uses: actions/upload-artifact@v4
         if: always()
         with:
