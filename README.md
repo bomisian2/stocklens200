@@ -37,7 +37,7 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
 - 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
-설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
 
 ## 로컬 실행
 
@@ -47,6 +47,16 @@ python scripts/update_data.py
 python scripts/update_valuations.py --financial-source offline --sec-manifest data/sec-import/manifest.json
 streamlit run app.py
 ```
+
+Windows PC에서 공식 SEC 접근을 한 번만 진단하고, 성공할 때만 4개 표본을 수집·평가하는 명령은 다음과 같습니다. SEC User-Agent에 들어갈 실제 수신 가능한 연락처를 환경변수 또는 `-Contact`로 제공해야 하며 이 값은 결과 파일이나 로그에 저장하지 않습니다.
+
+```powershell
+$env:STOCKLENS_SEC_CONTACT = 'your-monitored-email@example.com'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_sec_windows.ps1
+Remove-Item Env:STOCKLENS_SEC_CONTACT
+```
+
+첫 GOOGL Company Facts 요청이 403이면 재시도, 프록시, IP 변경, Submissions 및 다른 기업 요청 없이 종료합니다. 성공하면 공식 ticker map과 4개사의 Company Facts/Submissions를 0.6초 이상 간격으로 각각 한 번만 받아 SHA-256 manifest 및 검증 결과를 `data/sec-import/<UTC 실행시각>/`에 저장합니다. 이 원본 디렉터리는 Git에서 제외됩니다.
 
 테스트:
 
