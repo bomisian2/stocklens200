@@ -31,6 +31,10 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - 현재 주가는 적정가 계산식에서 제외하고 계산이 끝난 뒤 저평가율과 판단에만 사용합니다.
 - REIT의 검증된 FFO/AFFO, IFRS ADR, 재배포 가능한 분석가 컨센서스가 없으면 정상 값으로 대체하지 않고 판단을 보류합니다.
 - 앱은 `data/valuations.csv`와 이력 파일만 읽으며 SEC나 Treasury에 직접 접속하지 않습니다.
+- SEC API 403은 재시도하지 않으며 HTTP 상태·도메인·DNS/TLS/timeout·허용된 응답 헤더만 진단합니다. 응답 본문과 쿠키는 로그에 남기지 않습니다.
+- 공식 SEC 벌크 ZIP은 `--sec-companyfacts-zip`/`--sec-submissions-zip`으로 별도 제공할 때만 사용합니다. 자동 대용량 다운로드나 접근제한 우회는 하지 않습니다.
+- acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
+- 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
 설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md)에 기록했습니다.
 

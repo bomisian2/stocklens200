@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -18,8 +18,9 @@ from stocklens.financials import (  # noqa: E402
     KNOWN_CIKS,
     FinancialDataError,
     SecClient,
+    SecApiProvider,
+    SecBulkZipProvider,
     build_cik_map,
-    fetch_company_periods,
 )
 from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
@@ -27,8 +28,30 @@ from stocklens.valuation import MODEL_VERSION, ValuationResult, evaluate_company
 from stocklens.valuation_storage import ValuationStore  # noqa: E402
 
 
-def _safe_error(ticker: str, exc: Exception) -> str:
-    return f"{ticker}: {type(exc).__name__}"
+def _safe_error(ticker: str, exc: Exception) -> dict:
+    if isinstance(exc, FinancialDataError):
+        return {"ticker": ticker, **exc.diagnostic.to_dict()}
+    return {"ticker": ticker, "category": "unexpected", "error_type": type(exc).__name__}
+
+
+def _stale_prior_result(prior: dict, reason: str) -> ValuationResult:
+    values = {}
+    nullable_numbers = {
+        "financials_as_of_utc", "conservative_value", "base_value", "optimistic_value",
+        "upside_to_base", "safety_margin", "favorable_buy_low", "favorable_buy_high",
+        "prior_base_value", "base_value_change",
+    }
+    for field in fields(ValuationResult):
+        value = prior.get(field.name, field.default)
+        if field.name in nullable_numbers and pd.isna(value):
+            value = None
+        values[field.name] = value
+    values.update({
+        "status": "stale",
+        "judgement": "판단 보류",
+        "change_reason": reason,
+    })
+    return ValuationResult(**values)
 
 
 def _hold_result(row: pd.Series, evaluated_at: datetime, reason: str) -> ValuationResult:
@@ -67,6 +90,8 @@ def main() -> int:
     parser.add_argument("--tickers", nargs="*", help="Optional development subset")
     parser.add_argument("--max-companies", type=int, default=None)
     parser.add_argument("--allow-partial", action="store_true", help="Allow fewer than 200 outputs for development")
+    parser.add_argument("--sec-companyfacts-zip", type=Path, default=None, help="Optional official SEC companyfacts bulk ZIP")
+    parser.add_argument("--sec-submissions-zip", type=Path, default=None, help="Optional official SEC submissions bulk ZIP")
     args = parser.parse_args()
 
     snapshot_store = SnapshotStore(args.data_dir)
@@ -92,7 +117,7 @@ def main() -> int:
         cached_by_ticker.setdefault(period.ticker, []).append(period)
 
     sec = SecClient()
-    errors: list[str] = []
+    errors: list[dict] = []
     try:
         cik_map = {**KNOWN_CIKS, **build_cik_map(sec.get_json(SEC_COMPANY_TICKERS_URL))}
     except FinancialDataError as exc:
@@ -117,33 +142,68 @@ def main() -> int:
             "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "last_refresh_attempt_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "data_state": "degraded",
+            "financial_freshness_state": "stale",
             "used_cache": True,
             "provider_error_count": len(errors),
             "provider_errors": errors,
             "eligible_for_new_valuation": False,
+            "eligible_for_new_signals": False,
         })
         print(json.dumps({"preserved_last_good": True, "provider_error_count": len(errors)}, sort_keys=True))
         return 0
 
+    providers = []
+    if args.sec_companyfacts_zip:
+        providers.append(SecBulkZipProvider(args.sec_companyfacts_zip, args.sec_submissions_zip))
+    providers.append(SecApiProvider(sec))
+
     refreshed_by_ticker: dict[str, list] = {}
     cached_tickers: set[str] = set()
+    unavailable_tickers: set[str] = set()
+    fresh_tickers: set[str] = set()
     for row in universe.itertuples(index=False):
         ticker = str(row.ticker)
         cik = cik_map.get(ticker.replace("-", "."))
         if cik is None:
             refreshed_by_ticker[ticker] = [replace(period, validation_state="degraded", validation_notes="cached after CIK lookup failure") for period in cached_by_ticker.get(ticker, [])]
-            cached_tickers.add(ticker)
-            errors.append(f"{ticker}: SEC CIK unavailable")
+            if refreshed_by_ticker[ticker]:
+                cached_tickers.add(ticker)
+            unavailable_tickers.add(ticker)
+            errors.append({"ticker": ticker, "provider": "sec", "category": "cik_unavailable"})
             continue
-        try:
-            periods = fetch_company_periods(sec, ticker, cik, as_of=evaluated_at)
-            refreshed_by_ticker[ticker] = periods or cached_by_ticker.get(ticker, [])
-            if not periods:
-                errors.append(f"{ticker}: no eligible point-in-time annual facts")
-        except FinancialDataError as exc:
+        periods = []
+        for provider in providers:
+            try:
+                periods = provider.fetch_periods(ticker, cik, as_of=evaluated_at)
+                if periods:
+                    break
+                errors.append({"ticker": ticker, "provider": provider.name, "category": "no_eligible_point_in_time_facts"})
+            except FinancialDataError as exc:
+                errors.append(_safe_error(ticker, exc))
+        if periods:
+            refreshed_by_ticker[ticker] = periods
+            fresh_tickers.add(ticker)
+        else:
             refreshed_by_ticker[ticker] = [replace(period, validation_state="degraded", validation_notes="cached after SEC provider failure") for period in cached_by_ticker.get(ticker, [])]
-            cached_tickers.add(ticker)
-            errors.append(_safe_error(ticker, exc))
+            if refreshed_by_ticker[ticker]:
+                cached_tickers.add(ticker)
+            unavailable_tickers.add(ticker)
+
+    if not fresh_tickers and not previous.empty:
+        prior_status = valuation_store.load_status()
+        valuation_store.save_status({
+            **prior_status,
+            "last_refresh_attempt_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "data_state": "degraded",
+            "financial_freshness_state": "stale",
+            "used_cache": True,
+            "provider_error_count": len(errors),
+            "provider_errors": errors[:200],
+            "eligible_for_new_valuation": False,
+            "eligible_for_new_signals": False,
+        })
+        print(json.dumps({"preserved_last_good": True, "provider_error_count": len(errors)}, sort_keys=True))
+        return 0
 
     selected_tickers = set(universe["ticker"])
     retained = [period for period in cached_periods if period.ticker not in selected_tickers]
@@ -154,7 +214,12 @@ def main() -> int:
     results: list[ValuationResult] = []
     for _, row in universe.iterrows():
         ticker = str(row.ticker)
-        if risk_free is None:
+        prior = previous_by_ticker.get(ticker, {})
+        if ticker in unavailable_tickers and prior:
+            result = _stale_prior_result(prior, "provider refresh failed; prior verified valuation retained and blocked from new signals")
+        elif ticker in unavailable_tickers:
+            result = _hold_result(row, evaluated_at, "no verified financial provider and no prior snapshot")
+        elif risk_free is None:
             result = _hold_result(row, evaluated_at, "official risk-free rate unavailable")
         else:
             result = evaluate_company(
@@ -169,7 +234,6 @@ def main() -> int:
                 evaluated_at=evaluated_at,
                 independent_financial_crosscheck=False,
             )
-        prior = previous_by_ticker.get(ticker, {})
         prior_base = prior.get("base_value")
         if pd.notna(prior_base) and result.base_value is not None:
             changed = result.base_value / float(prior_base) - 1
@@ -206,8 +270,10 @@ def main() -> int:
         "provider_errors": errors[:200],
         "cached_ticker_count": len(cached_tickers),
         "used_cache": bool(cached_tickers),
+        "financial_freshness_state": "stale" if cached_tickers else "unverified" if unavailable_tickers else "verified",
         "data_state": "degraded" if errors else "healthy",
-        "eligible_for_new_valuation": risk_free is not None and evaluated > 0,
+        "eligible_for_new_valuation": risk_free is not None and evaluated > 0 and not unavailable_tickers,
+        "eligible_for_new_signals": risk_free is not None and evaluated > 0 and not unavailable_tickers,
         "eligible_for_display": evaluated > 0,
         "limitations": [
             "Consensus EPS/revenue revisions remain unavailable without a redistribution-safe free source.",

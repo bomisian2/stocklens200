@@ -171,6 +171,16 @@ with tab_value:
             if valuation_status_path.exists()
             else {}
         )
+        financial_freshness = str(valuation_status.get("financial_freshness_state") or "unverified")
+        if financial_freshness == "stale":
+            st.warning(
+                "재무 공급원 갱신에 실패해 마지막 정상 평가 스냅샷을 보존 중입니다. "
+                "이 결과는 신규 매매 신호에 사용되지 않습니다."
+            )
+        elif financial_freshness != "verified":
+            st.warning(
+                "재무 데이터 최신성을 검증하지 못했습니다. 검증 완료 전에는 신규 평가·매매 신호에 사용하지 않습니다."
+            )
         evaluated = valuations[valuations["status"] == "evaluated"].copy()
         value_metrics = st.columns(4)
         value_metrics[0].metric("분석 완료", f"{len(evaluated):,}개")

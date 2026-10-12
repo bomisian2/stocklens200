@@ -33,6 +33,13 @@ class ValuationStore:
         except pd.errors.EmptyDataError:
             return []
         allowed = {field.name for field in fields(FinancialPeriod)}
+        compatibility_defaults = {
+            "availability_basis": "legacy_unknown",
+            "availability_estimated": True,
+        }
+        for column, default in compatibility_defaults.items():
+            if column not in frame.columns:
+                frame[column] = default
         missing = allowed - set(frame.columns)
         if missing:
             raise ValuationStoreError(f"financial columns missing: {sorted(missing)}")
@@ -50,6 +57,8 @@ class ValuationStore:
                     values[key] = None if value in {"", None} else float(value)
                 elif key in {"cik", "fiscal_year"}:
                     values[key] = int(value)
+                elif key == "availability_estimated":
+                    values[key] = str(value).strip().lower() in {"1", "true", "yes"}
                 elif key == "period_start":
                     values[key] = None if value in {"", None} else str(value)
                 else:

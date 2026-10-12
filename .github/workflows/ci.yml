@@ -57,6 +57,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/stocklens-valuation"
           cp data/universe.csv data/status.json "$RUNNER_TEMP/stocklens-valuation/"
+      - name: Diagnose official financial sources without response bodies
+        run: python scripts/diagnose_financial_sources.py
       - name: Calculate point-in-time sample valuations
         run: >-
           python scripts/update_valuations.py
@@ -70,8 +72,10 @@ jobs:
           --allow-partial
           --require-tickers GOOGL AMAT AVGO QCOM
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: valuation-sample
+          if-no-files-found: warn
           path: |
             ${{ runner.temp }}/stocklens-valuation/financials.csv
             ${{ runner.temp }}/stocklens-valuation/valuations.csv

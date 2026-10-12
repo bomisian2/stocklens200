@@ -13,6 +13,7 @@ def _period(year: int, *, eps: float = 5.0, fcf: float = 20_000.0, operating: fl
         ticker="GOOGL", cik=1652044, company_name="Alphabet", fiscal_year=year,
         period_type="FY", period_start=f"{year}-01-01", period_end=f"{year}-12-31",
         filed_at=f"{year + 1}-02-01", available_at_utc=f"{year + 1}-02-01T21:00:00+00:00",
+        availability_basis="sec_acceptance_timestamp", availability_estimated=False,
         form="10-K", accession=f"{year}-x", currency="USD", revenue=100_000 + (year - 2020) * 10_000,
         operating_income=operating, net_income=net, pretax_income=27_000, income_tax=5_000,
         diluted_eps=eps, diluted_shares=4_000, cfo=30_000, capex=10_000, fcf=fcf,

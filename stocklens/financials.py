@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import socket
+import ssl
 import time
+import zipfile
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time as dt_time, timezone
-from typing import Any, Callable, Iterable
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Protocol
+from urllib.parse import urlparse
 
 import requests
 
@@ -12,6 +17,8 @@ import requests
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+SEC_COMPANY_FACTS_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
+SEC_SUBMISSIONS_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
 SEC_SOURCE = "sec_edgar_companyfacts"
 KNOWN_CIKS = {
     # Stable SEC registrant identifiers for the mandatory four-company sample.
@@ -75,8 +82,27 @@ FACT_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+@dataclass(frozen=True)
+class ProviderDiagnostic:
+    provider: str
+    domain: str
+    endpoint: str
+    category: str
+    http_status: int | None = None
+    timeout_seconds: float | None = None
+    error_type: str | None = None
+    response_headers: dict[str, str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class FinancialDataError(RuntimeError):
-    """A bounded provider or validation failure without response-body leakage."""
+    """A bounded provider failure carrying only allow-listed diagnostics."""
+
+    def __init__(self, diagnostic: ProviderDiagnostic) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(json.dumps(diagnostic.to_dict(), sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -90,6 +116,8 @@ class FinancialPeriod:
     period_end: str
     filed_at: str
     available_at_utc: str
+    availability_basis: str
+    availability_estimated: bool
     form: str
     accession: str
     currency: str
@@ -126,9 +154,9 @@ class SecClient:
         self,
         *,
         session: requests.Session | None = None,
-        user_agent: str = "StockLens200/2.0 bomisian2@users.noreply.github.com",
+        user_agent: str = "StockLens200/2.1 (+https://github.com/bomisian2/stocklens200; mailto:bomisian2@users.noreply.github.com)",
         attempts: int = 4,
-        minimum_interval: float = 0.2,
+        minimum_interval: float = 0.4,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.session = session or requests.Session()
@@ -139,7 +167,9 @@ class SecClient:
         self._last_request = 0.0
 
     def get_json(self, url: str) -> dict[str, Any]:
-        last_error = "unknown"
+        domain = urlparse(url).hostname or "unknown"
+        endpoint = _endpoint_name(url)
+        last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, "unknown")
         for attempt in range(self.attempts):
             elapsed = time.monotonic() - self._last_request
             if elapsed < self.minimum_interval:
@@ -160,14 +190,167 @@ class SecClient:
                     if not isinstance(payload, dict):
                         raise ValueError("JSON root is not an object")
                     return payload
-                last_error = f"HTTP {response.status_code}"
-                if response.status_code not in {403, 408, 425, 429, 500, 502, 503, 504}:
+                last_diagnostic = ProviderDiagnostic(
+                    provider="sec_api",
+                    domain=domain,
+                    endpoint=endpoint,
+                    category="http",
+                    http_status=int(response.status_code),
+                    timeout_seconds=45.0,
+                    response_headers=_safe_headers(response.headers),
+                )
+                if response.status_code == 403:
                     break
+                if response.status_code not in {408, 425, 429, 500, 502, 503, 504}:
+                    break
+            except requests.ConnectTimeout as exc:
+                last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, "connect_timeout", timeout_seconds=5.0, error_type=type(exc).__name__)
+            except requests.ReadTimeout as exc:
+                last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, "read_timeout", timeout_seconds=45.0, error_type=type(exc).__name__)
+            except requests.exceptions.SSLError as exc:
+                last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, "tls", error_type=_root_exception_name(exc, ssl.SSLError))
+            except requests.ConnectionError as exc:
+                category = "dns" if _has_exception(exc, socket.gaierror) else "connection"
+                last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, category, error_type=_root_exception_name(exc))
             except (requests.RequestException, ValueError) as exc:
-                last_error = type(exc).__name__
+                last_diagnostic = ProviderDiagnostic("sec_api", domain, endpoint, "response", error_type=type(exc).__name__)
             if attempt + 1 < self.attempts:
                 self.sleep(min(30.0, 2.0**attempt))
-        raise FinancialDataError(f"SEC request failed after {self.attempts} attempts ({last_error})")
+        raise FinancialDataError(last_diagnostic)
+
+
+def _endpoint_name(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if "companyfacts" in path:
+        return "companyfacts"
+    if "submissions" in path:
+        return "submissions"
+    if "company_tickers" in path:
+        return "company_tickers"
+    return "other"
+
+
+def _safe_headers(headers: Any) -> dict[str, str]:
+    allowed = {"server", "content-type", "retry-after", "date", "cache-control", "content-length", "via"}
+    return {
+        str(key).lower(): str(value)[:160]
+        for key, value in headers.items()
+        if str(key).lower() in allowed
+    }
+
+
+def _has_exception(exc: BaseException, expected: type[BaseException]) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, expected):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _root_exception_name(exc: BaseException, preferred: type[BaseException] | None = None) -> str:
+    current: BaseException = exc
+    selected = type(exc).__name__
+    while current.__cause__ is not None or current.__context__ is not None:
+        current = current.__cause__ or current.__context__  # type: ignore[assignment]
+        if preferred is None or isinstance(current, preferred):
+            selected = type(current).__name__
+    return selected
+
+
+def probe_financial_source(
+    url: str,
+    *,
+    provider: str,
+    session: requests.Session | None = None,
+    timeout: tuple[float, float] = (5.0, 20.0),
+) -> ProviderDiagnostic:
+    """Probe headers only; never consume or log a response body."""
+    domain = urlparse(url).hostname or "unknown"
+    endpoint = _endpoint_name(url)
+    client = session or requests.Session()
+    try:
+        response = client.get(
+            url,
+            headers={
+                "User-Agent": "StockLens200/2.1 (+https://github.com/bomisian2/stocklens200; mailto:bomisian2@users.noreply.github.com)",
+                "Accept": "application/json, application/zip;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+            },
+            timeout=timeout,
+            stream=True,
+        )
+        diagnostic = ProviderDiagnostic(
+            provider=provider, domain=domain, endpoint=endpoint,
+            category="ok" if response.status_code == 200 else "http",
+            http_status=int(response.status_code), timeout_seconds=timeout[1],
+            response_headers=_safe_headers(response.headers),
+        )
+        response.close()
+        return diagnostic
+    except requests.ConnectTimeout as exc:
+        return ProviderDiagnostic(provider, domain, endpoint, "connect_timeout", timeout_seconds=timeout[0], error_type=type(exc).__name__)
+    except requests.ReadTimeout as exc:
+        return ProviderDiagnostic(provider, domain, endpoint, "read_timeout", timeout_seconds=timeout[1], error_type=type(exc).__name__)
+    except requests.exceptions.SSLError as exc:
+        return ProviderDiagnostic(provider, domain, endpoint, "tls", error_type=_root_exception_name(exc, ssl.SSLError))
+    except requests.ConnectionError as exc:
+        category = "dns" if _has_exception(exc, socket.gaierror) else "connection"
+        return ProviderDiagnostic(provider, domain, endpoint, category, error_type=_root_exception_name(exc))
+    except requests.RequestException as exc:
+        return ProviderDiagnostic(provider, domain, endpoint, "request", error_type=type(exc).__name__)
+
+
+class FinancialProvider(Protocol):
+    name: str
+
+    def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]: ...
+
+
+class SecApiProvider:
+    name = "sec_api"
+
+    def __init__(self, client: SecClient | None = None) -> None:
+        self.client = client or SecClient()
+
+    def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]:
+        return fetch_company_periods(self.client, ticker, cik, as_of=as_of)
+
+
+class SecBulkZipProvider:
+    """Read official nightly SEC ZIPs supplied by an approved download step."""
+
+    name = "sec_bulk_zip"
+
+    def __init__(self, companyfacts_zip: str | Path, submissions_zip: str | Path | None = None) -> None:
+        self.companyfacts_zip = Path(companyfacts_zip)
+        self.submissions_zip = Path(submissions_zip) if submissions_zip else None
+
+    @staticmethod
+    def _read_json(archive_path: Path, cik: int) -> dict[str, Any]:
+        member = f"CIK{cik:010d}.json"
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                with archive.open(member) as handle:
+                    payload = json.load(handle)
+        except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+            raise FinancialDataError(ProviderDiagnostic(
+                provider="sec_bulk_zip", domain="local", endpoint=archive_path.name,
+                category="bulk_archive", error_type=type(exc).__name__,
+            )) from exc
+        if not isinstance(payload, dict):
+            raise FinancialDataError(ProviderDiagnostic("sec_bulk_zip", "local", archive_path.name, "bulk_schema"))
+        return payload
+
+    def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]:
+        facts = self._read_json(self.companyfacts_zip, cik)
+        submissions: dict[str, Any] = {}
+        if self.submissions_zip:
+            submissions = self._read_json(self.submissions_zip, cik)
+        return extract_financial_periods(
+            ticker=ticker, cik=cik, companyfacts=facts, submissions=submissions,
+            as_of=as_of, source="sec_edgar_bulk",
+        )
 
 
 def normalize_sec_ticker(ticker: str) -> str:
@@ -208,15 +391,27 @@ def _iso_utc(value: str) -> str:
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _available_at(row: dict[str, Any], acceptance: dict[str, str]) -> str:
+@dataclass(frozen=True)
+class Availability:
+    timestamp_utc: str
+    basis: str
+    estimated: bool
+
+
+def _available_at(row: dict[str, Any], acceptance: dict[str, str]) -> Availability:
     accession = str(row.get("accn") or "")
     if accession in acceptance:
-        return acceptance[accession]
-    # Filing date alone has no release time. Midnight *after* the filing date is
-    # conservative and prevents same-day look-ahead in point-in-time evaluation.
+        return Availability(acceptance[accession], "sec_acceptance_timestamp", False)
+    # A filing date has no intraday release time. Midnight on that date would
+    # introduce look-ahead. End of the following UTC day is intentionally
+    # conservative and remains explicitly marked as an estimate.
     filed = date.fromisoformat(str(row["filed"]))
-    next_day = datetime.combine(filed, dt_time.min, tzinfo=timezone.utc)
-    return next_day.isoformat()
+    conservative = datetime.combine(filed + timedelta(days=1), dt_time.max, tzinfo=timezone.utc)
+    return Availability(
+        conservative.replace(microsecond=0).isoformat(),
+        "estimated_end_of_next_utc_day_from_filed_date",
+        True,
+    )
 
 
 def _unit_rows(fact: dict[str, Any], metric: str) -> list[dict[str, Any]]:
@@ -260,14 +455,19 @@ def _eligible_fact_row(row: dict[str, Any], period_type: str, as_of: datetime) -
 
 
 def _metric_rows(
-    facts: dict[str, Any], metric: str, period_type: str, as_of: datetime
+    facts: dict[str, Any], metric: str, period_type: str, as_of: datetime,
+    acceptance: dict[str, str],
 ) -> list[dict[str, Any]]:
     gaap = facts.get("us-gaap") or {}
     for tag in FACT_ALIASES[metric]:
         fact = gaap.get(tag)
         if not isinstance(fact, dict):
             continue
-        rows = [row for row in _unit_rows(fact, metric) if _eligible_fact_row(row, period_type, as_of)]
+        rows = [
+            row for row in _unit_rows(fact, metric)
+            if _eligible_fact_row(row, period_type, as_of)
+            and datetime.fromisoformat(_available_at(row, acceptance).timestamp_utc) <= as_of
+        ]
         if rows:
             return rows
     return []
@@ -311,6 +511,7 @@ def extract_financial_periods(
     submissions: dict[str, Any],
     as_of: datetime,
     annual_years: int = 5,
+    source: str = SEC_SOURCE,
 ) -> list[FinancialPeriod]:
     """Normalize point-in-time annual SEC facts and the latest standalone quarter."""
     if as_of.tzinfo is None:
@@ -319,7 +520,7 @@ def extract_financial_periods(
     facts = companyfacts.get("facts") or {}
     company_name = str(companyfacts.get("entityName") or ticker)
     metric_rows = {
-        metric: _metric_rows(facts, metric, "FY", as_of) for metric in FACT_ALIASES
+        metric: _metric_rows(facts, metric, "FY", as_of, acceptance) for metric in FACT_ALIASES
     }
     years = sorted(
         {
@@ -349,9 +550,13 @@ def extract_financial_periods(
         selected_rows = [row for row in chosen.values() if row]
         latest_row = max(
             selected_rows,
-            key=lambda row: (_available_at(row, acceptance), str(row.get("accn") or "")),
+            key=lambda row: (_available_at(row, acceptance).timestamp_utc, str(row.get("accn") or "")),
         )
-        available_at = max(_available_at(row, acceptance) for row in selected_rows)
+        availability_record = max(
+            (_available_at(row, acceptance) for row in selected_rows),
+            key=lambda item: item.timestamp_utc,
+        )
+        available_at = availability_record.timestamp_utc
         availability = datetime.fromisoformat(available_at)
         if availability > as_of:
             continue
@@ -383,6 +588,8 @@ def extract_financial_periods(
                 period_end=str(anchor.get("end")),
                 filed_at=str(latest_row.get("filed")),
                 available_at_utc=available_at,
+                availability_basis=availability_record.basis,
+                availability_estimated=availability_record.estimated,
                 form=str(anchor.get("form")),
                 accession=accession,
                 currency="USD",
@@ -390,13 +597,14 @@ def extract_financial_periods(
                 total_debt=debt,
                 validation_state=state,
                 validation_notes="; ".join(notes),
+                source=source,
                 source_url=source_url,
                 **values,
             )
         )
 
     quarter_rows = {
-        metric: _metric_rows(facts, metric, "Q", as_of) for metric in FACT_ALIASES
+        metric: _metric_rows(facts, metric, "Q", as_of, acceptance) for metric in FACT_ALIASES
     }
     quarter_ends = sorted(
         {
@@ -419,8 +627,12 @@ def extract_financial_periods(
         anchor_q = chosen_q.get("revenue") or chosen_q.get("net_income") or chosen_q.get("cfo")
         if anchor_q:
             selected_q = [row for row in chosen_q.values() if row]
-            latest_q = max(selected_q, key=lambda row: (_available_at(row, acceptance), str(row.get("accn") or "")))
-            available_q = max(_available_at(row, acceptance) for row in selected_q)
+            latest_q = max(selected_q, key=lambda row: (_available_at(row, acceptance).timestamp_utc, str(row.get("accn") or "")))
+            availability_q_record = max(
+                (_available_at(row, acceptance) for row in selected_q),
+                key=lambda item: item.timestamp_utc,
+            )
+            available_q = availability_q_record.timestamp_utc
             if datetime.fromisoformat(available_q) <= as_of:
                 q_values = {metric: _value(row) for metric, row in chosen_q.items()}
                 q_debt = q_values.pop("debt_total")
@@ -444,6 +656,8 @@ def extract_financial_periods(
                         period_end=quarter_end,
                         filed_at=str(latest_q.get("filed")),
                         available_at_utc=available_q,
+                        availability_basis=availability_q_record.basis,
+                        availability_estimated=availability_q_record.estimated,
                         form=str(latest_q.get("form")),
                         accession=accession_q,
                         currency="USD",
@@ -451,6 +665,7 @@ def extract_financial_periods(
                         total_debt=q_debt,
                         validation_state="verified" if all(q_values.get(metric) is not None for metric in ("revenue", "net_income")) else "degraded",
                         validation_notes="standalone latest quarter; guidance is not inferred from XBRL",
+                        source=source,
                         source_url=(f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_q.replace('-', '')}/" if accession_q else ""),
                         **q_values,
                     )
