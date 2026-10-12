@@ -88,7 +88,8 @@ Official references:
 - U.S. Treasury daily rate feed: https://home.treasury.gov/treasury-daily-interest-rate-xml-feed
 
 The detailed access and licensing matrix is in `docs/financial-source-review.md`. Offline import
-instructions and integrity gates are in `docs/sec-offline-import.md`.
+instructions and integrity gates are in `docs/sec-offline-import.md`. Automatic ingestion options
+and the recommended self-hosted collector boundary are in `docs/automatic-financial-ingestion.md`.
 
 ## Consequences
 

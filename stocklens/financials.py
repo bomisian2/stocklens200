@@ -26,6 +26,47 @@ KNOWN_CIKS = {
     "QCOM": 804328,
 }
 
+
+def validate_ticker_cik(
+    ticker: str,
+    cik: int,
+    *,
+    expected: dict[str, int] | None = None,
+    provider: str = "sec",
+) -> None:
+    """Fail closed when a ticker is mapped to a different SEC registrant."""
+    normalized = normalize_sec_ticker(ticker)
+    reference = expected if expected is not None else KNOWN_CIKS
+    expected_cik = reference.get(normalized)
+    if expected_cik is not None and int(cik) != int(expected_cik):
+        raise FinancialDataError(ProviderDiagnostic(
+            provider=provider,
+            domain="local",
+            endpoint=normalized,
+            category="ticker_cik_mismatch",
+            error_type=f"expected_CIK{int(expected_cik):010d}_received_CIK{int(cik):010d}",
+        ))
+
+
+def merge_cik_maps(*mappings: dict[str, int], provider: str = "sec") -> dict[str, int]:
+    """Merge mappings without allowing a later source to silently replace an issuer."""
+    merged: dict[str, int] = {}
+    for mapping in mappings:
+        for raw_ticker, raw_cik in mapping.items():
+            ticker = normalize_sec_ticker(raw_ticker)
+            cik = int(raw_cik)
+            validate_ticker_cik(ticker, cik, provider=provider)
+            if ticker in merged and merged[ticker] != cik:
+                raise FinancialDataError(ProviderDiagnostic(
+                    provider=provider,
+                    domain="local",
+                    endpoint=ticker,
+                    category="ticker_cik_mismatch",
+                    error_type=f"conflicting_CIK{merged[ticker]:010d}_and_CIK{cik:010d}",
+                ))
+            merged[ticker] = cik
+    return merged
+
 # Ordered aliases. The first usable tag wins so the same filing always produces
 # the same normalized row. Values are GAAP unless the taxonomy says otherwise.
 FACT_ALIASES: dict[str, tuple[str, ...]] = {
@@ -315,6 +356,7 @@ class SecApiProvider:
         self.client = client or SecClient()
 
     def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]:
+        validate_ticker_cik(ticker, cik, provider=self.name)
         return fetch_company_periods(self.client, ticker, cik, as_of=as_of)
 
 

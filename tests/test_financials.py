@@ -7,9 +7,12 @@ from pathlib import Path
 
 from stocklens.financials import (
     FinancialDataError,
+    KNOWN_CIKS,
     SecClient,
     build_cik_map,
     extract_financial_periods,
+    merge_cik_maps,
+    validate_ticker_cik,
 )
 from stocklens.sec_files import SecFileProvider, normalized_periods_sha256, sha256_file
 
@@ -36,6 +39,23 @@ def _annual(year: int, value: float, *, filed: str, accn: str, start: str | None
 def test_build_cik_map_normalizes_share_class_symbols() -> None:
     payload = {"0": {"ticker": "BRK-B", "cik_str": 1067983}, "1": {"ticker": "GOOGL", "cik_str": "1652044"}}
     assert build_cik_map(payload) == {"BRK.B": 1067983, "GOOGL": 1652044}
+
+
+def test_official_sample_ciks_are_fixed_and_conflicts_fail_closed() -> None:
+    assert KNOWN_CIKS == {
+        "GOOGL": 1652044,
+        "AMAT": 6951,
+        "AVGO": 1730168,
+        "QCOM": 804328,
+    }
+    validate_ticker_cik("AMAT", 6951)
+    try:
+        merge_cik_maps(KNOWN_CIKS, {"AMAT": 697900}, provider="test")
+    except FinancialDataError as exc:
+        assert exc.diagnostic.category == "ticker_cik_mismatch"
+        assert exc.diagnostic.endpoint == "AMAT"
+    else:
+        raise AssertionError("conflicting AMAT CIK must be rejected")
 
 
 def test_extract_periods_is_point_in_time_and_uses_latest_split_adjusted_comparative() -> None:
@@ -169,7 +189,7 @@ def test_official_offline_manifest_uses_same_point_in_time_rules(tmp_path: Path)
         "WeightedAverageNumberOfDilutedSharesOutstanding": _fact("Shares", [{**row, "val": 10.0}], "shares"),
         "NetCashProvidedByUsedInOperatingActivities": _fact("CFO", [{**row, "val": 30.0}]),
     }}}
-    submissions = {"filings": {"recent": {
+    submissions = {"cik": "1", "tickers": ["EX"], "filings": {"recent": {
         "accessionNumber": ["a"], "acceptanceDateTime": ["2024-02-01T21:00:00Z"],
     }}}
     facts_zip = tmp_path / "companyfacts.zip"
@@ -208,6 +228,41 @@ def test_official_offline_manifest_uses_same_point_in_time_rules(tmp_path: Path)
     provenance = provider.provenance(periods=rows)
     assert provenance["normalized_sha256"] == normalized_periods_sha256(rows)
     assert provenance["fixture"] is False
+
+
+def test_offline_provider_rejects_ticker_not_supported_by_official_identity(tmp_path: Path) -> None:
+    facts = tmp_path / "facts.json"
+    submissions = tmp_path / "submissions.json"
+    facts.write_text(json.dumps({"cik": 1, "entityName": "Example", "facts": {}}), encoding="utf-8")
+    submissions.write_text(json.dumps({"cik": "1", "tickers": ["RIGHT"]}), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "provider": "sec_edgar_official_files",
+        "obtained_at_utc": "2024-03-01T12:00:00+00:00",
+        "fixture": False,
+        "artifacts": [
+            {
+                "role": "companyfacts", "path": facts.name,
+                "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000000001.json",
+                "sha256": sha256_file(facts), "cik": 1,
+            },
+            {
+                "role": "submissions", "path": submissions.name,
+                "source_url": "https://data.sec.gov/submissions/CIK0000000001.json",
+                "sha256": sha256_file(submissions), "cik": 1,
+            },
+        ],
+    }), encoding="utf-8")
+    provider = SecFileProvider.from_manifest(manifest)
+    try:
+        provider.fetch_periods(
+            "WRONG", 1, as_of=datetime(2024, 3, 1, tzinfo=timezone.utc)
+        )
+    except FinancialDataError as exc:
+        assert exc.diagnostic.category == "ticker_cik_identity_unverified"
+    else:
+        raise AssertionError("ticker absent from official identity data must be rejected")
 
 
 def test_offline_manifest_rejects_fixture_and_hash_mismatch(tmp_path: Path) -> None:

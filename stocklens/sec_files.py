@@ -17,9 +17,13 @@ from .financials import (
     SEC_SUBMISSIONS_URL,
     FinancialDataError,
     FinancialPeriod,
+    KNOWN_CIKS,
     ProviderDiagnostic,
     build_cik_map,
     extract_financial_periods,
+    merge_cik_maps,
+    normalize_sec_ticker,
+    validate_ticker_cik,
 )
 
 
@@ -113,6 +117,7 @@ class SecFileProvider:
         self.base_dir = manifest_path.parent.resolve()
         self.obtained_at_utc = obtained_at_utc
         self.artifacts = artifacts
+        self._cik_map_cache: dict[str, int] | None = None
 
     @classmethod
     def from_manifest(cls, manifest_path: str | Path) -> "SecFileProvider":
@@ -191,12 +196,24 @@ class SecFileProvider:
         return payload
 
     def cik_map(self) -> dict[str, int]:
+        if self._cik_map_cache is not None:
+            return dict(self._cik_map_cache)
         artifact = self._artifact("ticker_map")
         if not artifact:
             return {}
-        return build_cik_map(self._read_json(artifact))
+        self._cik_map_cache = merge_cik_maps(
+            build_cik_map(self._read_json(artifact)), provider="sec_offline_files"
+        )
+        return dict(self._cik_map_cache)
 
     def fetch_periods(self, ticker: str, cik: int, *, as_of: datetime) -> list[FinancialPeriod]:
+        ticker = normalize_sec_ticker(ticker)
+        validate_ticker_cik(ticker, cik, provider="sec_offline_files")
+        official_map = self.cik_map()
+        if ticker in official_map:
+            validate_ticker_cik(
+                ticker, cik, expected=official_map, provider="sec_offline_files"
+            )
         facts_artifact = self._artifact("companyfacts", cik)
         if facts_artifact is None:
             raise FinancialDataError(ProviderDiagnostic(
@@ -219,6 +236,20 @@ class SecFileProvider:
                     "sec_offline_files", "local", submissions_artifact.path.name, "cik_mismatch"
                 ))
             hashes.append(submissions_artifact.sha256)
+        submission_tickers = {
+            normalize_sec_ticker(value)
+            for value in submissions.get("tickers", [])
+            if isinstance(value, str)
+        }
+        identity_verified = (
+            KNOWN_CIKS.get(ticker) == cik
+            or official_map.get(ticker) == cik
+            or ticker in submission_tickers
+        )
+        if not identity_verified:
+            raise FinancialDataError(ProviderDiagnostic(
+                "sec_offline_files", "local", ticker, "ticker_cik_identity_unverified"
+            ))
         combined_hash = hashlib.sha256(":".join(sorted(hashes)).encode("ascii")).hexdigest()
         return extract_financial_periods(
             ticker=ticker,

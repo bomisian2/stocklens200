@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from stocklens.financials import KNOWN_CIKS  # noqa: E402
+from stocklens.financials import KNOWN_CIKS, merge_cik_maps  # noqa: E402
 from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.valuation_storage import ValuationStore  # noqa: E402
 
@@ -45,7 +45,12 @@ def main() -> int:
     args = parser.parse_args()
 
     provider = SecFileProvider.from_manifest(args.manifest)
-    cik_map = {**KNOWN_CIKS, **provider.cik_map(), **_ticker_cik(args.ticker_cik)}
+    cik_map = merge_cik_maps(
+        KNOWN_CIKS,
+        provider.cik_map(),
+        _ticker_cik(args.ticker_cik),
+        provider="sec_offline_import",
+    )
     periods = []
     missing: list[str] = []
     for raw_ticker in args.tickers:

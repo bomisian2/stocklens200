@@ -21,6 +21,7 @@ from stocklens.financials import (  # noqa: E402
     SecClient,
     SecApiProvider,
     build_cik_map,
+    merge_cik_maps,
 )
 from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
 from stocklens.sec_files import SecFileProvider  # noqa: E402
@@ -140,7 +141,11 @@ def main() -> int:
     if args.financial_source == "sec-api":
         sec = SecClient()
         try:
-            cik_map.update(build_cik_map(sec.get_json(SEC_COMPANY_TICKERS_URL)))
+            cik_map = merge_cik_maps(
+                cik_map,
+                build_cik_map(sec.get_json(SEC_COMPANY_TICKERS_URL)),
+                provider="sec_api",
+            )
         except FinancialDataError as exc:
             errors.append(_safe_error("SEC ticker map", exc))
         providers.append(SecApiProvider(sec))
@@ -153,7 +158,9 @@ def main() -> int:
     else:
         try:
             offline_provider = SecFileProvider.from_manifest(args.sec_manifest)
-            cik_map.update(offline_provider.cik_map())
+            cik_map = merge_cik_maps(
+                cik_map, offline_provider.cik_map(), provider="sec_offline_files"
+            )
             providers.append(offline_provider)
         except (ValueError, FinancialDataError) as exc:
             errors.append(_safe_error("offline import", exc))
