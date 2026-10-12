@@ -144,10 +144,16 @@ def test_provisional_dcf_exposes_schedule_reverse_dcf_and_confidence_scope() -> 
     assert model["inputs"]["cash_flow_classification"] == "levered_equity_cash_flow_proxy_not_canonical_fcfe"
     assert len(model["inputs"]["base_case_audit"]["schedule"]) == 5
     assert model["inputs"]["balance_sheet_bridge"]["applied_to_equity_value"] is False
+    assert model["inputs"]["fcff_economic_definition_gate"]["status"] == "incomplete"
+    assert model["inputs"]["fcff_economic_definition_gate"]["fcff_components"]["formal_fcff"] is None
+    assert model["inputs"]["fcff_economic_definition_gate"]["wacc"]["wacc"] is None
+    assert model["inputs"]["fcff_economic_definition_gate"]["enterprise_value"] is None
     assert model["inputs"]["reverse_dcf"]["revenue_margin_reinvestment_identification"] == "underdetermined"
     assert result.status == "provisional"
     assert result.confidence_scope == "research_input_completeness_not_investment_confidence"
     assert result.operational_eligible is False
+    dimensions = json.loads(result.confidence_dimensions_json)
+    assert dimensions["cash_flow_economic_definition"] == "incomplete_fcff_wacc_and_equity_bridge"
 
 
 def test_company_specific_band_is_not_fixed_ten_percent() -> None:

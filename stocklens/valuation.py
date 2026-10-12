@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .dcf import equity_fcf_schedule, reverse_dcf_sensitivity
+from .fcff import fcff_components, operating_tax_evidence, wacc_evidence
 from .financials import FinancialPeriod
 from .valuation_evidence import ValuationEvidence
 
 
-MODEL_VERSION = "valuation-v2.1.2"
+MODEL_VERSION = "valuation-v2.2.0"
 EQUITY_RISK_PREMIUM = 0.05
 FINANCIAL_SECTORS = {"Financial Services", "Financials"}
 REIT_INDUSTRY_WORDS = {"reit", "real estate investment trust"}
@@ -174,8 +175,12 @@ def _normalized_metrics(
         "fcf": fcf,
         "shares": shares,
         "revenue": latest.revenue,
+        "operating_income": latest.operating_income,
+        "pretax_income": latest.pretax_income,
+        "income_tax": latest.income_tax,
         "cfo": latest.cfo,
         "capex": latest.capex,
+        "depreciation_amortization": latest.depreciation_amortization,
         "ebitda": operating + da if operating is not None and da is not None else None,
         "revenue_growth": revenue_growth,
         "fcf_growth": fcf_growth,
@@ -283,6 +288,7 @@ def _dcf_model(
     metrics: dict[str, float | None],
     family: str,
     discount_rate: float,
+    risk_free_rate: float,
     evidence: ValuationEvidence | None,
     evaluated_at: datetime,
     price: float,
@@ -362,6 +368,34 @@ def _dcf_model(
         "applied_to_equity_value": False,
         "reason": base_audit["bridge_reason"],
     }
+    tax_evidence = None
+    fcff_gate = None
+    if all(metrics.get(field) is not None for field in ("operating_income", "pretax_income", "income_tax")):
+        tax_evidence = operating_tax_evidence(
+            operating_income=float(metrics["operating_income"]),
+            pretax_income=float(metrics["pretax_income"]),
+            income_tax=float(metrics["income_tax"]),
+        )
+        if metrics.get("depreciation_amortization") is not None and capex is not None:
+            fcff_gate = fcff_components(
+                operating_income=float(metrics["operating_income"]),
+                depreciation_amortization=float(metrics["depreciation_amortization"]),
+                capex=float(capex),
+                verified_operating_tax_rate=None,
+                verified_change_operating_working_capital=None,
+                research_tax_rate=tax_evidence["reported_effective_tax_rate"],
+            )
+    wacc_gate = wacc_evidence(
+        risk_free_rate=risk_free_rate,
+        beta=None,
+        equity_risk_premium=EQUITY_RISK_PREMIUM,
+        pretax_cost_of_debt=None,
+        marginal_tax_rate=None,
+        equity_market_value=price * shares,
+        debt_market_value=None,
+        verified_components=("risk_free_rate",),
+        legacy_data_quality_premium=max(0.0, discount_rate - risk_free_rate - EQUITY_RISK_PREMIUM),
+    )
 
     return ModelResult(
         "fcf_dcf", True,
@@ -387,6 +421,20 @@ def _dcf_model(
                 "optimistic": optimistic_audit["terminal_value_share"],
             },
             "balance_sheet_bridge": balance_bridge,
+            "fcff_economic_definition_gate": {
+                "status": "incomplete",
+                "tax_evidence": tax_evidence,
+                "fcff_components": fcff_gate,
+                "wacc": wacc_gate,
+                "enterprise_fcff_dcf": None,
+                "enterprise_value": None,
+                "common_equity_value": None,
+                "operational_use": False,
+                "reason": (
+                    "verified operating tax, operating working-capital change, beta/ERP, debt yield, "
+                    "marginal tax rate and market-value capital weights are incomplete"
+                ),
+            },
             "capex_to_revenue": capex / revenue if capex is not None and revenue else None,
             "reverse_dcf": {
                 "market_price": price,
@@ -400,8 +448,8 @@ def _dcf_model(
             },
         },
         (
-            "issuer-defined CFO-minus-CAPEX is discounted once as a levered equity cash-flow proxy; "
-            "growth is applied once, no enterprise bridge is applied, and reverse DCF is diagnostic only"
+            "issuer-defined CFO-minus-CAPEX remains a levered research proxy; formal FCFF, WACC, "
+            "enterprise value and the common-equity bridge are withheld by independent evidence gates"
         ),
     )
 
@@ -507,7 +555,7 @@ def evaluate_company(
     leverage = ((metrics.get("debt") or 0) - (metrics.get("cash") or 0)) / max(metrics.get("fcf") or 1, 1)
     leverage_premium = _clamp(max(0.0, leverage - 2.0) * 0.003, 0.0, 0.025)
     discount_rate = _clamp(risk_free_rate + EQUITY_RISK_PREMIUM + data_quality_premium + leverage_premium, 0.07, 0.18)
-    models = [_financial_model(metrics, discount_rate)] if family == "financial" else [_earnings_model(valuation_evidence, evaluated_at, risk_free_rate), _dcf_model(metrics, family, discount_rate, valuation_evidence, evaluated_at, price), _ev_ebitda_model(metrics, valuation_evidence, evaluated_at)]
+    models = [_financial_model(metrics, discount_rate)] if family == "financial" else [_earnings_model(valuation_evidence, evaluated_at, risk_free_rate), _dcf_model(metrics, family, discount_rate, risk_free_rate, valuation_evidence, evaluated_at, price), _ev_ebitda_model(metrics, valuation_evidence, evaluated_at)]
     models = _assign_weights(models)
     base, conservative, optimistic = _weighted(models, "base"), _weighted(models, "conservative"), _weighted(models, "optimistic")
     coverage_fields = ("revenue", "operating_income", "net_income", "diluted_eps", "diluted_shares", "cfo", "capex", "cash", "total_debt", "equity")
@@ -525,6 +573,7 @@ def evaluate_company(
         ),
         "forecast_quality": "point_in_time_verified" if has_visible_forecast else "insufficient",
         "valuation_model_confidence": "research_only" if not has_visible_forecast else "eligible_for_model_review",
+        "cash_flow_economic_definition": "incomplete_fcff_wacc_and_equity_bridge",
         "operational_judgement_eligibility": False,
     }
     details = [asdict(model) for model in models]

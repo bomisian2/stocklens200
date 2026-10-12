@@ -14,6 +14,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from stocklens.dcf import equity_fcf_schedule, reverse_dcf_sensitivity, solve_implied_fcf_growth  # noqa: E402
+from stocklens.fcff import (  # noqa: E402
+    enterprise_fcff_schedule,
+    enterprise_to_equity_bridge,
+    fcff_components,
+    operating_fcff_projection,
+    operating_tax_evidence,
+    wacc_evidence,
+    working_capital_evidence,
+)
 
 
 def _number(row: pd.Series, field: str) -> float:
@@ -37,6 +46,7 @@ def build_audit(
     capex_guidance_low: float,
     capex_guidance_high: float,
     capex_guidance_source: str,
+    fcff_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     frame = pd.read_csv(financials)
     frame = frame[frame["ticker"].eq("GOOGL")].copy()
@@ -59,6 +69,15 @@ def build_audit(
     price = _number(market_row, "price")
     revenue_growth = _cagr(_number(annual.iloc[0], "revenue"), _number(annual.iloc[-1], "revenue"), len(annual) - 1)
     fcf_growth = _cagr(_number(annual.iloc[0], "fcf"), _number(annual.iloc[-1], "fcf"), len(annual) - 1)
+    annual_revenues = [_number(row, "revenue") for _, row in annual.iterrows()]
+    annual_revenue_growth = [
+        current / previous - 1
+        for previous, current in zip(annual_revenues, annual_revenues[1:])
+    ]
+    annual_operating_margins = [
+        _number(row, "operating_income") / _number(row, "revenue")
+        for _, row in annual.iterrows()
+    ]
     historical_growth = statistics.median([revenue_growth, fcf_growth])
     discount_rate = risk_free_rate + 0.05 + 0.015
     terminal_growth = min(0.025, max(0.0, historical_growth / 2))
@@ -137,8 +156,137 @@ def build_audit(
     marketable_value = None if pd.isna(marketable) else float(marketable)
     q1 = frame[(frame["period_type"].eq("Q")) & frame["period_end"].eq("2026-03-31")].iloc[0]
     q2 = frame[(frame["period_type"].eq("Q")) & frame["period_end"].eq("2026-06-30")].iloc[0]
+    fcff_audit = None
+    if fcff_evidence_path is not None:
+        evidence = json.loads(fcff_evidence_path.read_text(encoding="utf-8"))
+        if evidence.get("schema_version") != 1 or evidence.get("ticker") != "GOOGL":
+            raise ValueError("FCFF evidence must be schema v1 for GOOGL")
+        gains = evidence["identified_equity_security_gains"]
+        tax = operating_tax_evidence(
+            operating_income=_number(ttm_row, "operating_income"),
+            pretax_income=_number(ttm_row, "pretax_income"),
+            income_tax=_number(ttm_row, "income_tax"),
+            identified_one_time_pretax_gain=float(gains["pretax_total"]),
+            identified_one_time_after_tax_gain=float(
+                gains["issuer_stated_after_tax_net_income_effect_total"]
+            ),
+        )
+        snapshots = evidence["working_capital_snapshots"]
+        current_wc = snapshots["current_2026_06_30"]
+        prior_wc = snapshots["prior_2025_06_30"]
+        working_capital = working_capital_evidence(
+            current_operating_assets={
+                "accounts_receivable": current_wc.get("accounts_receivable"),
+                "inventory": current_wc.get("inventory"),
+            },
+            current_operating_liabilities={
+                "accounts_payable": current_wc.get("accounts_payable"),
+                "accrued_compensation": current_wc.get("accrued_compensation"),
+                "accrued_revenue_share": current_wc.get("accrued_revenue_share"),
+                "deferred_revenue": current_wc.get("deferred_revenue"),
+            },
+            prior_operating_assets={
+                "accounts_receivable": prior_wc.get("accounts_receivable"),
+                "inventory": prior_wc.get("inventory"),
+            },
+            prior_operating_liabilities={
+                "accounts_payable": prior_wc.get("accounts_payable"),
+                "accrued_compensation": prior_wc.get("accrued_compensation"),
+                "accrued_revenue_share": prior_wc.get("accrued_revenue_share"),
+                "deferred_revenue": prior_wc.get("deferred_revenue"),
+            },
+            unclassified_fields=snapshots["unclassified_components"],
+        )
+        fcff = fcff_components(
+            operating_income=_number(ttm_row, "operating_income"),
+            depreciation_amortization=_number(ttm_row, "depreciation_amortization"),
+            capex=_number(ttm_row, "capex"),
+            verified_operating_tax_rate=tax["verified_operating_tax_rate"],
+            verified_change_operating_working_capital=working_capital[
+                "verified_change_operating_working_capital"
+            ],
+            research_tax_rate=tax["event_adjusted_total_effective_tax_rate"],
+        )
+        wacc_inputs = evidence["wacc_evidence"]
+        if abs(float(wacc_inputs["risk_free_rate"]) - risk_free_rate) > 1e-12:
+            raise ValueError("risk-free input does not match the dated FCFF evidence")
+        verified_wacc = ["risk_free_rate"] if wacc_inputs["risk_free_rate_verified"] else []
+        wacc = wacc_evidence(
+            risk_free_rate=risk_free_rate,
+            beta=wacc_inputs.get("beta"),
+            equity_risk_premium=wacc_inputs.get("equity_risk_premium"),
+            pretax_cost_of_debt=wacc_inputs.get("pretax_cost_of_debt"),
+            marginal_tax_rate=wacc_inputs.get("marginal_operating_tax_rate"),
+            equity_market_value=price * shares,
+            debt_market_value=wacc_inputs.get("debt_market_value"),
+            verified_components=verified_wacc,
+            legacy_data_quality_premium=wacc_inputs.get("legacy_data_quality_premium"),
+        )
+        enterprise_dcf = None
+        if fcff["formal_fcff"] is not None and wacc["wacc"] is not None:
+            enterprise_dcf = enterprise_fcff_schedule(
+                base_fcff=float(fcff["formal_fcff"]),
+                growth_rate=historical_growth,
+                wacc=float(wacc["wacc"]),
+                terminal_growth=terminal_growth,
+            )
+        capital = evidence["capital_structure_2026_06_30"]
+        bridge = enterprise_to_equity_bridge(
+            enterprise_value=None,
+            cash=capital.get("cash"),
+            marketable_securities=capital.get("marketable_securities"),
+            debt=capital.get("reported_long_term_debt"),
+            preferred_equity=capital.get("preferred_equity_liquidation_preference"),
+            noncontrolling_interest=capital.get("noncontrolling_interest"),
+            debt_like_lease_liabilities=None,
+            other_verified_nonoperating_assets=None,
+            other_verified_potential_claims=capital.get("other_verified_potential_claims"),
+            diluted_shares=shares,
+        )
+        forecast = evidence["forecast_evidence"]
+        operating_projection = operating_fcff_projection(
+            base_revenue=revenue,
+            scenarios=[{
+                "revenue_growth": forecast.get("official_revenue_growth_guidance"),
+                "operating_margin": forecast.get("official_operating_margin_guidance"),
+                "operating_tax_rate": None,
+                "depreciation_amortization": forecast.get("verified_depreciation_forecast"),
+                "capex": (
+                    float(forecast["official_2026_capex_guidance_low"])
+                    + float(forecast["official_2026_capex_guidance_high"])
+                ) / 2,
+                "change_operating_working_capital": forecast.get(
+                    "verified_operating_working_capital_forecast"
+                ),
+                "evidence_verified": False,
+            }],
+        )
+        fcff_audit = {
+            "evidence_file": fcff_evidence_path.as_posix(),
+            "sources": evidence["sources"],
+            "tax": tax,
+            "operating_working_capital": working_capital,
+            "fcff": fcff,
+            "wacc": wacc,
+            "enterprise_fcff_dcf": enterprise_dcf,
+            "enterprise_to_common_equity_bridge": {
+                **bridge,
+                "observed_non_marketable_securities_excluded": capital.get(
+                    "non_marketable_securities"
+                ),
+                "observed_noncurrent_lease_liabilities_not_complete_debt_like_claim": capital.get(
+                    "reported_noncurrent_operating_lease_liabilities"
+                ),
+                "capital_structure_limitations": capital["limitations"],
+            },
+            "operating_projection": operating_projection,
+            "formal_fcff_eligible": fcff["formal_fcff"] is not None,
+            "enterprise_value_eligible": enterprise_dcf is not None,
+            "formal_common_equity_value_eligible": False,
+            "operational_judgement_eligible": False,
+        }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "ticker": "GOOGL",
         "market": {
             "price": price,
@@ -177,6 +325,24 @@ def build_audit(
                 "cannot be uniquely solved from one market price"
             ),
             "no_price_fitting": True,
+            "identified_complete_combination_count": 0,
+            "historical_and_official_comparison_anchors": {
+                "annual_revenue_growth_observed_min": min(annual_revenue_growth),
+                "annual_revenue_growth_observed_max": max(annual_revenue_growth),
+                "annual_operating_margin_observed_min": min(annual_operating_margins),
+                "annual_operating_margin_observed_max": max(annual_operating_margins),
+                "official_2026_capex_guidance_low": capex_guidance_low,
+                "official_2026_capex_guidance_high": capex_guidance_high,
+                "status": "comparators_not_forecasts",
+            },
+            "missing_forward_paths": [
+                "verified multi-year revenue growth",
+                "verified target operating margin",
+                "verified operating tax rate",
+                "verified depreciation path",
+                "verified operating working-capital path",
+                "verified WACC",
+            ],
             "illustrative_historical_revenue_anchor": {
                 "revenue_growth": revenue_growth,
                 "year_5_revenue": implied_year_5_revenue,
@@ -199,6 +365,7 @@ def build_audit(
             "ttm_normalized_eps": None,
             "pe_model_eligible": False,
         },
+        "fcff_economic_definition_audit": fcff_audit,
         "confidence_dimensions": {
             "financial_data_quality": "verified_official_source_with_unaudited_interim",
             "forecast_quality": "insufficient_except_capex_guidance",
@@ -214,6 +381,11 @@ def main() -> int:
     parser.add_argument("--universe", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--risk-free-rate", type=float, required=True)
+    parser.add_argument(
+        "--fcff-evidence",
+        type=Path,
+        default=ROOT / "docs" / "evidence" / "googl-fcff-v2.2.json",
+    )
     parser.add_argument("--capex-guidance-low", type=float, default=175_000_000_000.0)
     parser.add_argument("--capex-guidance-high", type=float, default=185_000_000_000.0)
     parser.add_argument(
@@ -228,6 +400,7 @@ def main() -> int:
         capex_guidance_low=args.capex_guidance_low,
         capex_guidance_high=args.capex_guidance_high,
         capex_guidance_source=args.capex_guidance_source,
+        fcff_evidence_path=args.fcff_evidence,
     )
     rendered = json.dumps(audit, indent=2, sort_keys=True)
     if args.output:
