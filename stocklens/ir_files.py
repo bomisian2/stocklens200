@@ -27,9 +27,9 @@ OFFICIAL_IR_HOSTS = {
 }
 MONEY_FIELDS = {
     "revenue", "operating_income", "net_income", "common_net_income", "pretax_income",
-    "income_tax", "other_income_expense", "securities_gain_loss", "preferred_dividends",
+    "income_tax", "other_income_expense", "securities_gain_loss", "equity_securities_gain_loss", "preferred_dividends",
     "normalized_net_income",
-    "cfo", "capex", "fcf", "cash", "total_debt", "equity", "sbc",
+    "cfo", "capex", "fcf", "cash", "marketable_securities", "total_debt", "equity", "sbc",
     "depreciation_amortization", "buybacks", "dividends",
 }
 REQUIRED_PERIOD_FIELDS = {

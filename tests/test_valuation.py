@@ -135,6 +135,21 @@ def test_missing_point_in_time_pe_never_falls_back_to_fixed_sector_multiple() ->
     assert result.methods_used == "fcf_dcf"
 
 
+def test_provisional_dcf_exposes_schedule_reverse_dcf_and_confidence_scope() -> None:
+    result = _evaluate(
+        price=351.66,
+        evidence=ValuationEvidence(ticker="GOOGL", source_sha256="fixture", fixture=True),
+    )
+    model = next(item for item in json.loads(result.model_details_json) if item["name"] == "fcf_dcf")
+    assert model["inputs"]["cash_flow_classification"] == "levered_equity_cash_flow_proxy_not_canonical_fcfe"
+    assert len(model["inputs"]["base_case_audit"]["schedule"]) == 5
+    assert model["inputs"]["balance_sheet_bridge"]["applied_to_equity_value"] is False
+    assert model["inputs"]["reverse_dcf"]["revenue_margin_reinvestment_identification"] == "underdetermined"
+    assert result.status == "provisional"
+    assert result.confidence_scope == "research_input_completeness_not_investment_confidence"
+    assert result.operational_eligible is False
+
+
 def test_company_specific_band_is_not_fixed_ten_percent() -> None:
     result = _evaluate()
     assert result.conservative_value != round(result.base_value * 0.9, 2)

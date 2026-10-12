@@ -8,7 +8,8 @@ The next work is ranked by evidence value divided by data, maintenance and model
    assuming identical table layouts.
 3. **Independent financial cross-check** — find a redistribution-compatible source before promoting the DCF.
 4. **Point-in-time forecast evidence** — obtain a lawful dated forecast source or keep historical DCF provisional.
-5. **Reverse DCF** — show the FCF growth implied by market price; label it as an expectation diagnostic, not value.
+5. **Reverse DCF** — implemented for the GOOGL research pilot with an explicit FCF-growth solver and sensitivity grid;
+   keep it diagnostic until a verified operating forecast can identify revenue, margin and reinvestment separately.
 6. **Sensitivity surface** — publish a system-generated WACC/growth/margin grid around validated inputs, with no user
    tuning controls.
 7. **Value-trap warning** — prioritize directly observable deterioration in revenue, operating margin, FCF conversion,
@@ -24,6 +25,6 @@ The next work is ranked by evidence value divided by data, maintenance and model
 12. **Portfolio analytics ledger** — make the signal branch emit real daily positions, cash, costs and QQQ returns
     before using QuantStats.
 
-Reverse DCF and sensitivity are the lowest-cost next analytical features, but neither should precede normalization and
-independent-source work if the goal is a formal investment judgement. Value-trap warnings can begin with verified
-historical facts. Earnings-event filters and portfolio performance depend on new timestamped datasets and rank later.
+Reverse DCF is now available as a research diagnostic, but it does not precede normalization or independent-source work
+for a formal investment judgement. Sensitivity surfaces and value-trap warnings can continue with verified historical
+facts. Earnings-event filters and portfolio performance depend on new timestamped datasets and rank later.

@@ -7,11 +7,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from .dcf import equity_fcf_schedule, reverse_dcf_sensitivity
 from .financials import FinancialPeriod
 from .valuation_evidence import ValuationEvidence
 
 
-MODEL_VERSION = "valuation-v2.1.1"
+MODEL_VERSION = "valuation-v2.1.2"
 EQUITY_RISK_PREMIUM = 0.05
 FINANCIAL_SECTORS = {"Financial Services", "Financials"}
 REIT_INDUSTRY_WORDS = {"reit", "real estate investment trust"}
@@ -61,6 +62,9 @@ class ValuationResult:
     base_value_change: float | None = None
     change_reason: str = "first recorded evaluation"
     status: str = "hold"
+    confidence_scope: str = "not_applicable"
+    confidence_dimensions_json: str = "{}"
+    operational_eligible: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -169,6 +173,9 @@ def _normalized_metrics(
     return {
         "fcf": fcf,
         "shares": shares,
+        "revenue": latest.revenue,
+        "cfo": latest.cfo,
+        "capex": latest.capex,
         "ebitda": operating + da if operating is not None and da is not None else None,
         "revenue_growth": revenue_growth,
         "fcf_growth": fcf_growth,
@@ -176,6 +183,7 @@ def _normalized_metrics(
         "operating_margin": _median(margins),
         "tax_rate": _tax_rate(periods[-5:]),
         "cash": latest.cash,
+        "marketable_securities": latest.marketable_securities,
         "debt": latest.total_debt,
         "equity": latest.equity,
         "net_income": latest.net_income,
@@ -271,7 +279,14 @@ def _earnings_model(evidence: ValuationEvidence | None, evaluated_at: datetime, 
     )
 
 
-def _dcf_model(metrics: dict[str, float | None], family: str, discount_rate: float, evidence: ValuationEvidence | None, evaluated_at: datetime) -> ModelResult:
+def _dcf_model(
+    metrics: dict[str, float | None],
+    family: str,
+    discount_rate: float,
+    evidence: ValuationEvidence | None,
+    evaluated_at: datetime,
+    price: float,
+) -> ModelResult:
     fcf, shares = metrics.get("fcf"), metrics.get("shares")
     growth, growth_basis = _growth_rate(metrics, family, evidence, evaluated_at)
     if fcf is None or fcf <= 0 or shares is None or shares <= 0 or discount_rate <= 0.03 or growth is None:
@@ -282,19 +297,112 @@ def _dcf_model(metrics: dict[str, float | None], family: str, discount_rate: flo
         uncertainty.append(forecast.dispersion)
     growth_uncertainty = _clamp(max([value for value in uncertainty if value is not None and value >= 0] or [0.05]), 0.01, 0.12)
 
-    def value(growth_rate: float, rate: float) -> float:
+    def schedule(growth_rate: float, rate: float) -> dict[str, Any]:
         growth_rate, rate = _clamp(growth_rate, -0.10, 0.20), _clamp(rate, 0.06, 0.20)
         terminal = _clamp(min(0.025, max(0.0, growth_rate / 2)), 0.0, min(0.03, rate - 0.02))
-        projected, present = fcf, 0.0
-        for year in range(1, 6):
-            projected *= 1 + growth_rate
-            present += projected / ((1 + rate) ** year)
-        return (present + projected * (1 + terminal) / (rate - terminal) / ((1 + rate) ** 5)) / shares
+        return equity_fcf_schedule(
+            base_fcf=fcf,
+            growth_rate=growth_rate,
+            discount_rate=rate,
+            terminal_growth=terminal,
+            diluted_shares=shares,
+        )
+
+    conservative_audit = schedule(growth - growth_uncertainty, discount_rate + growth_uncertainty / 2)
+    base_audit = schedule(growth, discount_rate)
+    optimistic_audit = schedule(growth + growth_uncertainty, discount_rate - growth_uncertainty / 2)
+    terminal_rates = (0.015, 0.025, 0.03)
+    discount_rates = tuple(
+        sorted({_clamp(discount_rate + shift, 0.06, 0.20) for shift in (-0.02, 0.0, 0.02)})
+    )
+    reverse = reverse_dcf_sensitivity(
+        target_price=price,
+        base_fcf=fcf,
+        diluted_shares=shares,
+        discount_rates=discount_rates,
+        terminal_growth_rates=terminal_rates,
+    )
+    cash = metrics.get("cash") or 0.0
+    marketable = metrics.get("marketable_securities") or 0.0
+    debt = metrics.get("debt") or 0.0
+    revenue = metrics.get("revenue")
+    capex = metrics.get("capex")
+    base_reverse = next(
+        (
+            row for row in reverse
+            if math.isclose(row["discount_rate"], discount_rate, abs_tol=1e-12)
+            and math.isclose(row["terminal_growth"], 0.025, abs_tol=1e-12)
+        ),
+        None,
+    )
+    translation = None
+    revenue_growth = metrics.get("revenue_growth")
+    operating_margin = metrics.get("operating_margin")
+    if (
+        base_reverse
+        and base_reverse.get("status") == "solved"
+        and revenue is not None
+        and revenue > 0
+        and revenue_growth is not None
+    ):
+        implied_year_5_revenue = revenue * ((1 + revenue_growth) ** 5)
+        translation = {
+            "revenue_growth_anchor": revenue_growth,
+            "implied_year_5_revenue": implied_year_5_revenue,
+            "implied_year_5_fcf_margin": base_reverse["implied_year_5_fcf"] / implied_year_5_revenue,
+            "current_operating_margin": operating_margin,
+            "status": "illustrative_not_identified",
+            "reason": "holds historical revenue CAGR only to expose the FCF burden; it is not a forecast",
+        }
+    balance_bridge = {
+        "cash": cash,
+        "marketable_securities": marketable,
+        "debt": debt,
+        "observed_net_financial_assets": cash + marketable - debt,
+        "applied_to_equity_value": False,
+        "reason": base_audit["bridge_reason"],
+    }
 
     return ModelResult(
-        "fcf_dcf", True, value(growth - growth_uncertainty, discount_rate + growth_uncertainty / 2), value(growth, discount_rate), value(growth + growth_uncertainty, discount_rate - growth_uncertainty / 2), 0.0,
-        {"normalized_fcf": round(fcf, 2), "fcf_basis": metrics.get("fcf_basis"), "diluted_shares": round(shares, 2), "growth": round(growth, 6), "growth_basis": growth_basis, "growth_uncertainty": round(growth_uncertainty, 6), "discount_rate": round(discount_rate, 6)},
-        "growth enters cash-flow forecasts once; risk-free rate enters capital cost, and no macro price haircut is applied",
+        "fcf_dcf", True,
+        float(conservative_audit["per_share_value"]),
+        float(base_audit["per_share_value"]),
+        float(optimistic_audit["per_share_value"]),
+        0.0,
+        {
+            "normalized_fcf": round(fcf, 2),
+            "fcf_basis": metrics.get("fcf_basis"),
+            "cash_flow_definition": base_audit["cash_flow_definition"],
+            "cash_flow_classification": base_audit["cash_flow_classification"],
+            "discount_rate_type": base_audit["discount_rate_type"],
+            "diluted_shares": round(shares, 2),
+            "growth": round(growth, 6),
+            "growth_basis": growth_basis,
+            "growth_uncertainty": round(growth_uncertainty, 6),
+            "discount_rate": round(discount_rate, 6),
+            "base_case_audit": base_audit,
+            "scenario_terminal_value_shares": {
+                "conservative": conservative_audit["terminal_value_share"],
+                "base": base_audit["terminal_value_share"],
+                "optimistic": optimistic_audit["terminal_value_share"],
+            },
+            "balance_sheet_bridge": balance_bridge,
+            "capex_to_revenue": capex / revenue if capex is not None and revenue else None,
+            "reverse_dcf": {
+                "market_price": price,
+                "sensitivity": reverse,
+                "illustrative_revenue_translation": translation,
+                "revenue_margin_reinvestment_identification": "underdetermined",
+                "identification_reason": (
+                    "one market price cannot uniquely identify revenue growth, target operating margin, "
+                    "working-capital investment, CAPEX and terminal growth simultaneously"
+                ),
+            },
+        },
+        (
+            "issuer-defined CFO-minus-CAPEX is discounted once as a levered equity cash-flow proxy; "
+            "growth is applied once, no enterprise bridge is applied, and reverse DCF is diagnostic only"
+        ),
     )
 
 
@@ -399,7 +507,7 @@ def evaluate_company(
     leverage = ((metrics.get("debt") or 0) - (metrics.get("cash") or 0)) / max(metrics.get("fcf") or 1, 1)
     leverage_premium = _clamp(max(0.0, leverage - 2.0) * 0.003, 0.0, 0.025)
     discount_rate = _clamp(risk_free_rate + EQUITY_RISK_PREMIUM + data_quality_premium + leverage_premium, 0.07, 0.18)
-    models = [_financial_model(metrics, discount_rate)] if family == "financial" else [_earnings_model(valuation_evidence, evaluated_at, risk_free_rate), _dcf_model(metrics, family, discount_rate, valuation_evidence, evaluated_at), _ev_ebitda_model(metrics, valuation_evidence, evaluated_at)]
+    models = [_financial_model(metrics, discount_rate)] if family == "financial" else [_earnings_model(valuation_evidence, evaluated_at, risk_free_rate), _dcf_model(metrics, family, discount_rate, valuation_evidence, evaluated_at, price), _ev_ebitda_model(metrics, valuation_evidence, evaluated_at)]
     models = _assign_weights(models)
     base, conservative, optimistic = _weighted(models, "base"), _weighted(models, "conservative"), _weighted(models, "optimistic")
     coverage_fields = ("revenue", "operating_income", "net_income", "diluted_eps", "diluted_shares", "cfo", "capex", "cash", "total_debt", "equity")
@@ -407,13 +515,24 @@ def evaluate_company(
     available_count = sum(model.available for model in models)
     evidence_bonus = 12 if valuation_evidence and not valuation_evidence.fixture else 0
     confidence = int(_clamp(round(15 + min(len(annual), 5) * 5 + coverage * 25 + available_count * 8 + evidence_bonus + (12 if independent_financial_crosscheck else 0)), 0, 100))
+    forecast = valuation_evidence.forecast if valuation_evidence else None
+    has_visible_forecast = bool(forecast and _timestamp(forecast.available_at_utc) <= evaluated_at)
+    confidence_dimensions = {
+        "financial_data_quality": (
+            "verified_with_unaudited_interim"
+            if latest_ttm is not None and all(row.source_url and row.source_artifact_sha256 for row in quality_rows)
+            else "partial"
+        ),
+        "forecast_quality": "point_in_time_verified" if has_visible_forecast else "insufficient",
+        "valuation_model_confidence": "research_only" if not has_visible_forecast else "eligible_for_model_review",
+        "operational_judgement_eligibility": False,
+    }
     details = [asdict(model) for model in models]
     if base is None or base <= 0 or conservative is None or optimistic is None:
         return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=confidence, uncertainty="very_high", methods_used="none", model_details_json=json.dumps(details, ensure_ascii=False, sort_keys=True), status="hold", change_reason="no valuation model passed its point-in-time input gate")
     model_bases = [model.base for model in models if model.available and model.base is not None]
     model_dispersion = statistics.pstdev(model_bases) / base if len(model_bases) >= 2 else 0.0
     scenario_width = max((base - conservative) / base, (optimistic - base) / base, 0.0)
-    forecast = valuation_evidence.forecast if valuation_evidence else None
     forecast_dispersion = forecast.dispersion if forecast and _timestamp(forecast.available_at_utc) <= evaluated_at else None
     historical_error = valuation_evidence.historical_forecast_error if valuation_evidence else None
     risk_components = {"scenario_width": scenario_width, "model_dispersion": model_dispersion, "forecast_dispersion": max(forecast_dispersion or 0.0, 0.0), "historical_forecast_error": max(historical_error or 0.0, 0.0), "leverage_premium_scaled": leverage_premium * 4, "data_uncertainty": (100 - confidence) / 500}
@@ -424,6 +543,7 @@ def evaluate_company(
     buy_low = min(conservative * (1 - safety_margin), buy_high)
     details.append({"name": "automatic_uncertainty_band", "available": True, "weight": 0.0, "conservative": conservative, "base": base, "optimistic": optimistic, "inputs": {**{key: round(value, 6) for key, value in risk_components.items()}, "safety_margin": round(safety_margin, 6), "transition_buffer": round(transition_buffer, 6), "prior_judgement": prior_judgement}, "reason": "company-specific model spread, forecast dispersion, historical error, leverage, and data quality; no fixed 90-110% band"})
     methods = [model.name for model in models if model.available]
-    has_visible_forecast = bool(forecast and _timestamp(forecast.available_at_utc) <= evaluated_at)
     provisional = methods == ["fcf_dcf"] and not has_visible_forecast
-    return ValuationResult(**empty, conservative_value=round(conservative, 2), base_value=round(base, 2), optimistic_value=round(optimistic, 2), upside_to_base=round(upside, 6), safety_margin=round(safety_margin, 6), favorable_buy_low=round(buy_low, 2), favorable_buy_high=round(buy_high, 2), judgement="판단 보류" if provisional else judgement, confidence_score=confidence, uncertainty="low" if confidence >= 80 else "medium" if confidence >= 65 else "high", methods_used=", ".join(methods), model_details_json=json.dumps(details, ensure_ascii=False, sort_keys=True), status="provisional" if provisional else "evaluated", change_reason="historical-only provisional DCF; no point-in-time forecast evidence" if provisional else "first recorded evaluation")
+    confidence_dimensions["operational_judgement_eligibility"] = not provisional
+    confidence_dimensions["valuation_model_confidence"] = "research_only" if provisional else "operational_candidate"
+    return ValuationResult(**empty, conservative_value=round(conservative, 2), base_value=round(base, 2), optimistic_value=round(optimistic, 2), upside_to_base=round(upside, 6), safety_margin=round(safety_margin, 6), favorable_buy_low=round(buy_low, 2), favorable_buy_high=round(buy_high, 2), judgement="판단 보류" if provisional else judgement, confidence_score=confidence, uncertainty="low" if confidence >= 80 else "medium" if confidence >= 65 else "high", methods_used=", ".join(methods), model_details_json=json.dumps(details, ensure_ascii=False, sort_keys=True), status="provisional" if provisional else "evaluated", change_reason="historical-only provisional DCF; no point-in-time forecast evidence" if provisional else "first recorded evaluation", confidence_scope="research_input_completeness_not_investment_confidence" if provisional else "operational_model_evidence", confidence_dimensions_json=json.dumps(confidence_dimensions, ensure_ascii=False, sort_keys=True), operational_eligible=not provisional)

@@ -91,6 +91,10 @@ This range is a model-behavior diagnostic, not an operational fair value or buy 
 sensitive to the current AI CAPEX cycle, has no approved forward forecast, and has no independent source cross-check.
 The current market price is not used to scale intrinsic value.
 
+The detailed audit in `docs/googl-dcf-audit.md` classifies CFO-minus-CAPEX as a levered equity-cash-flow proxy rather
+than FCFF, shows every discounted cash-flow step, withholds an invalid enterprise-to-equity bridge, and adds a
+research-only reverse DCF. The $64.44 result is reproduced rather than raised.
+
 ## General reusable IR import procedure
 
 1. Download only issuer-hosted annual/quarterly reports whose reuse and display scope has been reviewed.

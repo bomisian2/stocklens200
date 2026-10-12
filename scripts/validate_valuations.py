@@ -18,6 +18,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate stored StockLens valuation output")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument(
+        "--allow-provisional",
+        action="store_true",
+        help="Accept research-only provisional rows while still enforcing their operational block",
+    )
     parser.add_argument("--require-tickers", nargs="*", default=[])
     parser.add_argument(
         "--expect-unverified-hold",
@@ -43,6 +48,15 @@ def main() -> int:
         raise RuntimeError(f"required tickers missing: {sorted(required - set(frame['ticker']))}")
     evaluated = frame[frame["status"] == "evaluated"]
     provisional = frame[frame["status"] == "provisional"]
+    required_safety_columns = {"confidence_scope", "confidence_dimensions_json", "operational_eligible"}
+    if not required_safety_columns.issubset(frame.columns):
+        raise RuntimeError(f"valuation safety columns missing: {sorted(required_safety_columns - set(frame.columns))}")
+    if not provisional.empty:
+        operational = provisional["operational_eligible"].astype(str).str.lower().isin({"true", "1", "yes"})
+        if operational.any():
+            raise RuntimeError("provisional valuation cannot be operationally eligible")
+        if not provisional["confidence_scope"].eq("research_input_completeness_not_investment_confidence").all():
+            raise RuntimeError("provisional confidence must be labelled as research input completeness")
     if args.expect_unverified_hold:
         if not evaluated.empty:
             raise RuntimeError("unverified hold gate unexpectedly produced evaluated rows")
@@ -58,13 +72,14 @@ def main() -> int:
             f"model={MODEL_VERSION} source=unverified"
         )
         return 0
-    if required and not required.issubset(set(evaluated["ticker"])):
-        raise RuntimeError(f"sample tickers were not evaluated: {sorted(required - set(evaluated['ticker']))}")
-    if evaluated.empty:
+    accepted = pd.concat([evaluated, provisional], ignore_index=True) if args.allow_provisional else evaluated
+    if required and not required.issubset(set(accepted["ticker"])):
+        raise RuntimeError(f"sample tickers did not pass the requested gate: {sorted(required - set(accepted['ticker']))}")
+    if accepted.empty:
         raise RuntimeError("no companies passed valuation input gates")
-    if evaluated["base_value"].isna().any() or (evaluated["base_value"] <= 0).any():
-        raise RuntimeError("evaluated rows have missing or non-positive values")
-    if evaluated["confidence_score"].lt(0).any() or evaluated["confidence_score"].gt(100).any():
+    if accepted["base_value"].isna().any() or (accepted["base_value"] <= 0).any():
+        raise RuntimeError("accepted rows have missing or non-positive values")
+    if accepted["confidence_score"].lt(0).any() or accepted["confidence_score"].gt(100).any():
         raise RuntimeError("confidence score outside 0-100")
     if status.get("model_version") != MODEL_VERSION:
         raise RuntimeError("valuation status model version mismatch")
@@ -72,11 +87,12 @@ def main() -> int:
         raise RuntimeError("valuation status count mismatch")
     if status.get("provisional_count", 0) != len(provisional):
         raise RuntimeError("provisional valuation status count mismatch")
-    if financials.empty or not set(evaluated["ticker"]).issubset(set(financials["ticker"])):
-        raise RuntimeError("evaluated tickers lack stored financial periods")
+    if financials.empty or not set(accepted["ticker"]).issubset(set(financials["ticker"])):
+        raise RuntimeError("accepted tickers lack stored financial periods")
     print(
         f"valuation_count={len(frame)} evaluated={len(evaluated)} "
-        f"hold={len(frame) - len(evaluated)} model={MODEL_VERSION}"
+        f"provisional={len(provisional)} hold={len(frame) - len(evaluated) - len(provisional)} "
+        f"model={MODEL_VERSION}"
     )
     return 0
 

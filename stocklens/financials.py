@@ -169,6 +169,7 @@ class FinancialPeriod:
     income_tax: float | None = None
     other_income_expense: float | None = None
     securities_gain_loss: float | None = None
+    equity_securities_gain_loss: float | None = None
     preferred_dividends: float | None = None
     normalized_net_income: float | None = None
     diluted_eps: float | None = None
@@ -178,6 +179,7 @@ class FinancialPeriod:
     capex: float | None = None
     fcf: float | None = None
     cash: float | None = None
+    marketable_securities: float | None = None
     total_debt: float | None = None
     equity: float | None = None
     sbc: float | None = None

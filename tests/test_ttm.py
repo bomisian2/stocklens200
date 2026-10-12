@@ -98,6 +98,7 @@ def _inputs() -> tuple[FinancialPeriod, FinancialPeriod, FinancialPeriod, list[F
         income_tax=41_394, cfo=84_859, capex=80_598, diluted_eps=14.24,
         diluted_shares=12_274, other_income=135_699, securities_gain=135_803,
     )
+    current = replace(current, marketable_securities=186_563)
     quarters = [
         _period(year=2025, kind="Q", start="2025-07-01", end="2025-09-30", revenue=102_346, operating_income=31_228, net_income=34_979, pretax_income=43_987, income_tax=9_008, cfo=48_414, capex=23_953, diluted_eps=2.87, diluted_shares=12_203, other_income=12_759, securities_gain=10_000),
         _period(year=2025, kind="Q", start="2025-10-01", end="2025-12-31", revenue=113_828, operating_income=35_934, net_income=34_455, pretax_income=39_117, income_tax=4_662, cfo=52_402, capex=27_851, diluted_eps=2.82, diluted_shares=12_228, other_income=3_183, securities_gain=3_000),
@@ -127,6 +128,7 @@ def test_ttm_bridge_reconstructs_flows_but_withholds_operational_eps() -> None:
     assert ttm.common_net_income == 244_119
     assert ttm.cfo == 185_675
     assert ttm.capex == 132_402
+    assert ttm.marketable_securities == 186_563
     assert ttm.fcf == 53_273
     assert ttm.other_income_expense == 151_641
     assert ttm.securities_gain_loss == 149_012

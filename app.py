@@ -205,7 +205,7 @@ with tab_value:
                 "conservative_value": "보수 적정가", "base_value": "기본 적정가",
                 "optimistic_value": "낙관 적정가", "upside_to_base": "기본 대비 여력",
                 "favorable_buy_low": "매수 구간 하단", "favorable_buy_high": "매수 구간 상단",
-                "confidence_score": "신뢰도", "judgement": "판단", "status": "상태",
+                "confidence_score": "증거 점수", "judgement": "판단", "status": "상태",
             }
         )
         table["기본 대비 여력"] = table["기본 대비 여력"] * 100
@@ -222,7 +222,7 @@ with tab_value:
                 "기본 대비 여력": st.column_config.NumberColumn(format="%+.1f%%"),
                 "매수 구간 하단": st.column_config.NumberColumn(format="$%.2f"),
                 "매수 구간 상단": st.column_config.NumberColumn(format="$%.2f"),
-                "신뢰도": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+                "증거 점수": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
             },
         )
 
@@ -231,7 +231,12 @@ with tab_value:
         st.subheader(f"{selected_ticker} · {selected['company_name']}")
         if selected["status"] == "provisional":
             st.info(f"과거 실적 기반 잠정가이며 투자판단은 보류합니다: {selected['change_reason']}")
-            st.write(f"**사용 모델:** {selected['methods_used']} · 신뢰도 {int(selected['confidence_score'])}/100")
+            st.write(
+                f"**사용 모델:** {selected['methods_used']} · 연구 입력 완성도 "
+                f"{int(selected['confidence_score'])}/100 (투자 신뢰도 아님)"
+            )
+            if "confidence_dimensions_json" in selected.index:
+                st.json(json.loads(selected["confidence_dimensions_json"]))
             with st.expander("잠정 계산 근거"):
                 st.json(json.loads(selected["model_details_json"]))
         elif selected["status"] != "evaluated":

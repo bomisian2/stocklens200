@@ -40,10 +40,12 @@ class ValuationStore:
             "common_net_income": "",
             "other_income_expense": "",
             "securities_gain_loss": "",
+            "equity_securities_gain_loss": "",
             "preferred_dividends": "",
             "normalized_net_income": "",
             "normalized_diluted_eps": "",
             "dividends": "",
+            "marketable_securities": "",
             "source_artifact_sha256": "",
             "source_obtained_at_utc": "",
             "normalization_version": "legacy_unknown",
@@ -57,9 +59,9 @@ class ValuationStore:
             raise ValuationStoreError(f"financial columns missing: {sorted(missing)}")
         numeric = {
             "revenue", "operating_income", "net_income", "common_net_income", "pretax_income",
-            "income_tax", "other_income_expense", "securities_gain_loss", "preferred_dividends",
+            "income_tax", "other_income_expense", "securities_gain_loss", "equity_securities_gain_loss", "preferred_dividends",
             "normalized_net_income", "diluted_eps", "normalized_diluted_eps", "diluted_shares",
-            "cfo", "capex", "fcf", "cash", "total_debt",
+            "cfo", "capex", "fcf", "cash", "marketable_securities", "total_debt",
             "equity", "sbc", "depreciation_amortization", "buybacks", "dividends",
         }
         rows: list[FinancialPeriod] = []
@@ -117,7 +119,7 @@ class ValuationStore:
             [
                 "evaluated_at_utc", "price_as_of_utc", "ticker", "model_version", "status",
                 "conservative_value", "base_value", "optimistic_value", "confidence_score",
-                "judgement", "change_reason",
+                "confidence_scope", "operational_eligible", "judgement", "change_reason",
             ]
         ].copy()
         if self.history_path.exists():
