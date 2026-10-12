@@ -2,7 +2,7 @@
 
 ## Purpose and safety boundary
 
-`scripts/run_sec_windows.ps1` is the single operator command for the four-company validation gate.
+`scripts/run_sec_windows.ps1` is the single operator command for the five-company validation gate.
 It uses `scripts/collect_sec_sample_windows.py` and `stocklens/sec_windows.py` to:
 
 1. make exactly one access-probe request to official GOOGL Company Facts;
@@ -42,19 +42,21 @@ Exit codes:
 
 | Code | Meaning |
 | ---: | --- |
-| 0 | Four official inputs produced four evaluated results |
+| 0 | Five official inputs produced five evaluated results |
 | 2 | SEC access or raw validation failed; no partial run was published |
-| 3 | Raw collection succeeded but at least one valuation remained on hold |
+| 3 | Raw collection succeeded but at least one valuation remained provisional or on hold |
 
 On success, inspect:
 
 - `data/sec-import/<UTC>/manifest.json`: official URLs, CIKs, file names, SHA-256 hashes;
 - `collection_report.json`: safe HTTP diagnostics and raw validation summaries;
 - `financials.csv`: point-in-time normalized annual and quarter rows;
-- `valuations.csv`: the four reproducible model outputs or explicit holds; and
+- `valuations.csv`: the five reproducible model outputs or explicit holds; and
 - `result.json`: risk-free input, counts, valuation details, and run summary.
 
 `data/sec-import/` is intentionally gitignored. Raw SEC files must not be committed to this PR.
+Without a non-fixture `--valuation-evidence` bundle, a historical-only DCF may be written as
+`provisional`, but it is not counted as an evaluated investment judgement.
 
 ## Observed PC result — 2026-10-12
 
@@ -68,14 +70,14 @@ repeated.
 | 11:43 KST | `https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json` | HTTP 403, `AkamaiGHost` | 0 |
 
 The direct Company Facts run recorded `request_count=1`, `retry_count=0`, and did not request
-Submissions or the other three companies. DNS/TLS reached the HTTP server; the failure was an HTTP
+Submissions or the other four companies. DNS/TLS reached the HTTP server; the failure was an HTTP
 policy response, not a JSON parsing error. The response body was not recorded.
 
 Consequently:
 
-- official raw financials acquired: **0/4**;
-- actual valuations completed: **0/4**;
-- GOOGL, AMAT, AVGO, and QCOM remain **hold**;
+- official raw financials acquired: **0/5**;
+- actual valuations completed: **0/5**;
+- GOOGL, AMAT, AVGO, QCOM, and INTC remain **hold**;
 - fixture data was not substituted; and
 - this result does not show that SEC is unavailable globally, only that this PC/network path was
   denied at the observed time.
@@ -91,5 +93,5 @@ SEC-permitted environment and run the same one-shot gate there.
 
 The implementation is materially below SEC's published aggregate ceiling of 10 requests per
 second: it enforces at least 0.6 seconds between requests (at most about 1.67 requests per second)
-and downloads only the requested four-company sample.
+and downloads only the requested five-company sample.
 

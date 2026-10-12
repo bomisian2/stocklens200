@@ -2,7 +2,7 @@
 
 - Status: Accepted for Draft PR validation
 - Date: 2026-10-12
-- Model version: `valuation-v2.0.0`
+- Model version: `valuation-v2.1.0`
 
 ## Context
 
@@ -30,32 +30,44 @@ availability is required so later backtests cannot use a filing before the marke
    fiscal-year change until a dedicated normalization rule is available. Later restatements and
    split-adjusted comparatives are used only when their availability time is not after the requested
    valuation time.
-5. The engine is deterministic and versioned. It selects from normalized EPS, five-year FCF DCF,
-   EV/EBITDA, and a financial-sector residual P/B model. A REIT without verified FFO/AFFO is held
-   rather than valued with manufacturing-company cash-flow rules.
-6. Model weights are fixed by disclosed issuer family and renormalized only across models whose
-   required inputs pass validation. `AMAT` uses cyclical normalization, `AVGO` emphasizes FCF because
-   acquisition accounting can distort GAAP EPS, and `GOOGL` checks operating-income-derived core EPS
-   when non-operating gains materially change EPS. `QCOM` uses the general multi-model path and its
-   handset/licensing concentration is disclosed as a risk.
-7. The current stock price is excluded from every fair-value calculation. It is used only after the
+5. The engine is deterministic and versioned. The P/E model requires at least 20 clean observations
+   spanning five years. Every observation combines the price on that date with EPS that was publicly
+   available on that date. Negative EPS, observations flagged as distorted, and EPS published after
+   the price date are excluded. The target multiple combines a rate-conditioned issuer distribution
+   and an available sector-relative distribution; it never falls back to a fixed sector P/E.
+6. GAAP EPS is distinct from normalized EPS. A normalized value is accepted only with dated source
+   evidence and categorized adjustments for amortization, asset disposal, restructuring, stock
+   compensation, impairment, investment gains/losses, litigation, or other disclosed items. Negative,
+   structural-loss, or unverified EPS disables P/E. `INTC` is the explicit turnaround/structural-loss
+   regression case. PEG is not implemented as a substitute.
+7. EV/EBITDA requires at least five point-in-time comparable observations and never uses a fixed sector
+   multiple. Available model weights are inverse to their scenario uncertainty instead of fixed by
+   ticker family. Growth/ROIC can alter P/E only when a calibration was selected before an independent
+   holdout with at least 30 observations and accepted; otherwise the coefficient is zero.
+8. FCF growth is applied once inside forecast cash flows. The risk-free rate is applied through cost of
+   capital. No separate fixed growth multiplier, VIX price multiplier, oil multiplier, or macro haircut
+   is applied. VIX remains a technical-risk input outside intrinsic value. Oil sensitivity remains
+   unavailable until issuer/industry evidence is supplied.
+9. The current stock price is excluded from every fair-value calculation. It is used only after the
    intrinsic value is calculated to derive upside/downside and the final label.
-8. Safety margin is system-generated from data coverage, model count, cross-validation state, and a
-   cyclical-company premium. Missing data is never replaced with a market multiple or a made-up
-   normal value.
-9. Analyst consensus and revision trends remain `unavailable` until a free, redistribution-safe,
+10. Conservative/base/optimistic values come from P/E quartiles, comparable-multiple quartiles, DCF
+   forecast dispersion, historical forecast error, model disagreement, leverage, and data quality.
+   The safety margin and buy band are derived from those company-specific risks; no fixed 90-110%
+   range is used. A dispersion-derived hysteresis buffer prevents a prior state from flipping on a
+   small boundary crossing. Intrinsic value and technical entry timing remain independent.
+11. Analyst consensus and revision trends remain `unavailable` until a free, redistribution-safe,
    point-in-time source is approved. Yahoo-derived financial statements and estimates are not stored
    or redistributed by this stage because their public consumer terms are not a suitable data license
    for the project.
-10. SEC internal consistency (`net income / diluted shares` versus reported diluted EPS) is checked,
+12. SEC internal consistency (`net income / diluted shares` versus reported diluted EPS) is checked,
     but this is not represented as an independent financial-source cross-check. Confidence remains
     lower until such a source is configured.
-11. Financial collection is provider-adapted. `SecFileProvider` reads individual official files or
+13. Financial collection is provider-adapted. `SecFileProvider` reads individual official files or
     nightly `companyfacts.zip` and `submissions.zip` archives supplied by the operator. It verifies
     canonical SEC source URLs, local path containment, CIK, acquisition time, and SHA-256 before
     normalizing. Raw and normalized hashes and the normalization version are persisted. Operational
     manifests must declare `fixture=false`; test fixtures cannot silently enter an operational run.
-12. A failed refresh may retain a prior verified snapshot only as `stale`. A complete outage does
+14. A failed refresh may retain a prior verified snapshot only as `stale`. A complete outage does
     not overwrite valuation or financial CSVs. Partial stale rows are labelled `판단 보류`, and the
     run records `eligible_for_new_signals=false`.
 
@@ -75,8 +87,9 @@ availability is required so later backtests cannot use a filing before the marke
 
 The 2026-10-12 local probe returned HTTP 403 from `data.sec.gov` Company Facts and Submissions and
 from the official `www.sec.gov` Company Facts bulk archive. DNS and TLS completed; the response was
-served by `AkamaiGHost`, with no `Retry-After` header. The same four-company PR job produced zero
-financial periods. These results are access diagnostics, not evidence that the SEC APIs are globally
+served by `AkamaiGHost`, with no `Retry-After` header. The five-company gate (GOOGL, AMAT, AVGO,
+QCOM, INTC) still has no verified operational evidence bundle and must not report live valuations.
+These results are access diagnostics, not evidence that the SEC APIs are globally
 unavailable.
 
 Official references:

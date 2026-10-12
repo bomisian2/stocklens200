@@ -19,6 +19,7 @@ from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.sec_windows import SAMPLE_TICKERS, SecWindowsDownloader  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
 from stocklens.valuation import evaluate_company  # noqa: E402
+from stocklens.valuation_evidence import load_valuation_evidence  # noqa: E402
 
 
 PROJECT_URL = "https://github.com/bomisian2/stocklens200"
@@ -42,7 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Probe official SEC access once on Windows and, only after success, "
-            "collect and validate the four-company sample"
+            "collect and validate the five-company sample"
         )
     )
     parser.add_argument(
@@ -56,6 +57,7 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--output-root", type=Path, default=ROOT / "data" / "sec-import")
     parser.add_argument("--minimum-interval", type=float, default=0.6)
+    parser.add_argument("--valuation-evidence", type=Path, default=None)
     args = parser.parse_args()
 
     if not args.contact or "@" not in args.contact or "noreply" in args.contact.lower():
@@ -72,6 +74,12 @@ def main() -> int:
     market_as_of = pd.to_datetime(
         universe_status["market_data_as_of_utc"], utc=True
     ).to_pydatetime()
+    valuation_evidence = (
+        load_valuation_evidence(
+            args.valuation_evidence, evaluated_at=market_as_of, allow_fixture=False
+        )
+        if args.valuation_evidence is not None else {}
+    )
 
     downloader = SecWindowsDownloader(
         user_agent=user_agent,
@@ -132,6 +140,7 @@ def main() -> int:
             risk_free_rate=float(risk_free.rate),
             evaluated_at=market_as_of,
             independent_financial_crosscheck=False,
+            valuation_evidence=valuation_evidence.get(ticker),
         ))
 
     financial_frame = pd.DataFrame([row.to_dict() for row in periods])
@@ -140,6 +149,10 @@ def main() -> int:
     valuation_frame.to_csv(run_dir / "valuations.csv", index=False, encoding="utf-8")
     evaluated_count = (
         int(valuation_frame["status"].eq("evaluated").sum())
+        if not valuation_frame.empty else 0
+    )
+    provisional_count = (
+        int(valuation_frame["status"].eq("provisional").sum())
         if not valuation_frame.empty else 0
     )
     completed = {
@@ -155,7 +168,8 @@ def main() -> int:
         "actual_financial_ticker_count": len({row.ticker for row in periods}),
         "valuation_output_count": len(valuations),
         "evaluated_count": evaluated_count,
-        "hold_count": len(valuations) - evaluated_count,
+        "provisional_count": provisional_count,
+        "hold_count": len(valuations) - evaluated_count - provisional_count,
         "valuations": [row.to_dict() for row in valuations],
     }
     _write_report(run_dir / "result.json", completed)
@@ -166,6 +180,7 @@ def main() -> int:
         "manifest": collected["manifest"],
         "actual_financial_ticker_count": completed["actual_financial_ticker_count"],
         "evaluated_count": evaluated_count,
+        "provisional_count": provisional_count,
         "hold_count": completed["hold_count"],
     })
     print(json.dumps({
@@ -174,6 +189,7 @@ def main() -> int:
         "actual_financial_ticker_count": completed["actual_financial_ticker_count"],
         "financial_period_count": len(periods),
         "evaluated_count": evaluated_count,
+        "provisional_count": provisional_count,
         "hold_count": completed["hold_count"],
     }, ensure_ascii=False, sort_keys=True))
     return 0 if evaluated_count == len(SAMPLE_TICKERS) else 3

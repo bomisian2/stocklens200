@@ -5,7 +5,10 @@ param(
     [string]$Contact,
 
     [Parameter()]
-    [double]$MinimumInterval = 0.6
+    [double]$MinimumInterval = 0.6,
+
+    [Parameter()]
+    [string]$ValuationEvidence
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,9 +24,15 @@ if ([string]::IsNullOrWhiteSpace($Contact) -or $Contact -match '(?i)noreply') {
 
 Push-Location $RepoRoot
 try {
-    & $Python.Source scripts/collect_sec_sample_windows.py `
-        --contact $Contact `
-        --minimum-interval $MinimumInterval
+    $Arguments = @(
+        'scripts/collect_sec_sample_windows.py',
+        '--contact', $Contact,
+        '--minimum-interval', $MinimumInterval
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ValuationEvidence)) {
+        $Arguments += @('--valuation-evidence', $ValuationEvidence)
+    }
+    & $Python.Source @Arguments
     exit $LASTEXITCODE
 }
 finally {

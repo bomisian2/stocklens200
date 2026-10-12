@@ -19,11 +19,12 @@ SEC_COMPANY_FACTS_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbr
 SEC_SUBMISSIONS_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
 SEC_SOURCE = "sec_edgar_companyfacts"
 KNOWN_CIKS = {
-    # Stable SEC registrant identifiers for the mandatory four-company sample.
+    # Stable SEC registrant identifiers for the mandatory valuation samples.
     "GOOGL": 1652044,
     "AMAT": 6951,
     "AVGO": 1730168,
     "QCOM": 804328,
+    "INTC": 50863,
 }
 
 

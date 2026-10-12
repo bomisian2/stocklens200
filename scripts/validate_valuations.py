@@ -42,6 +42,7 @@ def main() -> int:
     if not required.issubset(set(frame["ticker"])):
         raise RuntimeError(f"required tickers missing: {sorted(required - set(frame['ticker']))}")
     evaluated = frame[frame["status"] == "evaluated"]
+    provisional = frame[frame["status"] == "provisional"]
     if args.expect_unverified_hold:
         if not evaluated.empty:
             raise RuntimeError("unverified hold gate unexpectedly produced evaluated rows")
@@ -69,6 +70,8 @@ def main() -> int:
         raise RuntimeError("valuation status model version mismatch")
     if status.get("evaluated_count") != len(evaluated):
         raise RuntimeError("valuation status count mismatch")
+    if status.get("provisional_count", 0) != len(provisional):
+        raise RuntimeError("provisional valuation status count mismatch")
     if financials.empty or not set(evaluated["ticker"]).issubset(set(financials["ticker"])):
         raise RuntimeError("evaluated tickers lack stored financial periods")
     print(

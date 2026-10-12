@@ -28,7 +28,7 @@ from .financials import (
 from .sec_files import SecFileProvider, build_manifest_artifact
 
 
-SAMPLE_TICKERS = ("GOOGL", "AMAT", "AVGO", "QCOM")
+SAMPLE_TICKERS = ("GOOGL", "AMAT", "AVGO", "QCOM", "INTC")
 OFFICIAL_SEC_HOSTS = {"www.sec.gov", "data.sec.gov"}
 DEFAULT_MINIMUM_INTERVAL_SECONDS = 0.6
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0

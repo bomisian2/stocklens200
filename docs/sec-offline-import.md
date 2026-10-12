@@ -30,10 +30,12 @@ python scripts/create_sec_import_manifest.py \
   --companyfacts data/sec-import/CIK0000006951.json \
   --companyfacts data/sec-import/CIK0001730168.json \
   --companyfacts data/sec-import/CIK0000804328.json \
+  --companyfacts data/sec-import/CIK0000050863.json \
   --submissions data/sec-import/CIK0001652044-submissions.json \
   --submissions data/sec-import/CIK0000006951-submissions.json \
   --submissions data/sec-import/CIK0001730168-submissions.json \
   --submissions data/sec-import/CIK0000804328-submissions.json \
+  --submissions data/sec-import/CIK0000050863-submissions.json \
   --obtained-at 2026-10-12T12:00:00+09:00 \
   --output data/sec-import/manifest.json
 ```
@@ -43,7 +45,7 @@ CIK for individual JSON, SHA-256, and the operator-supplied acquisition time. Th
 hash mismatch, a path outside the manifest directory, a non-SEC source URL, a future acquisition
 time, or a manifest not explicitly marked `fixture=false`.
 
-The four mandatory sample identifiers were checked on 2026-10-12 against the official SEC ticker
+The five mandatory sample identifiers were checked on 2026-10-12 against the official SEC ticker
 file at `https://www.sec.gov/files/company_tickers.json`:
 
 | Ticker | SEC CIK | Ten-digit filename form |
@@ -52,6 +54,7 @@ file at `https://www.sec.gov/files/company_tickers.json`:
 | AMAT | 6951 | `CIK0000006951` |
 | AVGO | 1730168 | `CIK0001730168` |
 | QCOM | 804328 | `CIK0000804328` |
+| INTC | 50863 | `CIK0000050863` |
 
 A conflicting ticker map, CLI override, Company Facts CIK, or Submissions CIK is a hard error. For
 other companies, identity must be supported by an imported official ticker map or the ticker list in
@@ -62,13 +65,13 @@ the official Submissions payload; a bare user-entered ticker/CIK pair is not suf
 ```bash
 python scripts/import_sec_financials.py \
   --manifest data/sec-import/manifest.json \
-  --tickers GOOGL AMAT AVGO QCOM \
+  --tickers GOOGL AMAT AVGO QCOM INTC \
   --as-of 2026-10-09T20:00:00+00:00
 
 python scripts/update_valuations.py \
   --financial-source offline \
   --sec-manifest data/sec-import/manifest.json \
-  --tickers GOOGL AMAT AVGO QCOM \
+  --tickers GOOGL AMAT AVGO QCOM INTC \
   --allow-partial
 ```
 

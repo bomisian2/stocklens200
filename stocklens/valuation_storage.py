@@ -94,9 +94,9 @@ class ValuationStore:
             raise ValuationStoreError("valuation output contains duplicate tickers")
         if require_200 and len(frame) != 200:
             raise ValuationStoreError(f"valuation output must contain 200 rows, got {len(frame)}")
-        evaluated = frame["status"].eq("evaluated")
-        if frame.loc[evaluated, "base_value"].isna().any() or (frame.loc[evaluated, "base_value"] <= 0).any():
-            raise ValuationStoreError("evaluated rows require a positive base value")
+        valued = frame["status"].isin({"evaluated", "provisional"})
+        if frame.loc[valued, "base_value"].isna().any() or (frame.loc[valued, "base_value"] <= 0).any():
+            raise ValuationStoreError("evaluated and provisional rows require a positive base value")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._atomic_csv(frame, self.valuations_path)
         self._append_history(frame)

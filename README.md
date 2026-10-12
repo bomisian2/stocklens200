@@ -26,7 +26,9 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 
 - 공식 SEC EDGAR `companyfacts`와 `submissions` 파일에서 최근 5개 연도의 GAAP 재무와 실제 이용 가능 시각을 수집합니다.
 - 공식 U.S. Treasury 10년 금리를 시장 기준일 이전의 할인율 입력으로 사용합니다.
-- 정규화 EPS×PER, FCF DCF, EV/EBITDA 및 금융업 전용 residual P/B 중 입력 게이트를 통과한 모델만 자동 선택합니다.
+- 정규화 EPS×PER, FCF DCF, EV/EBITDA 및 금융업 전용 residual P/B 중 시점 일치 입력 게이트를 통과한 모델만 자동 선택합니다. PER과 EV/EBITDA에는 고정 업종 배수를 사용하지 않습니다.
+- PER은 최소 5년·20개 이상의 당시 공개 EPS/실제 가격 관측치가 필요하며 음수·구조적 손실·근거 없는 조정 EPS에서는 보류합니다.
+- 보수·기본·낙관 범위와 안전마진은 모델 분산, 예측오차, 재무위험과 데이터 품질로 자동 계산하며 고정 90~110% 밴드를 사용하지 않습니다.
 - 모델 버전, 원천 URL, 제출일, 접수시각, 보수/기본/낙관 값, 자동 안전마진, 신뢰도와 보류 사유를 저장합니다.
 - 현재 주가는 적정가 계산식에서 제외하고 계산이 끝난 뒤 저평가율과 판단에만 사용합니다.
 - REIT의 검증된 FFO/AFFO, IFRS ADR, 재배포 가능한 분석가 컨센서스가 없으면 정상 값으로 대체하지 않고 판단을 보류합니다.
@@ -37,7 +39,7 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
 - 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
-설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
 
 ## 로컬 실행
 
@@ -48,7 +50,7 @@ python scripts/update_valuations.py --financial-source offline --sec-manifest da
 streamlit run app.py
 ```
 
-Windows PC에서 공식 SEC 접근을 한 번만 진단하고, 성공할 때만 4개 표본을 수집·평가하는 명령은 다음과 같습니다. SEC User-Agent에 들어갈 실제 수신 가능한 연락처를 환경변수 또는 `-Contact`로 제공해야 하며 이 값은 결과 파일이나 로그에 저장하지 않습니다.
+Windows PC에서 공식 SEC 접근을 한 번만 진단하고, 성공할 때만 5개 표본을 수집·평가하는 명령은 다음과 같습니다. SEC User-Agent에 들어갈 실제 수신 가능한 연락처를 환경변수 또는 `-Contact`로 제공해야 하며 이 값은 결과 파일이나 로그에 저장하지 않습니다.
 
 ```powershell
 $env:STOCKLENS_SEC_CONTACT = 'your-monitored-email@example.com'
@@ -56,7 +58,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_sec_windows.ps
 Remove-Item Env:STOCKLENS_SEC_CONTACT
 ```
 
-첫 GOOGL Company Facts 요청이 403이면 재시도, 프록시, IP 변경, Submissions 및 다른 기업 요청 없이 종료합니다. 성공하면 공식 ticker map과 4개사의 Company Facts/Submissions를 0.6초 이상 간격으로 각각 한 번만 받아 SHA-256 manifest 및 검증 결과를 `data/sec-import/<UTC 실행시각>/`에 저장합니다. 이 원본 디렉터리는 Git에서 제외됩니다.
+첫 GOOGL Company Facts 요청이 403이면 재시도, 프록시, IP 변경, Submissions 및 다른 기업 요청 없이 종료합니다. 성공하면 공식 ticker map과 GOOGL·AMAT·AVGO·QCOM·INTC의 Company Facts/Submissions를 0.6초 이상 간격으로 각각 한 번만 받아 SHA-256 manifest 및 검증 결과를 `data/sec-import/<UTC 실행시각>/`에 저장합니다. 이 원본 디렉터리는 Git에서 제외됩니다.
 
 테스트:
 
@@ -121,4 +123,4 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
 
 무료 공급원의 시가총액, 가격, 기업 분류는 지연되거나 정정될 수 있습니다. 미국 거래소 상장 여부와 기업 소재국은 서로 다른 개념이므로 해외 기업의 ADR도 포함될 수 있습니다. 이 프로젝트는 연구용이며 투자 권유가 아닙니다.
 
-Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft로 구현됐지만 공식 SEC 원본 파일이 아직 제공되지 않아 GOOGL·AMAT·AVGO·QCOM의 실데이터 평가는 0/4이며 모두 판단 보류입니다. 3단계 단기 신호도 아직 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.
+Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft로 구현됐지만 공식 SEC 원본과 비-fixture 가치평가 증거가 아직 제공되지 않아 GOOGL·AMAT·AVGO·QCOM·INTC의 실데이터 평가는 0/5이며 모두 판단 보류입니다. 3단계 단기 신호도 아직 운영 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.

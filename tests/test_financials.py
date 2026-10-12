@@ -47,6 +47,7 @@ def test_official_sample_ciks_are_fixed_and_conflicts_fail_closed() -> None:
         "AMAT": 6951,
         "AVGO": 1730168,
         "QCOM": 804328,
+        "INTC": 50863,
     }
     validate_ticker_cik("AMAT", 6951)
     try:

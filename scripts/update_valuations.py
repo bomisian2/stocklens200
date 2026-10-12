@@ -27,6 +27,10 @@ from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
 from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
 from stocklens.valuation import MODEL_VERSION, ValuationResult, evaluate_company  # noqa: E402
+from stocklens.valuation_evidence import (  # noqa: E402
+    ValuationEvidenceError,
+    load_valuation_evidence,
+)
 from stocklens.valuation_storage import ValuationStore  # noqa: E402
 
 
@@ -110,6 +114,12 @@ def main() -> int:
         help="Offline is the safe default; sec-api must be selected explicitly",
     )
     parser.add_argument("--sec-manifest", type=Path, default=None, help="Hash-verified manifest for official SEC files")
+    parser.add_argument(
+        "--valuation-evidence",
+        type=Path,
+        default=None,
+        help="Point-in-time P/E, EPS-quality, forecast and comparable evidence JSON",
+    )
     args = parser.parse_args()
 
     snapshot_store = SnapshotStore(args.data_dir)
@@ -128,6 +138,16 @@ def main() -> int:
 
     market_as_of = pd.to_datetime(universe_status["market_data_as_of_utc"], utc=True).to_pydatetime()
     evaluated_at = market_as_of.astimezone(timezone.utc)
+    valuation_evidence = {}
+    if args.valuation_evidence is not None:
+        try:
+            valuation_evidence = load_valuation_evidence(
+                args.valuation_evidence,
+                evaluated_at=evaluated_at,
+                allow_fixture=False,
+            )
+        except (OSError, ValuationEvidenceError) as exc:
+            raise RuntimeError(f"valuation evidence rejected: {exc}") from exc
     valuation_store = ValuationStore(args.data_dir)
     cached_periods = valuation_store.load_financials()
     cached_by_ticker: dict[str, list] = {}
@@ -295,6 +315,8 @@ def main() -> int:
                 risk_free_rate=float(risk_free.rate),
                 evaluated_at=evaluated_at,
                 independent_financial_crosscheck=False,
+                valuation_evidence=valuation_evidence.get(ticker),
+                prior_judgement=str(prior.get("judgement")) if prior else None,
             )
         prior_base = prior.get("base_value")
         if pd.notna(prior_base) and result.base_value is not None:
@@ -308,6 +330,7 @@ def main() -> int:
         require_200=not (args.allow_partial or args.tickers or args.max_companies),
     )
     evaluated = int(output["status"].eq("evaluated").sum())
+    provisional = int(output["status"].eq("provisional").sum())
     status = {
         "schema_version": 1,
         "model_version": MODEL_VERSION,
@@ -316,7 +339,8 @@ def main() -> int:
         "universe_session_date": universe_status["market_session_date"],
         "company_count": int(len(output)),
         "evaluated_count": evaluated,
-        "hold_count": int(len(output) - evaluated),
+        "provisional_count": provisional,
+        "hold_count": int(len(output) - evaluated - provisional),
         "financial_period_count": int(sum(len(value) for value in refreshed_by_ticker.values())),
         "financial_source": (
             "SEC EDGAR official offline files" if args.financial_source == "offline"
@@ -325,6 +349,8 @@ def main() -> int:
         "financial_source_mode": args.financial_source,
         "independent_financial_crosscheck": "not_configured",
         "consensus_source": "not_configured",
+        "valuation_evidence_configured": args.valuation_evidence is not None,
+        "valuation_evidence_ticker_count": len(valuation_evidence),
         "risk_free_rate": None if risk_free is None else {
             "as_of": risk_free.as_of,
             "tenor": risk_free.tenor,
@@ -341,16 +367,18 @@ def main() -> int:
         "data_state": "degraded" if errors else "healthy",
         "eligible_for_new_valuation": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
         "eligible_for_new_signals": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
-        "eligible_for_display": evaluated > 0,
+        "eligible_for_display": evaluated + provisional > 0,
         "limitations": [
             "Consensus EPS/revenue revisions remain unavailable without a redistribution-safe free source.",
             "Management guidance text is not inferred from XBRL and remains unavailable until a traceable filing-text extractor is validated.",
             "Independent financial-statement provider cross-check is not configured; SEC internal EPS consistency checks are used.",
             "IFRS and verified REIT FFO/AFFO mappings remain on hold.",
+            "P/E is disabled unless a 5+ year point-in-time price/EPS distribution and EPS-quality evidence are supplied.",
+            "Growth/ROIC multiple adjustments are disabled unless an independently held-out calibration is accepted.",
         ],
     }
     valuation_store.save_status(status)
-    print(json.dumps({key: status[key] for key in ("company_count", "evaluated_count", "hold_count", "financial_period_count", "provider_error_count")}, sort_keys=True))
+    print(json.dumps({key: status[key] for key in ("company_count", "evaluated_count", "provisional_count", "hold_count", "financial_period_count", "provider_error_count")}, sort_keys=True))
     return 0
 
 

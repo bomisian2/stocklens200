@@ -21,7 +21,7 @@ response bodies, credentials, cookies, or personal data. It is not run in CI.
 Result: no third-party free source was both technically available and licensed clearly enough for
 this public dashboard. Therefore only official SEC data is connected, and only from a verified
 operator-supplied file when direct access is blocked. Independent financial cross-validation remains
-`not_configured`; this lowers confidence and blocks any claim that the four sample valuations have
+`not_configured`; this lowers confidence and blocks any claim that the five sample valuations have
 been completed.
 
 References:

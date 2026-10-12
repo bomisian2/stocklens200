@@ -61,15 +61,15 @@ jobs:
         run: >-
           python scripts/update_valuations.py
           --data-dir "$RUNNER_TEMP/stocklens-valuation"
-          --tickers GOOGL AMAT AVGO QCOM
+          --tickers GOOGL AMAT AVGO QCOM INTC
           --financial-source offline
           --allow-partial
-      - name: Verify all four remain explicitly held
+      - name: Verify all five remain explicitly held
         run: >-
           python scripts/validate_valuations.py
           --data-dir "$RUNNER_TEMP/stocklens-valuation"
           --allow-partial
-          --require-tickers GOOGL AMAT AVGO QCOM
+          --require-tickers GOOGL AMAT AVGO QCOM INTC
           --expect-unverified-hold
       - uses: actions/upload-artifact@v4
         if: always()

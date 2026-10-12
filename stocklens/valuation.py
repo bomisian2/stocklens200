@@ -8,35 +8,16 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .financials import FinancialPeriod
+from .valuation_evidence import ValuationEvidence
 
 
-MODEL_VERSION = "valuation-v2.0.0"
+MODEL_VERSION = "valuation-v2.1.0"
 EQUITY_RISK_PREMIUM = 0.05
-
-SECTOR_PE = {
-    "Technology": 22.0,
-    "Communication Services": 20.0,
-    "Consumer Cyclical": 19.0,
-    "Consumer Defensive": 19.0,
-    "Healthcare": 20.0,
-    "Industrials": 18.0,
-    "Energy": 13.0,
-    "Utilities": 16.0,
-    "Basic Materials": 15.0,
-}
-SECTOR_EV_EBITDA = {
-    "Technology": 16.0,
-    "Communication Services": 14.0,
-    "Consumer Cyclical": 13.0,
-    "Consumer Defensive": 13.0,
-    "Healthcare": 14.0,
-    "Industrials": 12.0,
-    "Energy": 8.0,
-    "Utilities": 10.0,
-    "Basic Materials": 9.0,
-}
 FINANCIAL_SECTORS = {"Financial Services", "Financials"}
 REIT_INDUSTRY_WORDS = {"reit", "real estate investment trust"}
+MIN_PE_OBSERVATIONS = 20
+MIN_PE_YEARS = 5.0
+MIN_COMPARABLE_OBSERVATIONS = 5
 
 
 @dataclass(frozen=True)
@@ -85,17 +66,22 @@ class ValuationResult:
         return asdict(self)
 
 
-def _finite(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
 def _median(values: Iterable[float | None]) -> float | None:
     clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     return statistics.median(clean) if clean else None
+
+
+def _quantile(values: Iterable[float], probability: float) -> float | None:
+    clean = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    position = (len(clean) - 1) * probability
+    low, high = math.floor(position), math.ceil(position)
+    if low == high:
+        return clean[low]
+    return clean[low] + (clean[high] - clean[low]) * (position - low)
 
 
 def _cagr(first: float | None, last: float | None, years: int) -> float | None:
@@ -108,13 +94,22 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("valuation timestamps must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def _family(ticker: str, sector: str, industry: str) -> str:
-    lower_industry = industry.lower()
-    if any(word in lower_industry for word in REIT_INDUSTRY_WORDS):
+    lower = industry.lower()
+    if any(word in lower for word in REIT_INDUSTRY_WORDS):
         return "reit"
     if sector in FINANCIAL_SECTORS:
         return "financial"
-    if ticker == "AMAT" or any(word in lower_industry for word in ("semiconductor equipment", "steel", "mining")):
+    if ticker == "INTC":
+        return "turnaround"
+    if ticker == "AMAT" or any(word in lower for word in ("semiconductor equipment", "steel", "mining")):
         return "cyclical"
     if ticker == "AVGO":
         return "acquisitive"
@@ -122,147 +117,180 @@ def _family(ticker: str, sector: str, industry: str) -> str:
 
 
 def _tax_rate(periods: list[FinancialPeriod]) -> float:
-    rates = []
-    for period in periods:
-        if period.pretax_income and period.pretax_income > 0 and period.income_tax is not None:
-            rates.append(period.income_tax / period.pretax_income)
-    rate = _median(rates)
-    return _clamp(rate if rate is not None else 0.21, 0.10, 0.30)
+    rates = [
+        row.income_tax / row.pretax_income for row in periods
+        if row.pretax_income and row.pretax_income > 0 and row.income_tax is not None
+    ]
+    return _clamp(_median(rates) if rates else 0.21, 0.10, 0.30)
+
+
+def _growth_series(periods: list[FinancialPeriod], field: str) -> list[float]:
+    values = [getattr(period, field) for period in periods[-6:]]
+    return [
+        current / previous - 1 for previous, current in zip(values, values[1:])
+        if previous is not None and current is not None and previous > 0 and current > 0
+    ]
 
 
 def _normalized_metrics(periods: list[FinancialPeriod], family: str) -> dict[str, float | None]:
     periods = sorted(periods, key=lambda row: (row.period_end, row.filed_at))
-    window = periods[-5:] if family == "cyclical" else periods[-3:]
-    tax = _tax_rate(periods[-5:])
-    eps = _median(row.diluted_eps for row in window if row.diluted_eps is not None and row.diluted_eps > 0)
+    window = periods[-5:] if family in {"cyclical", "turnaround"} else periods[-3:]
     fcf = _median(row.fcf for row in window if row.fcf is not None and row.fcf > 0)
     shares = _median(row.diluted_shares for row in window if row.diluted_shares and row.diluted_shares > 0)
     operating = _median(row.operating_income for row in window if row.operating_income is not None)
     da = _median(row.depreciation_amortization for row in window if row.depreciation_amortization is not None)
-    core_eps = operating * (1 - tax) / shares if operating is not None and operating > 0 and shares else None
-    revenue_growth = None
-    if len(periods) >= 3:
-        usable = [row for row in periods[-5:] if row.revenue and row.revenue > 0]
-        if len(usable) >= 2:
-            revenue_growth = _cagr(usable[0].revenue, usable[-1].revenue, len(usable) - 1)
-    fcf_growth = None
-    usable_fcf = [row for row in periods[-5:] if row.fcf and row.fcf > 0]
-    if len(usable_fcf) >= 2:
-        fcf_growth = _cagr(usable_fcf[0].fcf, usable_fcf[-1].fcf, len(usable_fcf) - 1)
+    revenue_rows = [row for row in periods[-5:] if row.revenue and row.revenue > 0]
+    fcf_rows = [row for row in periods[-5:] if row.fcf and row.fcf > 0]
+    revenue_growth = _cagr(revenue_rows[0].revenue, revenue_rows[-1].revenue, len(revenue_rows) - 1) if len(revenue_rows) >= 2 else None
+    fcf_growth = _cagr(fcf_rows[0].fcf, fcf_rows[-1].fcf, len(fcf_rows) - 1) if len(fcf_rows) >= 2 else None
+    growth_series = _growth_series(periods, "revenue") + _growth_series(periods, "fcf")
     margins = [row.operating_income / row.revenue for row in window if row.operating_income is not None and row.revenue]
+    latest = periods[-1]
     return {
-        "eps": eps,
-        "core_eps": core_eps,
         "fcf": fcf,
         "shares": shares,
         "ebitda": operating + da if operating is not None and da is not None else None,
         "revenue_growth": revenue_growth,
         "fcf_growth": fcf_growth,
+        "growth_std": statistics.pstdev(growth_series) if len(growth_series) >= 3 else None,
         "operating_margin": _median(margins),
-        "tax_rate": tax,
-        "cash": periods[-1].cash,
-        "debt": periods[-1].total_debt,
-        "equity": periods[-1].equity,
-        "net_income": periods[-1].net_income,
+        "tax_rate": _tax_rate(periods[-5:]),
+        "cash": latest.cash,
+        "debt": latest.total_debt,
+        "equity": latest.equity,
+        "net_income": latest.net_income,
     }
 
 
-def _growth_rate(metrics: dict[str, float | None], family: str) -> float:
-    candidates = [metrics.get("revenue_growth"), metrics.get("fcf_growth")]
-    growth = _median(candidates)
-    if growth is None:
-        growth = 0.0
-    high = 0.06 if family == "cyclical" else 0.15
-    return _clamp(growth, -0.05, high)
+def _growth_rate(metrics: dict[str, float | None], family: str, evidence: ValuationEvidence | None, evaluated_at: datetime) -> tuple[float | None, str]:
+    forecast = evidence.forecast if evidence else None
+    if forecast and _timestamp(forecast.available_at_utc) <= evaluated_at:
+        value = _median([forecast.eps_growth, forecast.fcf_growth])
+        if value is not None:
+            return _clamp(value, -0.10, 0.08 if family in {"cyclical", "turnaround"} else 0.20), "point_in_time_forecast"
+    historical = _median([metrics.get("revenue_growth"), metrics.get("fcf_growth")])
+    if historical is None:
+        return None, "unavailable"
+    return _clamp(historical, -0.10, 0.06 if family in {"cyclical", "turnaround"} else 0.15), "historical_only"
 
 
-def _earnings_model(
-    ticker: str,
-    sector: str,
-    metrics: dict[str, float | None],
-    family: str,
-    discount_rate: float,
-) -> ModelResult:
-    eps = metrics.get("eps")
-    core_eps = metrics.get("core_eps")
-    adjusted = False
-    if ticker == "GOOGL" and core_eps and eps and abs(core_eps - eps) / max(abs(eps), 0.01) > 0.10:
-        eps = _median([eps, core_eps])
-        adjusted = True
-    if eps is None or eps <= 0 or sector not in SECTOR_PE:
-        return ModelResult("normalized_eps", False, None, None, None, 0.0, {}, "positive normalized EPS or sector benchmark unavailable")
-    growth = _growth_rate(metrics, family)
-    quality = 1.5 if (metrics.get("operating_margin") or 0) >= 0.20 else -1.0 if (metrics.get("operating_margin") or 0) < 0.08 else 0.0
-    rate_adjustment = (0.09 - discount_rate) * 35
-    target_pe = _clamp(SECTOR_PE[sector] + growth * 20 + quality + rate_adjustment, 8.0, 32.0)
-    base = eps * target_pe
+def _historical_pe_distribution(evidence: ValuationEvidence | None, evaluated_at: datetime, risk_free_rate: float) -> tuple[dict[str, Any] | None, str]:
+    if evidence is None:
+        return None, "point-in-time P/E evidence unavailable"
+    eligible: list[tuple[Any, float]] = []
+    excluded = 0
+    for row in evidence.historical_pe:
+        observed, eps_available = _timestamp(row.observed_at_utc), _timestamp(row.eps_available_at_utc)
+        if observed > evaluated_at or eps_available > observed or row.distorted or row.public_ttm_eps <= 0 or row.price <= 0:
+            excluded += 1
+            continue
+        eligible.append((row, row.price / row.public_ttm_eps))
+    eligible.sort(key=lambda pair: pair[0].observed_at_utc)
+    if len(eligible) < MIN_PE_OBSERVATIONS:
+        return None, f"only {len(eligible)} clean P/E observations; minimum is {MIN_PE_OBSERVATIONS}"
+    span = (_timestamp(eligible[-1][0].observed_at_utc) - _timestamp(eligible[0][0].observed_at_utc)).days / 365.25
+    if span < MIN_PE_YEARS:
+        return None, f"P/E history spans {span:.2f} years; minimum is {MIN_PE_YEARS:.1f}"
+    raw = [value for _, value in eligible]
+    raw_q1, raw_q3 = float(_quantile(raw, 0.25)), float(_quantile(raw, 0.75))
+    iqr = raw_q3 - raw_q1
+    clean = [pair for pair in eligible if max(0.1, raw_q1 - 1.5 * iqr) <= pair[1] <= raw_q3 + 1.5 * iqr]
+    values = [value for _, value in clean]
+    rate_matched = [value for row, value in clean if row.risk_free_rate is not None and abs(row.risk_free_rate - risk_free_rate) <= 0.0075]
+    conditioned = rate_matched if len(rate_matched) >= 8 else values
+    sector_ratios = [value / row.sector_pe for row, value in clean if row.sector_pe and row.sector_pe > 0]
+    anchors = [float(_median(conditioned))]
+    if evidence.current_sector_pe and sector_ratios:
+        anchors.append(evidence.current_sector_pe * float(_median(sector_ratios)))
+    target = float(_median(anchors))
+    calibration = evidence.calibration
+    forecast = evidence.forecast
+    adjustment = 0.0
+    calibration_applied = False
+    if calibration and calibration.accepted and calibration.selected_before_holdout and calibration.holdout_observations >= 30 and forecast and _timestamp(forecast.available_at_utc) <= evaluated_at:
+        if forecast.eps_growth is not None:
+            adjustment += calibration.coefficients.get("eps_growth", 0.0) * forecast.eps_growth
+        if forecast.roic is not None:
+            adjustment += calibration.coefficients.get("roic", 0.0) * forecast.roic
+        target *= 1 + _clamp(adjustment, -0.25, 0.25)
+        calibration_applied = True
+    target = _clamp(target, float(_quantile(values, 0.10)), float(_quantile(values, 0.90)))
+    return {
+        "count": len(values), "excluded_count": excluded + len(eligible) - len(clean), "span_years": round(span, 4),
+        "q1": float(_quantile(values, 0.25)), "median": float(_median(values)), "q3": float(_quantile(values, 0.75)),
+        "rate_conditioned_count": len(rate_matched), "sector_relative_count": len(sector_ratios),
+        "target_pe": target, "calibration_applied": calibration_applied, "calibration_adjustment": adjustment,
+    }, "verified point-in-time P/E distribution"
+
+
+def _validated_eps(evidence: ValuationEvidence | None, evaluated_at: datetime) -> tuple[float | None, dict[str, Any], str]:
+    quality = evidence.earnings_quality if evidence else None
+    if quality is None or _timestamp(quality.available_at_utc) > evaluated_at:
+        return None, {}, "verified GAAP/normalized EPS assessment unavailable"
+    inputs = {"gaap_eps": quality.gaap_eps, "normalized_eps": quality.normalized_eps, "earnings_quality_state": quality.state, "loss_assessment": quality.loss_assessment, "earnings_source_url": quality.source_url}
+    if quality.state in {"negative", "structural_loss", "unverified"} or quality.gaap_eps <= 0:
+        return None, inputs, "negative, structural, or unverified EPS blocks the P/E model"
+    if quality.state == "distorted":
+        visible = [item for item in quality.adjustments if _timestamp(item.available_at_utc) <= evaluated_at]
+        inputs["adjustment_categories"] = sorted({item.category for item in visible})
+        if quality.normalized_eps is None or quality.normalized_eps <= 0 or not visible:
+            return None, inputs, "distorted EPS lacks traceable normalization evidence"
+        return quality.normalized_eps, inputs, "traceable normalized EPS used"
+    return quality.gaap_eps, inputs, "GAAP EPS used"
+
+
+def _earnings_model(evidence: ValuationEvidence | None, evaluated_at: datetime, risk_free_rate: float) -> ModelResult:
+    eps, eps_inputs, eps_reason = _validated_eps(evidence, evaluated_at)
+    distribution, distribution_reason = _historical_pe_distribution(evidence, evaluated_at, risk_free_rate)
+    if eps is None or distribution is None:
+        return ModelResult("normalized_eps", False, None, None, None, 0.0, {**eps_inputs, "pe_gate": distribution_reason}, f"{eps_reason}; {distribution_reason}")
     return ModelResult(
-        "normalized_eps",
-        True,
-        base * 0.78,
-        base,
-        base * 1.22,
-        0.0,
-        {"normalized_eps": round(eps, 6), "target_pe": round(target_pe, 3), "growth": round(growth, 6), "core_eps_adjustment": adjusted},
-        "five-year median for cyclical issuers, otherwise recent three-year median; multiple is sector, growth, quality and rate adjusted",
+        "normalized_eps", True, eps * distribution["q1"], eps * distribution["target_pe"], eps * distribution["q3"], 0.0,
+        {**eps_inputs, **distribution}, "quality-gated EPS and 5+ year point-in-time P/E distribution; no fixed sector multiple",
     )
 
 
-def _dcf_model(metrics: dict[str, float | None], family: str, discount_rate: float) -> ModelResult:
+def _dcf_model(metrics: dict[str, float | None], family: str, discount_rate: float, evidence: ValuationEvidence | None, evaluated_at: datetime) -> ModelResult:
     fcf, shares = metrics.get("fcf"), metrics.get("shares")
-    if fcf is None or fcf <= 0 or shares is None or shares <= 0 or discount_rate <= 0.03:
-        return ModelResult("fcf_dcf", False, None, None, None, 0.0, {}, "positive normalized FCF, shares, and a valid discount rate are required")
-    growth = _growth_rate(metrics, family)
+    growth, growth_basis = _growth_rate(metrics, family, evidence, evaluated_at)
+    if fcf is None or fcf <= 0 or shares is None or shares <= 0 or discount_rate <= 0.03 or growth is None:
+        return ModelResult("fcf_dcf", False, None, None, None, 0.0, {}, "positive normalized FCF, shares, growth evidence, and a valid discount rate are required")
+    forecast = evidence.forecast if evidence else None
+    uncertainty = [metrics.get("growth_std"), evidence.historical_forecast_error if evidence else None]
+    if forecast and _timestamp(forecast.available_at_utc) <= evaluated_at:
+        uncertainty.append(forecast.dispersion)
+    growth_uncertainty = _clamp(max([value for value in uncertainty if value is not None and value >= 0] or [0.05]), 0.01, 0.12)
 
-    def value(growth_shift: float, rate_shift: float, terminal_shift: float) -> float:
-        g = _clamp(growth + growth_shift, -0.05, 0.16)
-        rate = _clamp(discount_rate + rate_shift, 0.065, 0.18)
-        terminal = _clamp(min(0.025 + terminal_shift, max(0.0, g / 2)), 0.0, 0.03)
-        projected = fcf
-        present = 0.0
+    def value(growth_rate: float, rate: float) -> float:
+        growth_rate, rate = _clamp(growth_rate, -0.10, 0.20), _clamp(rate, 0.06, 0.20)
+        terminal = _clamp(min(0.025, max(0.0, growth_rate / 2)), 0.0, min(0.03, rate - 0.02))
+        projected, present = fcf, 0.0
         for year in range(1, 6):
-            projected *= 1 + g
+            projected *= 1 + growth_rate
             present += projected / ((1 + rate) ** year)
-        terminal_value = projected * (1 + terminal) / (rate - terminal)
-        return (present + terminal_value / ((1 + rate) ** 5)) / shares
+        return (present + projected * (1 + terminal) / (rate - terminal) / ((1 + rate) ** 5)) / shares
 
-    base = value(0.0, 0.0, 0.0)
     return ModelResult(
-        "fcf_dcf",
-        True,
-        value(-0.03, 0.015, -0.005),
-        base,
-        value(0.03, -0.01, 0.005),
-        0.0,
-        {"normalized_fcf": round(fcf, 2), "diluted_shares": round(shares, 2), "growth": round(growth, 6), "discount_rate": round(discount_rate, 6)},
-        "five-year explicit FCF forecast plus terminal value; current market price is not an input",
+        "fcf_dcf", True, value(growth - growth_uncertainty, discount_rate + growth_uncertainty / 2), value(growth, discount_rate), value(growth + growth_uncertainty, discount_rate - growth_uncertainty / 2), 0.0,
+        {"normalized_fcf": round(fcf, 2), "diluted_shares": round(shares, 2), "growth": round(growth, 6), "growth_basis": growth_basis, "growth_uncertainty": round(growth_uncertainty, 6), "discount_rate": round(discount_rate, 6)},
+        "growth enters cash-flow forecasts once; risk-free rate enters capital cost, and no macro price haircut is applied",
     )
 
 
-def _ev_ebitda_model(sector: str, metrics: dict[str, float | None], family: str) -> ModelResult:
+def _ev_ebitda_model(metrics: dict[str, float | None], evidence: ValuationEvidence | None, evaluated_at: datetime) -> ModelResult:
     ebitda, shares = metrics.get("ebitda"), metrics.get("shares")
+    rows = [row for row in (evidence.comparable_ev_ebitda if evidence else ()) if _timestamp(row.available_at_utc) <= _timestamp(row.observed_at_utc) <= evaluated_at]
+    multiples = [row.ev_to_ebitda for row in rows]
+    if ebitda is None or ebitda <= 0 or shares is None or shares <= 0 or len(multiples) < MIN_COMPARABLE_OBSERVATIONS:
+        return ModelResult("ev_ebitda", False, None, None, None, 0.0, {"comparable_count": len(multiples)}, "EBITDA, shares, or point-in-time comparable distribution unavailable")
     cash, debt = metrics.get("cash"), metrics.get("debt")
-    if ebitda is None or ebitda <= 0 or shares is None or shares <= 0 or sector not in SECTOR_EV_EBITDA:
-        return ModelResult("ev_ebitda", False, None, None, None, 0.0, {}, "EBITDA, diluted shares, or sector benchmark unavailable")
-    multiple = SECTOR_EV_EBITDA[sector]
-    if family == "cyclical":
-        multiple *= 0.85
     net_debt = (debt or 0.0) - (cash or 0.0)
 
-    def per_share(multiplier: float) -> float:
-        return max(0.0, ebitda * multiplier - net_debt) / shares
+    def per_share(multiple: float) -> float:
+        return max(0.0, ebitda * multiple - net_debt) / shares
 
-    base = per_share(multiple)
-    return ModelResult(
-        "ev_ebitda",
-        True,
-        per_share(multiple * 0.80),
-        base,
-        per_share(multiple * 1.20),
-        0.0,
-        {"normalized_ebitda": round(ebitda, 2), "multiple": round(multiple, 3), "net_debt": round(net_debt, 2)},
-        "normalized operating income plus D&A, converted from enterprise to equity value",
-    )
+    q1, median, q3 = float(_quantile(multiples, 0.25)), float(_median(multiples)), float(_quantile(multiples, 0.75))
+    return ModelResult("ev_ebitda", True, per_share(q1), per_share(median), per_share(q3), 0.0, {"normalized_ebitda": ebitda, "comparable_count": len(multiples), "multiple_q1": q1, "multiple_median": median, "multiple_q3": q3, "net_debt": net_debt}, "point-in-time comparable distribution; no fixed sector multiple")
 
 
 def _financial_model(metrics: dict[str, float | None], discount_rate: float) -> ModelResult:
@@ -270,155 +298,108 @@ def _financial_model(metrics: dict[str, float | None], discount_rate: float) -> 
     if not equity or equity <= 0 or not shares or shares <= 0 or income is None:
         return ModelResult("residual_pb", False, None, None, None, 0.0, {}, "book equity, earnings, or shares unavailable")
     roe = income / equity
-    growth = _clamp(_growth_rate(metrics, "financial"), 0.0, 0.04)
-    if discount_rate <= growth + 0.01:
-        return ModelResult("residual_pb", False, None, None, None, 0.0, {}, "cost of equity is not sufficiently above sustainable growth")
-    justified_pb = _clamp((roe - growth) / (discount_rate - growth), 0.35, 3.5)
-    base = equity / shares * justified_pb
-    return ModelResult(
-        "residual_pb",
-        True,
-        base * 0.75,
-        base,
-        base * 1.25,
-        1.0,
-        {"book_value_per_share": round(equity / shares, 6), "roe": round(roe, 6), "growth": round(growth, 6), "cost_of_equity": round(discount_rate, 6), "justified_pb": round(justified_pb, 4)},
-        "financial-sector residual-income proxy using book value, ROE, sustainable growth and cost of equity",
-    )
+    if roe <= 0 or discount_rate <= 0.03:
+        return ModelResult("residual_pb", False, None, None, None, 0.0, {"roe": roe}, "positive ROE and valid cost of equity required")
+    growth = min(max(roe * 0.25, 0.0), discount_rate - 0.02)
+    uncertainty = min(abs(roe) * 0.35, discount_rate / 2)
+
+    def value(scenario_roe: float) -> float:
+        multiple = max(0.0, (max(0.0, scenario_roe) - growth) / (discount_rate - growth))
+        return equity / shares * multiple
+
+    return ModelResult("residual_pb", True, value(roe - uncertainty), value(roe), value(roe + uncertainty), 1.0, {"book_value_per_share": equity / shares, "roe": roe, "sustainable_growth": growth, "cost_of_equity": discount_rate}, "residual-income scenario width follows observed ROE")
 
 
-def _assign_weights(models: list[ModelResult], family: str) -> list[ModelResult]:
-    desired = {
-        "general": {"normalized_eps": 0.40, "fcf_dcf": 0.40, "ev_ebitda": 0.20},
-        "cyclical": {"normalized_eps": 0.45, "fcf_dcf": 0.25, "ev_ebitda": 0.30},
-        "acquisitive": {"normalized_eps": 0.15, "fcf_dcf": 0.55, "ev_ebitda": 0.30},
-        "financial": {"residual_pb": 1.0},
-    }.get(family, {})
-    available_total = sum(desired.get(model.name, 0.0) for model in models if model.available)
-    if available_total <= 0:
+def _assign_weights(models: list[ModelResult]) -> list[ModelResult]:
+    scores = {}
+    for model in models:
+        if model.available and model.base and model.base > 0 and model.conservative is not None and model.optimistic is not None:
+            scores[model.name] = 1 / max((model.optimistic - model.conservative) / model.base, 0.05)
+    total = sum(scores.values())
+    if total <= 0:
         return models
-    return [
-        ModelResult(**{**asdict(model), "weight": desired.get(model.name, 0.0) / available_total if model.available else 0.0})
-        for model in models
-    ]
+    return [ModelResult(**{**asdict(model), "weight": scores.get(model.name, 0.0) / total}) for model in models]
 
 
 def _weighted(models: list[ModelResult], field: str) -> float | None:
     values = [(getattr(model, field), model.weight) for model in models if model.available and getattr(model, field) is not None and model.weight > 0]
-    if not values:
-        return None
-    return sum(value * weight for value, weight in values) / sum(weight for _, weight in values)
+    return sum(value * weight for value, weight in values) / sum(weight for _, weight in values) if values else None
 
 
 def _narrative(ticker: str, sector: str, family: str) -> tuple[str, str]:
     special = {
-        "GOOGL": (
-            "광고·클라우드 영업현금흐름과 AI 제품 확장; 영업이익 기반 core EPS로 투자 평가손익 영향을 점검",
-            "AI 인프라 CAPEX 확대, 광고 경기 민감도, 규제와 일회성 투자 평가손익",
-        ),
-        "AMAT": (
-            "첨단 공정·패키징 장비 수요와 장기 반도체 투자 증가",
-            "설비투자 사이클, 수주 변동과 고객·지역 집중; 5년 정상화 지표 적용",
-        ),
-        "AVGO": (
-            "AI 네트워킹·가속기 수요와 VMware 반복 현금흐름",
-            "인수 부채, 통합 실행, 무형자산 상각과 GAAP/조정 EPS 괴리; FCF 가중 확대",
-        ),
-        "QCOM": (
-            "라이선스 수익과 자동차·IoT 매출 다변화",
-            "스마트폰 업황, 주요 고객 내재화와 라이선스 규제 위험",
-        ),
+        "GOOGL": ("광고·클라우드 현금흐름과 AI 제품 확장", "AI CAPEX, 광고 경기민감도, 규제와 투자 평가손익"),
+        "AMAT": ("첨단공정·패키징 장비 수요", "설비투자 사이클, 수주와 고객·지역 집중"),
+        "AVGO": ("AI 반도체와 VMware 반복 현금흐름", "인수부채, 통합, 무형자산 상각과 GAAP EPS 왜곡"),
+        "QCOM": ("라이선스와 자동차·IoT 다변화", "스마트폰 업황, 고객 내재화와 라이선스 규제"),
+        "INTC": ("파운드리 전환과 제품 로드맵 실행", "구조적 마진 훼손, CAPEX, 감손·구조조정 및 음수 EPS"),
     }
     if ticker in special:
         return special[ticker]
     if family == "financial":
-        return "순자산 수익성과 자본 효율 개선", "신용손실, 금리·유동성 및 규제자본 위험"
+        return "순자산 수익성과 자본 효율", "신용손실, 금리·유동성 및 규제자본 위험"
     if family == "reit":
-        return "임대 현금흐름과 자산 가동률", "금리·차환 위험; 검증된 FFO/AFFO 부재 시 평가 보류"
-    return f"{sector or '해당 산업'} 매출 성장과 현금흐름 전환", "경기·경쟁·마진 변동과 재무 데이터 불확실성"
+        return "임대 현금흐름과 가동률", "금리·차환 위험; 검증된 FFO/AFFO 부재 시 보류"
+    return f"{sector or '해당 산업'} 성장과 현금흐름 전환", "경기·경쟁·마진 변동과 데이터 불확실성"
+
+
+def _judgement(upside: float, margin: float, width: float, prior: str | None) -> tuple[str, float]:
+    buffer = _clamp(width / 4, 0.01, 0.08)
+    if prior == "저평가" and upside >= margin - buffer:
+        return "저평가", buffer
+    if prior == "고평가" and upside <= -margin + buffer:
+        return "고평가", buffer
+    threshold = margin + buffer if prior == "적정" else margin
+    return ("저평가", buffer) if upside >= threshold else ("고평가", buffer) if upside <= -threshold else ("적정", buffer)
 
 
 def evaluate_company(
-    *,
-    ticker: str,
-    company_name: str,
-    sector: str,
-    industry: str,
-    price: float,
-    price_as_of_utc: str,
-    periods: Iterable[FinancialPeriod],
-    risk_free_rate: float,
-    evaluated_at: datetime | None = None,
-    independent_financial_crosscheck: bool = False,
+    *, ticker: str, company_name: str, sector: str, industry: str, price: float,
+    price_as_of_utc: str, periods: Iterable[FinancialPeriod], risk_free_rate: float,
+    evaluated_at: datetime | None = None, independent_financial_crosscheck: bool = False,
+    valuation_evidence: ValuationEvidence | None = None, prior_judgement: str | None = None,
 ) -> ValuationResult:
-    evaluated_at = evaluated_at or datetime.now(timezone.utc)
-    annual = sorted(
-        [row for row in periods if row.period_type == "FY" and datetime.fromisoformat(row.available_at_utc) <= evaluated_at],
-        key=lambda row: row.period_end,
-    )
+    evaluated_at = (evaluated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    annual = sorted([row for row in periods if row.period_type == "FY" and _timestamp(row.available_at_utc) <= evaluated_at], key=lambda row: row.period_end)
     family = _family(ticker, sector, industry)
     drivers, risks = _narrative(ticker, sector, family)
-    empty = dict(
-        ticker=ticker,
-        company_name=company_name,
-        model_version=MODEL_VERSION,
-        evaluated_at_utc=evaluated_at.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
-        price=float(price),
-        price_as_of_utc=price_as_of_utc,
-        financials_as_of_utc=max((row.available_at_utc for row in annual), default=None),
-        growth_drivers=drivers,
-        risk_factors=risks,
-        eps_revision_trend="unavailable: no redistribution-safe consensus source configured",
-        valuation_family=family,
-    )
+    empty = dict(ticker=ticker, company_name=company_name, model_version=MODEL_VERSION, evaluated_at_utc=evaluated_at.replace(microsecond=0).isoformat(), price=float(price), price_as_of_utc=price_as_of_utc, financials_as_of_utc=max((row.available_at_utc for row in annual), default=None), growth_drivers=drivers, risk_factors=risks, eps_revision_trend="unavailable: no redistribution-safe point-in-time consensus source configured", valuation_family=family)
+    if valuation_evidence and valuation_evidence.ticker != ticker.upper():
+        raise ValueError("valuation evidence ticker does not match evaluated company")
     if family == "reit":
         return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=15, uncertainty="very_high", methods_used="none", model_details_json="[]", status="hold", change_reason="verified FFO/AFFO unavailable")
     if len(annual) < 3 or risk_free_rate <= 0:
         return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=10, uncertainty="very_high", methods_used="none", model_details_json="[]", status="hold", change_reason="fewer than three annual periods or missing official risk-free rate")
-
     metrics = _normalized_metrics(annual, family)
     data_quality_premium = 0.015 if any(row.validation_state != "verified" for row in annual[-3:]) else 0.0
     leverage = ((metrics.get("debt") or 0) - (metrics.get("cash") or 0)) / max(metrics.get("fcf") or 1, 1)
     leverage_premium = _clamp(max(0.0, leverage - 2.0) * 0.003, 0.0, 0.025)
     discount_rate = _clamp(risk_free_rate + EQUITY_RISK_PREMIUM + data_quality_premium + leverage_premium, 0.07, 0.18)
-    if family == "financial":
-        models = [_financial_model(metrics, discount_rate)]
-    else:
-        models = [
-            _earnings_model(ticker, sector, metrics, family, discount_rate),
-            _dcf_model(metrics, family, discount_rate),
-            _ev_ebitda_model(sector, metrics, family),
-        ]
-    models = _assign_weights(models, family)
-    base = _weighted(models, "base")
-    conservative = _weighted(models, "conservative")
-    optimistic = _weighted(models, "optimistic")
-    available_count = sum(model.available for model in models)
+    models = [_financial_model(metrics, discount_rate)] if family == "financial" else [_earnings_model(valuation_evidence, evaluated_at, risk_free_rate), _dcf_model(metrics, family, discount_rate, valuation_evidence, evaluated_at), _ev_ebitda_model(metrics, valuation_evidence, evaluated_at)]
+    models = _assign_weights(models)
+    base, conservative, optimistic = _weighted(models, "base"), _weighted(models, "conservative"), _weighted(models, "optimistic")
     coverage_fields = ("revenue", "operating_income", "net_income", "diluted_eps", "diluted_shares", "cfo", "capex", "cash", "total_debt", "equity")
     coverage = sum(getattr(row, field) is not None for row in annual[-5:] for field in coverage_fields) / (len(annual[-5:]) * len(coverage_fields))
-    confidence = round(20 + min(len(annual), 5) * 5 + coverage * 25 + available_count * 8 + (12 if independent_financial_crosscheck else 0))
-    confidence = int(_clamp(confidence, 0, 100))
-    if base is None or base <= 0:
-        return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=confidence, uncertainty="very_high", methods_used="none", model_details_json=json.dumps([asdict(model) for model in models], ensure_ascii=False, sort_keys=True), status="hold", change_reason="no valuation model passed its input gate")
-    safety_margin = _clamp(0.15 + (100 - confidence) / 250 + (0.05 if family == "cyclical" else 0), 0.15, 0.40)
+    available_count = sum(model.available for model in models)
+    evidence_bonus = 12 if valuation_evidence and not valuation_evidence.fixture else 0
+    confidence = int(_clamp(round(15 + min(len(annual), 5) * 5 + coverage * 25 + available_count * 8 + evidence_bonus + (12 if independent_financial_crosscheck else 0)), 0, 100))
+    details = [asdict(model) for model in models]
+    if base is None or base <= 0 or conservative is None or optimistic is None:
+        return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=confidence, uncertainty="very_high", methods_used="none", model_details_json=json.dumps(details, ensure_ascii=False, sort_keys=True), status="hold", change_reason="no valuation model passed its point-in-time input gate")
+    model_bases = [model.base for model in models if model.available and model.base is not None]
+    model_dispersion = statistics.pstdev(model_bases) / base if len(model_bases) >= 2 else 0.0
+    scenario_width = max((base - conservative) / base, (optimistic - base) / base, 0.0)
+    forecast = valuation_evidence.forecast if valuation_evidence else None
+    forecast_dispersion = forecast.dispersion if forecast and _timestamp(forecast.available_at_utc) <= evaluated_at else None
+    historical_error = valuation_evidence.historical_forecast_error if valuation_evidence else None
+    risk_components = {"scenario_width": scenario_width, "model_dispersion": model_dispersion, "forecast_dispersion": max(forecast_dispersion or 0.0, 0.0), "historical_forecast_error": max(historical_error or 0.0, 0.0), "leverage_premium_scaled": leverage_premium * 4, "data_uncertainty": (100 - confidence) / 500}
+    safety_margin = _clamp(max(risk_components.values()), 0.10, 0.50)
     upside = (base - price) / base
-    judgement = "저평가" if upside >= safety_margin else "고평가" if upside <= -0.15 else "적정"
-    uncertainty = "low" if confidence >= 80 else "medium" if confidence >= 65 else "high"
-    methods = ", ".join(model.name for model in models if model.available)
-    return ValuationResult(
-        **empty,
-        conservative_value=round(conservative, 2) if conservative is not None else None,
-        base_value=round(base, 2),
-        optimistic_value=round(optimistic, 2) if optimistic is not None else None,
-        upside_to_base=round(upside, 6),
-        safety_margin=round(safety_margin, 6),
-        favorable_buy_low=round(base * (1 - safety_margin), 2),
-        favorable_buy_high=round(base * (1 - safety_margin * 0.60), 2),
-        judgement=judgement,
-        confidence_score=confidence,
-        uncertainty=uncertainty,
-        methods_used=methods,
-        model_details_json=json.dumps([asdict(model) for model in models], ensure_ascii=False, sort_keys=True),
-        status="evaluated",
-    )
-
+    judgement, transition_buffer = _judgement(upside, safety_margin, max(scenario_width, model_dispersion), prior_judgement)
+    buy_high = base * (1 - safety_margin)
+    buy_low = min(conservative * (1 - safety_margin), buy_high)
+    details.append({"name": "automatic_uncertainty_band", "available": True, "weight": 0.0, "conservative": conservative, "base": base, "optimistic": optimistic, "inputs": {**{key: round(value, 6) for key, value in risk_components.items()}, "safety_margin": round(safety_margin, 6), "transition_buffer": round(transition_buffer, 6), "prior_judgement": prior_judgement}, "reason": "company-specific model spread, forecast dispersion, historical error, leverage, and data quality; no fixed 90-110% band"})
+    methods = [model.name for model in models if model.available]
+    has_visible_forecast = bool(forecast and _timestamp(forecast.available_at_utc) <= evaluated_at)
+    provisional = methods == ["fcf_dcf"] and not has_visible_forecast
+    return ValuationResult(**empty, conservative_value=round(conservative, 2), base_value=round(base, 2), optimistic_value=round(optimistic, 2), upside_to_base=round(upside, 6), safety_margin=round(safety_margin, 6), favorable_buy_low=round(buy_low, 2), favorable_buy_high=round(buy_high, 2), judgement="판단 보류" if provisional else judgement, confidence_score=confidence, uncertainty="low" if confidence >= 80 else "medium" if confidence >= 65 else "high", methods_used=", ".join(methods), model_details_json=json.dumps(details, ensure_ascii=False, sort_keys=True), status="provisional" if provisional else "evaluated", change_reason="historical-only provisional DCF; no point-in-time forecast evidence" if provisional else "first recorded evaluation")

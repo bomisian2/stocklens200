@@ -182,11 +182,13 @@ with tab_value:
                 "재무 데이터 최신성을 검증하지 못했습니다. 검증 완료 전에는 신규 평가·매매 신호에 사용하지 않습니다."
             )
         evaluated = valuations[valuations["status"] == "evaluated"].copy()
-        value_metrics = st.columns(4)
-        value_metrics[0].metric("분석 완료", f"{len(evaluated):,}개")
-        value_metrics[1].metric("판단 보류", f"{len(valuations) - len(evaluated):,}개")
-        value_metrics[2].metric("저평가 판정", f"{int(evaluated['judgement'].eq('저평가').sum()):,}개")
-        value_metrics[3].metric("모델 버전", str(valuation_status.get("model_version") or "확인 불가"))
+        provisional = valuations[valuations["status"] == "provisional"].copy()
+        value_metrics = st.columns(5)
+        value_metrics[0].metric("검증 평가", f"{len(evaluated):,}개")
+        value_metrics[1].metric("과거기반 잠정가", f"{len(provisional):,}개")
+        value_metrics[2].metric("판단 보류", f"{len(valuations) - len(evaluated) - len(provisional):,}개")
+        value_metrics[3].metric("저평가 판정", f"{int(evaluated['judgement'].eq('저평가').sum()):,}개")
+        value_metrics[4].metric("모델 버전", str(valuation_status.get("model_version") or "확인 불가"))
 
         st.caption(
             f"평가 시장 기준: {kst_display(valuation_status.get('valuation_as_of_market_utc'))} · "
@@ -227,7 +229,12 @@ with tab_value:
         selected_ticker = st.selectbox("상세 계산 확인", valuations["ticker"].tolist())
         selected = valuations[valuations["ticker"] == selected_ticker].iloc[0]
         st.subheader(f"{selected_ticker} · {selected['company_name']}")
-        if selected["status"] != "evaluated":
+        if selected["status"] == "provisional":
+            st.info(f"과거 실적 기반 잠정가이며 투자판단은 보류합니다: {selected['change_reason']}")
+            st.write(f"**사용 모델:** {selected['methods_used']} · 신뢰도 {int(selected['confidence_score'])}/100")
+            with st.expander("잠정 계산 근거"):
+                st.json(json.loads(selected["model_details_json"]))
+        elif selected["status"] != "evaluated":
             st.warning(f"판단 보류: {selected['change_reason']}")
         else:
             st.write(f"**성장 동력:** {selected['growth_drivers']}")

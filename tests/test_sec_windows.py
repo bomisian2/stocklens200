@@ -153,9 +153,9 @@ def test_successful_run_writes_hash_verified_files_and_uses_offline_provider(
         as_of=datetime(2024, 3, 1, tzinfo=timezone.utc),
     )
 
-    assert len(session.calls) == 9
-    assert result["artifact_count"] == 9
-    assert result["period_count"] == 12
+    assert len(session.calls) == 11
+    assert result["artifact_count"] == 11
+    assert result["period_count"] == 15
     run_dir = Path(result["run_directory"])
     manifest_path = Path(result["manifest"])
     provider = SecFileProvider.from_manifest(manifest_path)
@@ -172,7 +172,7 @@ def test_successful_run_writes_hash_verified_files_and_uses_offline_provider(
         assert sha256_file(run_dir / artifact["path"]) == artifact["sha256"]
     report = json.loads((run_dir / "collection_report.json").read_text(encoding="utf-8"))
     assert report["retry_count"] == 0
-    assert report["total_request_count"] == 9
+    assert report["total_request_count"] == 11
 
 
 def test_raw_analysis_flags_amendments_and_changed_eps_comparatives() -> None:
