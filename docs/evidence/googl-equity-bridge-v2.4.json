@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "ticker": "GOOGL",
+  "evidence_as_of": "2026-06-30",
+  "operational_use": false,
+  "sources": {
+    "alphabet_2026_q2_10q": {
+      "url": "https://www.sec.gov/Archives/edgar/data/1652044/000165204426000071/goog-20260630.htm",
+      "accession": "0001652044-26-000071",
+      "form": "10-Q",
+      "period_end": "2026-06-30",
+      "limitation": "Official filing URL was inspected for this audit; a local source-file hash was not captured, so this is not an automated operating input."
+    },
+    "alphabet_2026_q2_release": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf",
+      "sha256": "65f35a2e9c287112121f736321c7526d603ba8e0dae27acac56c7d7357602aa8"
+    }
+  },
+  "accounting_policy": {
+    "fcff_lease_basis": "gaap_ebit_unadjusted",
+    "preferred_treatment": "unresolved",
+    "operating_cash_policy": "unresolved",
+    "investment_tax_and_liquidity_policy": "unresolved",
+    "warning": "Operating leases and convertible preferred cannot be mechanically subtracted until the cash-flow and dilution conventions are made consistent."
+  },
+  "bridge_items": [
+    {
+      "id": "cash_and_equivalents",
+      "label": "Cash and cash equivalents",
+      "value_usd": 55911000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "cash",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Reported balance is verified, but minimum operating cash has not been separated."
+    },
+    {
+      "id": "current_marketable_securities",
+      "label": "Marketable securities",
+      "value_usd": 186563000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "nonoperating_asset_candidate",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "The balance contains equity and debt securities with different liquidity, restriction and tax characteristics."
+    },
+    {
+      "id": "noncurrent_marketable_equity",
+      "label": "Other non-current marketable equity securities",
+      "value_usd": 14126000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "nonoperating_asset_candidate",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Reported balance includes securities subject to sale restrictions through the third quarter of 2027."
+    },
+    {
+      "id": "nonmarketable_securities",
+      "label": "Non-marketable securities",
+      "value_usd": 131461000000,
+      "state": "book_value_proxy",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "nonoperating_asset_candidate",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Carrying value is reported, but market value, liquidity, tax leakage and strategic/operating classification are unresolved."
+    },
+    {
+      "id": "interest_bearing_debt_book",
+      "label": "Current plus long-term interest-bearing debt carrying value",
+      "value_usd": 100164000000,
+      "state": "book_value_proxy",
+      "bridge_treatment": "subtract",
+      "formal_eligible": false,
+      "claim_class": "financial_debt",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "The sum of $1.999B current and $98.165B long-term carrying amounts is usable for research, but a formal bridge requires a reconciled market-value debt policy."
+    },
+    {
+      "id": "operating_lease_liabilities",
+      "label": "Current and non-current operating lease liabilities",
+      "value_usd": 18037000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "operating_lease",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "GAAP EBIT already includes operating lease expense; subtracting the liability without recasting EBIT and FCFF would double count."
+    },
+    {
+      "id": "finance_lease_liabilities",
+      "label": "Current and non-current finance lease liabilities",
+      "value_usd": 2590000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "finance_lease",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Debt-like treatment is plausible, but leased asset additions, depreciation and principal must first be reconciled with FCFF."
+    },
+    {
+      "id": "noncontrolling_interests",
+      "label": "Noncontrolling interests, including redeemable NCI",
+      "value_usd": 7100000000,
+      "state": "book_value_proxy",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "noncontrolling_interest",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "The official carrying amount is a proxy; consolidated FCFF ownership and an economic value treatment remain to be reconciled."
+    },
+    {
+      "id": "mandatory_convertible_preferred",
+      "label": "Mandatory convertible preferred liquidation preference",
+      "value_usd": 19000000000,
+      "state": "official_observed",
+      "bridge_treatment": "unresolved",
+      "formal_eligible": false,
+      "claim_class": "convertible_preferred",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "The bridge must choose claim subtraction or if-converted dilution and account for capped calls, never both."
+    },
+    {
+      "id": "accrued_fines_and_settlements",
+      "label": "Accrued fines and settlements",
+      "value_usd": 17356000000,
+      "state": "official_observed",
+      "bridge_treatment": "disclosure_only",
+      "formal_eligible": false,
+      "claim_class": "other_claim_candidate",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Potential debt-like cash claim; forecast cash-flow inclusion must be checked before any separate subtraction."
+    },
+    {
+      "id": "unconsolidated_vie_funding_commitments",
+      "label": "Future funding commitments for unconsolidated VIE investments",
+      "value_usd": 21900000000,
+      "state": "official_observed",
+      "bridge_treatment": "disclosure_only",
+      "formal_eligible": false,
+      "claim_class": "contingent_commitment",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "as_of": "2026-06-30",
+      "rationale": "Not a recorded debt balance; it belongs in the forecast or a separately supported claim policy rather than automatic subtraction."
+    }
+  ],
+  "share_counts": {
+    "issued_outstanding_common": {
+      "value": 12230000000,
+      "unit": "shares",
+      "kind": "point_in_time_issued_outstanding_not_fully_diluted",
+      "as_of": "2026-06-30",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "treasury_stock_method_complete": false,
+      "preferred_policy_complete": false,
+      "includes_preferred_if_converted": false
+    },
+    "h1_diluted_weighted_average": {
+      "value": 12274000000,
+      "unit": "shares",
+      "kind": "period_weighted_average_not_point_in_time",
+      "as_of": "2026-06-30",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "treasury_stock_method_complete": false,
+      "preferred_policy_complete": false,
+      "includes_preferred_if_converted": true
+    },
+    "unvested_rsus_and_psus": {
+      "value": 294000000,
+      "unit": "awards",
+      "kind": "award_count_not_incremental_dilution",
+      "as_of": "2026-06-30",
+      "source_ids": ["alphabet_2026_q2_10q"],
+      "treasury_stock_method_complete": false,
+      "preferred_policy_complete": false,
+      "includes_preferred_if_converted": false
+    },
+    "formal_point_in_time_fully_diluted": {
+      "value": null,
+      "unit": "shares",
+      "kind": "missing",
+      "as_of": "2026-06-30",
+      "source_ids": [],
+      "treasury_stock_method_complete": false,
+      "preferred_policy_complete": false,
+      "includes_preferred_if_converted": false
+    }
+  },
+  "formal_blockers": [
+    "minimum operating cash is not separated from excess cash",
+    "marketable and non-marketable investments lack a validated liquidity, tax and operating/non-operating policy",
+    "lease treatment is not reconciled with the FCFF definition",
+    "NCI economic value is not established",
+    "mandatory convertible preferred claim-versus-dilution treatment and capped-call effect are unresolved",
+    "point-in-time fully diluted common-share denominator is unavailable",
+    "research scenario EV still lacks a formal WACC and validated multi-year forecast"
+  ]
+}
