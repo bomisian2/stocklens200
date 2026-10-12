@@ -37,9 +37,17 @@ class ValuationStore:
         compatibility_defaults = {
             "availability_basis": "legacy_unknown",
             "availability_estimated": True,
+            "common_net_income": "",
+            "other_income_expense": "",
+            "securities_gain_loss": "",
+            "preferred_dividends": "",
+            "normalized_net_income": "",
+            "normalized_diluted_eps": "",
+            "dividends": "",
             "source_artifact_sha256": "",
             "source_obtained_at_utc": "",
             "normalization_version": "legacy_unknown",
+            "derivation_inputs_json": "",
         }
         for column, default in compatibility_defaults.items():
             if column not in frame.columns:
@@ -48,9 +56,11 @@ class ValuationStore:
         if missing:
             raise ValuationStoreError(f"financial columns missing: {sorted(missing)}")
         numeric = {
-            "revenue", "operating_income", "net_income", "pretax_income", "income_tax",
-            "diluted_eps", "diluted_shares", "cfo", "capex", "fcf", "cash", "total_debt",
-            "equity", "sbc", "depreciation_amortization", "buybacks",
+            "revenue", "operating_income", "net_income", "common_net_income", "pretax_income",
+            "income_tax", "other_income_expense", "securities_gain_loss", "preferred_dividends",
+            "normalized_net_income", "diluted_eps", "normalized_diluted_eps", "diluted_shares",
+            "cfo", "capex", "fcf", "cash", "total_debt",
+            "equity", "sbc", "depreciation_amortization", "buybacks", "dividends",
         }
         rows: list[FinancialPeriod] = []
         for raw in frame.to_dict(orient="records"):

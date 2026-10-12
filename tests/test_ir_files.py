@@ -73,7 +73,7 @@ def test_issuer_ir_manifest_converts_hash_verified_report_to_financial_period(tm
     assert len(rows) == 1
     row = rows[0]
     assert row.fcf == 70.0
-    assert row.source == "alphabet_official_ir"
+    assert row.source == "issuer_official_ir"
     assert row.validation_state == "degraded"
     assert row.availability_estimated is True
     assert len(row.source_artifact_sha256) == 64

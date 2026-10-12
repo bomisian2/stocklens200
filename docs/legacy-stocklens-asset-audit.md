@@ -72,8 +72,7 @@ legacy aggregate values is permitted.
 2. Reuse the review signature idea, not the empty baseline state.
 3. Convert `analystLog.oneTime` only when amount, tax basis, recurrence, source, and availability are all explicit.
 4. Do not reuse `bandTable` as either raw history or a final buy zone.
-5. Build a validated trailing-twelve-month bridge from official quarterly reports before treating a new
-   quarter as fresh input to the annual DCF model.
+5. The official-IR pilot now supplies a validated TTM flow bridge; keep the legacy aggregate values out of it.
 6. Acquire a redistribution-safe dated price series before attempting the first formal P/E history.
 
 No paid service, SEC access workaround, main merge, Streamlit deployment, or short-term-signal branch

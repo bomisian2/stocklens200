@@ -39,7 +39,7 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 - acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
 - 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
 
-설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), GOOGL 공식 IR·TTM 실증은 [`docs/googl-ir-pilot.md`](docs/googl-ir-pilot.md), 외부 라이브러리 격리 PoC는 [`docs/open-source-library-poc.md`](docs/open-source-library-poc.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
 
 ## 로컬 실행
 
@@ -123,4 +123,4 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
 
 무료 공급원의 시가총액, 가격, 기업 분류는 지연되거나 정정될 수 있습니다. 미국 거래소 상장 여부와 기업 소재국은 서로 다른 개념이므로 해외 기업의 ADR도 포함될 수 있습니다. 이 프로젝트는 연구용이며 투자 권유가 아닙니다.
 
-Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft로 구현됐지만 공식 SEC 원본과 비-fixture 가치평가 증거가 아직 제공되지 않아 GOOGL·AMAT·AVGO·QCOM·INTC의 실데이터 평가는 0/5이며 모두 판단 보류입니다. 3단계 단기 신호도 아직 운영 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.
+Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft입니다. GOOGL은 공식 IR 원본 6개에서 원시 10개 기간과 교차검증된 TTM 1개를 확보해 역사자료 기반 DCF 연구값 1건을 만들었지만, 검증된 전망과 시점별 PER 증거가 없어 정식 평가는 여전히 0/5이고 운영 판단은 보류입니다. 나머지 4개 표본은 실데이터가 없습니다. 3단계 단기 신호도 아직 운영 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.

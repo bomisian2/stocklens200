@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from stocklens.ir_files import IssuerIrFileProvider  # noqa: E402
+from stocklens.ttm import append_latest_ttm  # noqa: E402
 from stocklens.valuation_storage import ValuationStore  # noqa: E402
 
 
@@ -46,6 +47,7 @@ def main() -> int:
             missing.append(f"{ticker}: no point-in-time eligible period")
             continue
         periods.extend(rows)
+    periods = append_latest_ttm(periods)
     if not periods:
         raise RuntimeError("no issuer IR financial periods were imported")
 
@@ -65,6 +67,7 @@ def main() -> int:
         "period_count": len(periods),
         "verified_period_count": sum(row.validation_state == "verified" for row in periods),
         "degraded_period_count": sum(row.validation_state == "degraded" for row in periods),
+        "ttm_period_count": sum(row.period_type == "TTM" for row in periods),
         "normalized_sha256": provenance["normalized_sha256"],
         "missing_count": len(missing),
     }, sort_keys=True))

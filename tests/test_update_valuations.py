@@ -75,3 +75,17 @@ def test_new_quarter_does_not_refresh_annual_only_valuation_input() -> None:
     assert _latest_valuation_input_available_at(rows) == datetime(
         2026, 2, 5, 2, 56, 3, tzinfo=timezone.utc
     )
+
+
+def test_derived_ttm_refreshes_current_valuation_input() -> None:
+    rows = [
+        SimpleNamespace(
+            period_type="FY", available_at_utc="2026-02-05T02:56:03+00:00"
+        ),
+        SimpleNamespace(
+            period_type="TTM", available_at_utc="2026-07-22T20:01:36+00:00"
+        ),
+    ]
+    assert _latest_valuation_input_available_at(rows) == datetime(
+        2026, 7, 22, 20, 1, 36, tzinfo=timezone.utc
+    )

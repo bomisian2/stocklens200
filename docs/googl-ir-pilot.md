@@ -1,117 +1,121 @@
-# GOOGL official-IR financial pilot
+# GOOGL official-IR TTM pilot
 
 Pilot date: 2026-10-12
 
 Valuation market date: 2026-10-09
+
 Ticker / CIK: GOOGL / 0001652044
 
-## Outcome
+## Result
 
 | Metric | Result |
 |---|---:|
-| Official PDF artifacts downloaded and hash checked | 3 |
-| Real `FinancialPeriod` rows imported | 5 |
-| Verified annual rows | 4 |
-| Degraded unaudited quarterly rows | 1 |
+| Hash-verified official PDFs | 6 |
+| Source-normalized periods | 10 |
+| Derived TTM periods | 1 |
+| Total `FinancialPeriod` rows | 11 |
 | Formal valuations (`evaluated`) | 0 |
-| Provisional operational valuations | 0 |
-| Holds | 1 |
+| Research-only valuations (`provisional`) | 1 |
 
-The import is a real-data success and a valuation hold. A clean operational run does not publish the
-research-only DCF range because the current model consumes annual rows only: the latest consumed annual
-input was available on 2026-02-05, more than the 190-day freshness limit at the 2026-10-09 market date.
-The newer Q2 report proves provider freshness but is not silently treated as a trailing-year statement.
+The pilot now has current TTM cash-flow inputs, but it is not a formal valuation success. The DCF result is
+historical-only, while point-in-time forecasts, an independent financial-statement cross-check and dated P/E
+evidence remain unavailable. The output is therefore `provisional`, its investment judgement is `판단 보류`, and
+it is ineligible for new valuation or trading signals.
 
-## Source artifacts
+## Source artifacts and timing
 
 | Report | Official URL | SHA-256 |
 |---|---|---|
 | Alphabet 2024 annual report | https://s206.q4cdn.com/479360582/files/doc_financials/2025/q4/2024-annual-report.pdf | `745700dad59d69a137d705194b7944c91dc1fb1d5de6b3866df0da7db9cee2d6` |
+| Alphabet 2025 Q2 release | https://s206.q4cdn.com/479360582/files/doc_financials/2025/q2/2025q2-alphabet-earnings-release.pdf | `3581be042fcbda6ea71185d5aef47458ce3a56cf6b16022d61a997d1807a4de5` |
+| Alphabet 2025 Q3 release | https://s206.q4cdn.com/479360582/files/doc_financials/2025/q3/2025q3-alphabet-earnings-release.pdf | `dc759cd42f4b8b2935698e70dd21bb674cb10775bfda5f3990cda75f4c0428fd` |
 | Alphabet 2025 Q4/full-year release | https://s206.q4cdn.com/479360582/files/doc_financials/2025/q4/2025q4-alphabet-earnings-release.pdf | `8bb2778772fc60c0290cfeac3b24d345a07b8918a7708ec8fcef7239243922f9` |
+| Alphabet 2026 Q1 release | https://s206.q4cdn.com/479360582/files/doc_financials/2026/q1/2026q1-alphabet-earnings-release.pdf | `a219b3b16dd2471faba3ab040154e29ee1ba61914de82ea82fb027038412d56b` |
 | Alphabet 2026 Q2 release | https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf | `65f35a2e9c287112121f736321c7526d603ba8e0dae27acac56c7d7357602aa8` |
 
-The PDFs are not committed. The local manifest records the hashes and the normalized output hash
-`bc614226835c75caa59be93932e2c1ccc5020dd8441d48a8af6eec693ff21f8f`.
+The PDFs are not committed. The manifest and output preserve document hashes and the import produced normalized
+SHA-256 `ceb50cd06f6f5d8fbbaecf05862fde4f8991fdbd9ef5a7374b788f100c4b3736`.
+SEC filing-index pages only cross-check identity and exact acceptance time; financial values come from issuer PDFs.
+The new exact UTC availability timestamps are 2025-07-23T20:01:33Z (2025 Q2),
+2025-10-29T20:01:48Z (2025 Q3), 2026-04-29T20:01:35Z (2026 Q1), and
+2026-07-22T20:01:36Z (2026 Q2).
 
-SEC filing-index pages were used only to cross-check identity and exact acceptance time; the financial
-numbers came from the downloaded issuer IR PDFs. Eastern acceptance times were converted to UTC with
-the applicable standard/daylight offset:
+## TTM reconstruction and cross-check
 
-- 2024 10-K: accession `0001652044-25-000014`, accepted 2025-02-04 20:41:40 ET =
-  2025-02-05T01:41:40Z.
-- 2025 10-K: accession `0001652044-26-000018`, accepted 2026-02-04 21:56:03 ET =
-  2026-02-05T02:56:03Z.
-- 2026 Q2 8-K: accession `0001652044-26-000066`, accepted 2026-07-22 16:01:36 ET =
-  2026-07-22T20:01:36Z.
+The bridge is `FY2025 + H1 2026 - H1 2025`. Every required flow also equals the sum of Q3 2025, Q4 2025,
+Q1 2026 and Q2 2026. Values below are USD millions.
 
-## Normalized financials
+| TTM to 2026-06-30 | Bridge / four-quarter result |
+|---|---:|
+| Revenue | 445,866 |
+| Operating income | 147,628 |
+| Net income | 244,205 |
+| Common-stockholder net income | 244,119 |
+| Pretax income | 299,269 |
+| Income tax | 55,064 |
+| Other income | 151,641 |
+| Debt/equity securities gain adjustment | 149,012 |
+| CFO | 185,675 |
+| CAPEX | 132,402 |
+| FCF | 53,273 |
+| Stock compensation | 28,147 |
+| Depreciation and amortization | 25,237 |
+| Dividends paid | 10,303 |
 
-USD millions except EPS and diluted shares (millions).
+The issuer's Q2 release independently reports the same TTM CFO, CAPEX and FCF. The importer rejects a mismatch in
+revenue, operating income, net income, pretax income, tax, CFO, CAPEX or FCF.
 
-| Period | Revenue | Operating income | Net income | Diluted EPS | Diluted shares | CFO | CAPEX | FCF |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| FY2022 | 282,836 | 74,842 | 59,972 | 4.56 | 13,159 | 91,495 | 31,485 | 60,010 |
-| FY2023 | 307,394 | 84,293 | 73,795 | 5.80 | 12,722 | 101,746 | 32,251 | 69,495 |
-| FY2024 | 350,018 | 112,390 | 100,118 | 8.04 | 12,447 | 125,299 | 52,535 | 72,764 |
-| FY2025 | 402,836 | 129,039 | 132,170 | 10.81 | 12,230 | 164,713 | 91,447 | 73,266 |
-| Q2 2026 | 119,796 | 40,770 | 112,193 | 9.11 | 12,309 | 39,069 | 44,924 | -5,855 |
+EPS deliberately remains null in the derived TTM row. Annual/YTD arithmetic gives 19.93, while four quarterly EPS
+values total 19.91. Both are diagnostics only because each statement uses a different weighted-average diluted
+share denominator. A TTM EPS or normalized EPS is not manufactured from them.
 
-FCF is reproduced as CFO minus positive CAPEX outflow. The provider rejects a manifest when this
-identity fails. Cash, long-term debt, equity, stock compensation, depreciation, and buybacks are also
-stored when present.
+## Investment-gain distortion
 
-## EPS distortion and valuation status
+The issuer quantified the Q1 2026 equity-security gain at $36.915B and said it raised net income by $28.7B and
+diluted EPS by $2.35. Q2 2026 reported a $99.031B equity-security gain and said it raised net income by $77.1B and
+diluted EPS by $6.26. The H1 cash-flow statement removes $135.803B of debt/equity security gains, and the TTM bridge
+contains $149.012B. Those facts demonstrate severe GAAP EPS distortion, but they do not by themselves provide a
+fully audited tax allocation for every TTM component. `normalized_net_income` and `normalized_diluted_eps` therefore
+remain null and the P/E model stays disabled.
 
-Q2 2026 GAAP EPS is not treated as normalized earnings. The issuer release says other income was
-$97.983 billion, primarily unrealized equity-security gains; the cash-flow statement removes a
-$98.999 billion gain on debt and equity securities. Net income available to common stockholders was
-$112.107 billion after $86 million of preferred dividends, which explains the EPS numerator difference
-from $112.193 billion total net income.
+## Research-only DCF
 
-No after-tax per-share normalization is manufactured. Consequently:
+Using TTM FCF $53.273B, 12.274B diluted shares, the 2026-10-09 official 10-year Treasury rate 5.24%, the existing
+model's 5% equity-risk premium and historical-only growth calculation produced:
 
-- formal P/E method: unavailable (zero auditable point-in-time P/E observations and no approved
-  normalized TTM EPS evidence);
-- EV/EBITDA method: unavailable (no permitted point-in-time comparable distribution);
-- DCF: can produce a research-only historical range, but lacks point-in-time forecast evidence and the
-  current annual-only inputs are stale;
-- final status: `hold`, judgement `판단 보류`, eligible for new valuation/signals `false`.
+| Conservative | Base | Optimistic | Automatic safety margin | Status |
+|---:|---:|---:|---:|---|
+| $38.26 | $64.44 | $118.09 | 50% | `provisional` / 판단 보류 |
 
-A direct research calculation before the freshness gate produced a very wide historical-only DCF range
-of $58.65 / $104.32 / $210.12 with a 50% automatic safety margin and 10.24% discount rate (5.24% U.S.
-Treasury 10-year rate plus 5% equity risk premium). This is recorded only to diagnose model behavior;
-it is **not** an operational fair value, buy zone, or valuation success.
+This range is a model-behavior diagnostic, not an operational fair value or buy recommendation. It is highly
+sensitive to the current AI CAPEX cycle, has no approved forward forecast, and has no independent source cross-check.
+The current market price is not used to scale intrinsic value.
+
+## General reusable IR import procedure
+
+1. Download only issuer-hosted annual/quarterly reports whose reuse and display scope has been reviewed.
+2. Record issuer identity, CIK, official URL, retrieval time and SHA-256 before parsing.
+3. Preserve FY, YTD and single-quarter types; never label a cumulative statement as a quarter.
+4. Store exact SEC acceptance time when independently available; otherwise mark conservative timing as estimated.
+5. Reconcile statement identities and FCF, then require FY/YTD and four-quarter TTM agreement.
+6. Keep GAAP, common-stockholder, preferred-dividend and securities-gain fields separate.
+7. Withhold weighted-denominator EPS and normalization unless the issuer evidence supports the exact adjustment.
+8. Keep source files, normalized rows and valuation output separate, and never commit unlicensed source documents.
 
 ## Reproduction
 
-After placing the three official PDFs beside a reviewed manifest:
-
 ```powershell
 python scripts/import_ir_financials.py `
-  --manifest <path-to-googl-ir-manifest.json> `
+  --manifest <reviewed-googl-ir-manifest.json> `
   --data-dir <isolated-output-directory> `
   --tickers GOOGL `
-  --as-of 2026-10-09T20:00:00+00:00
-
-Copy-Item data\universe.csv,data\status.json -Destination <isolated-output-directory>
+  --as-of 2026-10-09T22:00:00+00:00
 
 python scripts/update_valuations.py `
   --data-dir <isolated-output-directory> `
-  --tickers GOOGL `
-  --allow-partial `
+  --tickers GOOGL --max-companies 1 --allow-partial `
   --financial-source issuer-ir `
-  --ir-manifest <path-to-googl-ir-manifest.json>
+  --ir-manifest <reviewed-googl-ir-manifest.json>
 ```
 
-The manifest must declare `fixture=false`, use the allow-listed issuer host, match GOOGL's CIK, and
-match every PDF hash. Source files, normalized output, and operational output remain separate.
-
-## Next minimum work
-
-1. Import the official 2026 Q1 release and build a reviewed TTM bridge from FY2025 plus H1 2026 minus
-   H1 2025.
-2. Verify that the TTM bridge handles preferred dividends and the unrealized investment gain without
-   creating normalized EPS by assumption.
-3. Add a permitted dated price source and then-public GAAP EPS vintages; legacy aggregate bands do not
-   satisfy this requirement.
-4. Only after those gates pass, recompute a formal value and expand to AMAT, AVGO, QCOM, and INTC.
+The production `data/` directory is not used for this pilot and no result is deployed.

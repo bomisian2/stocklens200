@@ -164,9 +164,15 @@ class FinancialPeriod:
     revenue: float | None = None
     operating_income: float | None = None
     net_income: float | None = None
+    common_net_income: float | None = None
     pretax_income: float | None = None
     income_tax: float | None = None
+    other_income_expense: float | None = None
+    securities_gain_loss: float | None = None
+    preferred_dividends: float | None = None
+    normalized_net_income: float | None = None
     diluted_eps: float | None = None
+    normalized_diluted_eps: float | None = None
     diluted_shares: float | None = None
     cfo: float | None = None
     capex: float | None = None
@@ -177,6 +183,7 @@ class FinancialPeriod:
     sbc: float | None = None
     depreciation_amortization: float | None = None
     buybacks: float | None = None
+    dividends: float | None = None
     source: str = SEC_SOURCE
     source_url: str = ""
     taxonomy: str = "us-gaap"
@@ -185,6 +192,7 @@ class FinancialPeriod:
     source_artifact_sha256: str = ""
     source_obtained_at_utc: str = ""
     normalization_version: str = "sec-gaap-v1"
+    derivation_inputs_json: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

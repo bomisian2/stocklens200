@@ -26,9 +26,11 @@ OFFICIAL_IR_HOSTS = {
     "GOOGL": {"abc.xyz", "s206.q4cdn.com"},
 }
 MONEY_FIELDS = {
-    "revenue", "operating_income", "net_income", "pretax_income", "income_tax",
+    "revenue", "operating_income", "net_income", "common_net_income", "pretax_income",
+    "income_tax", "other_income_expense", "securities_gain_loss", "preferred_dividends",
+    "normalized_net_income",
     "cfo", "capex", "fcf", "cash", "total_debt", "equity", "sbc",
-    "depreciation_amortization", "buybacks",
+    "depreciation_amortization", "buybacks", "dividends",
 }
 REQUIRED_PERIOD_FIELDS = {
     "ticker", "cik", "company_name", "fiscal_year", "period_type", "period_end",
@@ -151,8 +153,8 @@ class IssuerIrFileProvider:
             raise ValueError("period ticker/CIK does not match its source artifact")
         validate_ticker_cik(ticker, cik, provider=self.name)
         period_type = str(raw["period_type"])
-        if period_type not in {"FY", "Q"}:
-            raise ValueError("issuer IR period_type must be FY or Q")
+        if period_type not in {"FY", "Q", "YTD"}:
+            raise ValueError("issuer IR period_type must be FY, Q, or YTD")
         period_end = _date(str(raw["period_end"]), "period_end")
         period_start = raw.get("period_start")
         if period_start is not None and _date(str(period_start), "period_start") > period_end:
@@ -164,7 +166,7 @@ class IssuerIrFileProvider:
         if str(raw["currency"]) != "USD" or str(raw.get("taxonomy") or "") != "us-gaap":
             raise ValueError("issuer IR pilot accepts only USD US-GAAP periods")
         values: dict[str, float | None] = {}
-        for field in MONEY_FIELDS | {"diluted_eps", "diluted_shares"}:
+        for field in MONEY_FIELDS | {"diluted_eps", "normalized_diluted_eps", "diluted_shares"}:
             value = raw.get(field)
             if value is None:
                 values[field] = None
@@ -178,7 +180,7 @@ class IssuerIrFileProvider:
             expected_fcf = values["cfo"] - values["capex"]
             if values["fcf"] is None or abs(values["fcf"] - expected_fcf) > max(1e-6, abs(expected_fcf) * 1e-9):
                 raise ValueError("fcf must equal cfo minus capex")
-        state = "degraded" if bool(raw["availability_estimated"]) or period_type == "Q" else "verified"
+        state = "degraded" if bool(raw["availability_estimated"]) or period_type != "FY" else "verified"
         notes = str(raw.get("validation_notes") or "")
         if bool(raw["availability_estimated"]):
             notes = "; ".join(filter(None, [notes, "exact publication time unavailable; conservative availability estimate used"]))
@@ -192,7 +194,7 @@ class IssuerIrFileProvider:
             "period_start": None if period_start is None else str(period_start),
             "filed_at": filed_at.isoformat(),
             "available_at_utc": available_at.isoformat(),
-            "source": "alphabet_official_ir",
+            "source": "issuer_official_ir",
             "source_url": artifact["source_url"],
             "taxonomy": "us-gaap",
             "validation_state": state,

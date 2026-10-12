@@ -27,6 +27,7 @@ from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
 from stocklens.ir_files import IssuerIrFileProvider  # noqa: E402
 from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
+from stocklens.ttm import append_latest_ttm  # noqa: E402
 from stocklens.valuation import MODEL_VERSION, ValuationResult, evaluate_company  # noqa: E402
 from stocklens.valuation_evidence import (  # noqa: E402
     ValuationEvidenceError,
@@ -105,8 +106,9 @@ def _latest_available_at(periods: list) -> datetime | None:
 
 
 def _latest_valuation_input_available_at(periods: list) -> datetime | None:
-    """Return freshness for the fiscal-year rows the current model consumes."""
-    return _latest_available_at([period for period in periods if period.period_type == "FY"])
+    """Return freshness for verified FY or derived TTM model inputs."""
+    ttm = [period for period in periods if period.period_type == "TTM"]
+    return _latest_available_at(ttm or [period for period in periods if period.period_type == "FY"])
 
 
 def main() -> int:
@@ -255,6 +257,8 @@ def main() -> int:
         for provider in providers:
             try:
                 periods = provider.fetch_periods(ticker, cik, as_of=evaluated_at)
+                if args.financial_source == "issuer-ir":
+                    periods = append_latest_ttm(periods)
                 if periods:
                     break
                 errors.append({"ticker": ticker, "provider": provider.name, "category": "no_eligible_point_in_time_facts"})
@@ -409,7 +413,7 @@ def main() -> int:
             "Management guidance text is not inferred from XBRL and remains unavailable until a traceable filing-text extractor is validated.",
             "An independent financial-statement provider cross-check is not configured; internal statement arithmetic checks are used.",
             "Issuer IR PDFs use conservative next-day availability when an exact publication timestamp is unavailable.",
-            "The current valuation model consumes annual rows only; a newer quarter does not refresh annual model inputs until a validated TTM bridge is implemented.",
+            "A TTM flow bridge is consumed only when FY and matching current/prior YTD periods reconcile to four single-quarter rows; operational TTM EPS remains unavailable because weighted diluted denominators are not additive.",
             "IFRS and verified REIT FFO/AFFO mappings remain on hold.",
             "P/E is disabled unless a 5+ year point-in-time price/EPS distribution and EPS-quality evidence are supplied.",
             "Growth/ROIC multiple adjustments are disabled unless an independently held-out calibration is accepted.",

@@ -11,7 +11,7 @@ from .financials import FinancialPeriod
 from .valuation_evidence import ValuationEvidence
 
 
-MODEL_VERSION = "valuation-v2.1.0"
+MODEL_VERSION = "valuation-v2.1.1"
 EQUITY_RISK_PREMIUM = 0.05
 FINANCIAL_SECTORS = {"Financial Services", "Financials"}
 REIT_INDUSTRY_WORDS = {"reit", "real estate investment trust"}
@@ -132,20 +132,40 @@ def _growth_series(periods: list[FinancialPeriod], field: str) -> list[float]:
     ]
 
 
-def _normalized_metrics(periods: list[FinancialPeriod], family: str) -> dict[str, float | None]:
+def _normalized_metrics(
+    periods: list[FinancialPeriod],
+    family: str,
+    latest_ttm: FinancialPeriod | None = None,
+) -> dict[str, Any]:
     periods = sorted(periods, key=lambda row: (row.period_end, row.filed_at))
     window = periods[-5:] if family in {"cyclical", "turnaround"} else periods[-3:]
-    fcf = _median(row.fcf for row in window if row.fcf is not None and row.fcf > 0)
-    shares = _median(row.diluted_shares for row in window if row.diluted_shares and row.diluted_shares > 0)
-    operating = _median(row.operating_income for row in window if row.operating_income is not None)
-    da = _median(row.depreciation_amortization for row in window if row.depreciation_amortization is not None)
+    fcf = (
+        latest_ttm.fcf
+        if latest_ttm is not None and latest_ttm.fcf is not None and latest_ttm.fcf > 0
+        else _median(row.fcf for row in window if row.fcf is not None and row.fcf > 0)
+    )
+    shares = (
+        latest_ttm.diluted_shares
+        if latest_ttm is not None and latest_ttm.diluted_shares and latest_ttm.diluted_shares > 0
+        else _median(row.diluted_shares for row in window if row.diluted_shares and row.diluted_shares > 0)
+    )
+    operating = (
+        latest_ttm.operating_income
+        if latest_ttm is not None and latest_ttm.operating_income is not None
+        else _median(row.operating_income for row in window if row.operating_income is not None)
+    )
+    da = (
+        latest_ttm.depreciation_amortization
+        if latest_ttm is not None and latest_ttm.depreciation_amortization is not None
+        else _median(row.depreciation_amortization for row in window if row.depreciation_amortization is not None)
+    )
     revenue_rows = [row for row in periods[-5:] if row.revenue and row.revenue > 0]
     fcf_rows = [row for row in periods[-5:] if row.fcf and row.fcf > 0]
     revenue_growth = _cagr(revenue_rows[0].revenue, revenue_rows[-1].revenue, len(revenue_rows) - 1) if len(revenue_rows) >= 2 else None
     fcf_growth = _cagr(fcf_rows[0].fcf, fcf_rows[-1].fcf, len(fcf_rows) - 1) if len(fcf_rows) >= 2 else None
     growth_series = _growth_series(periods, "revenue") + _growth_series(periods, "fcf")
     margins = [row.operating_income / row.revenue for row in window if row.operating_income is not None and row.revenue]
-    latest = periods[-1]
+    latest = latest_ttm or periods[-1]
     return {
         "fcf": fcf,
         "shares": shares,
@@ -159,6 +179,7 @@ def _normalized_metrics(periods: list[FinancialPeriod], family: str) -> dict[str
         "debt": latest.total_debt,
         "equity": latest.equity,
         "net_income": latest.net_income,
+        "fcf_basis": "derived_ttm" if latest_ttm is not None else "historical_annual_median",
     }
 
 
@@ -272,7 +293,7 @@ def _dcf_model(metrics: dict[str, float | None], family: str, discount_rate: flo
 
     return ModelResult(
         "fcf_dcf", True, value(growth - growth_uncertainty, discount_rate + growth_uncertainty / 2), value(growth, discount_rate), value(growth + growth_uncertainty, discount_rate - growth_uncertainty / 2), 0.0,
-        {"normalized_fcf": round(fcf, 2), "diluted_shares": round(shares, 2), "growth": round(growth, 6), "growth_basis": growth_basis, "growth_uncertainty": round(growth_uncertainty, 6), "discount_rate": round(discount_rate, 6)},
+        {"normalized_fcf": round(fcf, 2), "fcf_basis": metrics.get("fcf_basis"), "diluted_shares": round(shares, 2), "growth": round(growth, 6), "growth_basis": growth_basis, "growth_uncertainty": round(growth_uncertainty, 6), "discount_rate": round(discount_rate, 6)},
         "growth enters cash-flow forecasts once; risk-free rate enters capital cost, and no macro price haircut is applied",
     )
 
@@ -361,17 +382,20 @@ def evaluate_company(
 ) -> ValuationResult:
     evaluated_at = (evaluated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     annual = sorted([row for row in periods if row.period_type == "FY" and _timestamp(row.available_at_utc) <= evaluated_at], key=lambda row: row.period_end)
+    ttm = sorted([row for row in periods if row.period_type == "TTM" and _timestamp(row.available_at_utc) <= evaluated_at], key=lambda row: row.period_end)
+    latest_ttm = ttm[-1] if ttm else None
     family = _family(ticker, sector, industry)
     drivers, risks = _narrative(ticker, sector, family)
-    empty = dict(ticker=ticker, company_name=company_name, model_version=MODEL_VERSION, evaluated_at_utc=evaluated_at.replace(microsecond=0).isoformat(), price=float(price), price_as_of_utc=price_as_of_utc, financials_as_of_utc=max((row.available_at_utc for row in annual), default=None), growth_drivers=drivers, risk_factors=risks, eps_revision_trend="unavailable: no redistribution-safe point-in-time consensus source configured", valuation_family=family)
+    empty = dict(ticker=ticker, company_name=company_name, model_version=MODEL_VERSION, evaluated_at_utc=evaluated_at.replace(microsecond=0).isoformat(), price=float(price), price_as_of_utc=price_as_of_utc, financials_as_of_utc=max((row.available_at_utc for row in [*annual, *ttm]), default=None), growth_drivers=drivers, risk_factors=risks, eps_revision_trend="unavailable: no redistribution-safe point-in-time consensus source configured", valuation_family=family)
     if valuation_evidence and valuation_evidence.ticker != ticker.upper():
         raise ValueError("valuation evidence ticker does not match evaluated company")
     if family == "reit":
         return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=15, uncertainty="very_high", methods_used="none", model_details_json="[]", status="hold", change_reason="verified FFO/AFFO unavailable")
     if len(annual) < 3 or risk_free_rate <= 0:
         return ValuationResult(**empty, conservative_value=None, base_value=None, optimistic_value=None, upside_to_base=None, safety_margin=None, favorable_buy_low=None, favorable_buy_high=None, judgement="판단 보류", confidence_score=10, uncertainty="very_high", methods_used="none", model_details_json="[]", status="hold", change_reason="fewer than three annual periods or missing official risk-free rate")
-    metrics = _normalized_metrics(annual, family)
-    data_quality_premium = 0.015 if any(row.validation_state != "verified" for row in annual[-3:]) else 0.0
+    metrics = _normalized_metrics(annual, family, latest_ttm)
+    quality_rows = [*annual[-3:], *([latest_ttm] if latest_ttm else [])]
+    data_quality_premium = 0.015 if any(row.validation_state != "verified" for row in quality_rows) else 0.0
     leverage = ((metrics.get("debt") or 0) - (metrics.get("cash") or 0)) / max(metrics.get("fcf") or 1, 1)
     leverage_premium = _clamp(max(0.0, leverage - 2.0) * 0.003, 0.0, 0.025)
     discount_rate = _clamp(risk_free_rate + EQUITY_RISK_PREMIUM + data_quality_premium + leverage_premium, 0.07, 0.18)
