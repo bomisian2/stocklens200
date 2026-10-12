@@ -72,3 +72,8 @@ streamlit run app.py
 
 The MVP must remain a Draft PR. Merging to `main` or deploying the existing Streamlit site requires a
 separate approval.
+
+PR CI does not misclassify an active-session quote as a completed close. During an XNYS regular
+session and the 15-minute settlement grace, the cacheless provider request is deferred and the
+committed last-completed snapshot is strictly validated instead. Outside that window, CI performs
+the cacheless live collection and strict validation.
