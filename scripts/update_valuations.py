@@ -24,6 +24,7 @@ from stocklens.financials import (  # noqa: E402
     merge_cik_maps,
 )
 from stocklens.macro import MacroDataError, fetch_ten_year_rate  # noqa: E402
+from stocklens.ir_files import IssuerIrFileProvider  # noqa: E402
 from stocklens.sec_files import SecFileProvider  # noqa: E402
 from stocklens.storage import SnapshotStore  # noqa: E402
 from stocklens.valuation import MODEL_VERSION, ValuationResult, evaluate_company  # noqa: E402
@@ -103,6 +104,11 @@ def _latest_available_at(periods: list) -> datetime | None:
     return max(values) if values else None
 
 
+def _latest_valuation_input_available_at(periods: list) -> datetime | None:
+    """Return freshness for the fiscal-year rows the current model consumes."""
+    return _latest_available_at([period for period in periods if period.period_type == "FY"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh point-in-time SEC financials and valuations")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
@@ -110,10 +116,11 @@ def main() -> int:
     parser.add_argument("--max-companies", type=int, default=None)
     parser.add_argument("--allow-partial", action="store_true", help="Allow fewer than 200 outputs for development")
     parser.add_argument(
-        "--financial-source", choices=("offline", "sec-api"), default="offline",
+        "--financial-source", choices=("offline", "issuer-ir", "sec-api"), default="offline",
         help="Offline is the safe default; sec-api must be selected explicitly",
     )
     parser.add_argument("--sec-manifest", type=Path, default=None, help="Hash-verified manifest for official SEC files")
+    parser.add_argument("--ir-manifest", type=Path, default=None, help="Hash-verified manifest for official issuer IR PDFs")
     parser.add_argument(
         "--valuation-evidence",
         type=Path,
@@ -156,7 +163,7 @@ def main() -> int:
 
     errors: list[dict] = []
     providers: list[FinancialProvider] = []
-    offline_provider: SecFileProvider | None = None
+    offline_provider: SecFileProvider | IssuerIrFileProvider | None = None
     cik_map = dict(KNOWN_CIKS)
     if args.financial_source == "sec-api":
         sec = SecClient()
@@ -169,6 +176,21 @@ def main() -> int:
         except FinancialDataError as exc:
             errors.append(_safe_error("SEC ticker map", exc))
         providers.append(SecApiProvider(sec))
+    elif args.financial_source == "issuer-ir" and args.ir_manifest is None:
+        errors.append({
+            "ticker": "issuer IR import",
+            "provider": "issuer_ir_official_files",
+            "category": "manifest_not_configured",
+        })
+    elif args.financial_source == "issuer-ir":
+        try:
+            offline_provider = IssuerIrFileProvider.from_manifest(args.ir_manifest)
+            cik_map = merge_cik_maps(
+                cik_map, offline_provider.cik_map(), provider="issuer_ir_official_files"
+            )
+            providers.append(offline_provider)
+        except (ValueError, FinancialDataError) as exc:
+            errors.append(_safe_error("issuer IR import", exc))
     elif args.sec_manifest is None:
         errors.append({
             "ticker": "offline import",
@@ -218,6 +240,7 @@ def main() -> int:
     unavailable_tickers: set[str] = set()
     stale_tickers: set[str] = set()
     fresh_tickers: set[str] = set()
+    degraded_period_tickers: set[str] = set()
     for row in universe.itertuples(index=False):
         ticker = str(row.ticker)
         cik = cik_map.get(ticker.replace("-", "."))
@@ -239,14 +262,20 @@ def main() -> int:
                 errors.append(_safe_error(ticker, exc))
         if periods:
             refreshed_by_ticker[ticker] = periods
-            latest = _latest_available_at(periods)
+            if any(period.validation_state != "verified" for period in periods):
+                degraded_period_tickers.add(ticker)
+            latest = _latest_valuation_input_available_at(periods)
             if latest is None or evaluated_at - latest > timedelta(days=MAX_FINANCIAL_AGE_DAYS):
                 stale_tickers.add(ticker)
                 errors.append({
                     "ticker": ticker,
                     "provider": providers[0].name if providers else args.financial_source,
-                    "category": "stale_financials",
+                    "category": "stale_valuation_inputs",
                     "latest_available_at_utc": None if latest is None else latest.isoformat(),
+                    "latest_provider_period_at_utc": (
+                        None if _latest_available_at(periods) is None
+                        else _latest_available_at(periods).isoformat()
+                    ),
                     "maximum_age_days": MAX_FINANCIAL_AGE_DAYS,
                 })
             else:
@@ -295,9 +324,9 @@ def main() -> int:
         elif ticker in unavailable_tickers:
             result = _hold_result(row, evaluated_at, "no verified financial provider and no prior snapshot")
         elif ticker in stale_tickers:
-            latest = _latest_available_at(refreshed_by_ticker.get(ticker, []))
+            latest = _latest_valuation_input_available_at(refreshed_by_ticker.get(ticker, []))
             reason = (
-                f"financial data is stale; latest availability "
+                f"valuation inputs are stale; latest consumed annual availability "
                 f"{latest.isoformat() if latest else 'unverified'} exceeds {MAX_FINANCIAL_AGE_DAYS} days"
             )
             result = _hold_result(row, evaluated_at, reason)
@@ -344,6 +373,7 @@ def main() -> int:
         "financial_period_count": int(sum(len(value) for value in refreshed_by_ticker.values())),
         "financial_source": (
             "SEC EDGAR official offline files" if args.financial_source == "offline"
+            else "Official issuer IR financial-report PDFs" if args.financial_source == "issuer-ir"
             else "SEC EDGAR companyfacts/submissions API"
         ),
         "financial_source_mode": args.financial_source,
@@ -362,16 +392,24 @@ def main() -> int:
         "provider_errors": errors[:200],
         "cached_ticker_count": len(cached_tickers),
         "stale_ticker_count": len(stale_tickers),
+        "degraded_period_ticker_count": len(degraded_period_tickers),
+        "degraded_period_count": int(sum(
+            period.validation_state != "verified"
+            for periods in refreshed_by_ticker.values()
+            for period in periods
+        )),
         "used_cache": bool(cached_tickers),
         "financial_freshness_state": "stale" if cached_tickers or stale_tickers else "unverified" if unavailable_tickers else "verified",
-        "data_state": "degraded" if errors else "healthy",
+        "data_state": "degraded" if errors or degraded_period_tickers else "healthy",
         "eligible_for_new_valuation": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
         "eligible_for_new_signals": risk_free is not None and evaluated > 0 and not unavailable_tickers and not stale_tickers,
         "eligible_for_display": evaluated + provisional > 0,
         "limitations": [
             "Consensus EPS/revenue revisions remain unavailable without a redistribution-safe free source.",
             "Management guidance text is not inferred from XBRL and remains unavailable until a traceable filing-text extractor is validated.",
-            "Independent financial-statement provider cross-check is not configured; SEC internal EPS consistency checks are used.",
+            "An independent financial-statement provider cross-check is not configured; internal statement arithmetic checks are used.",
+            "Issuer IR PDFs use conservative next-day availability when an exact publication timestamp is unavailable.",
+            "The current valuation model consumes annual rows only; a newer quarter does not refresh annual model inputs until a validated TTM bridge is implemented.",
             "IFRS and verified REIT FFO/AFFO mappings remain on hold.",
             "P/E is disabled unless a 5+ year point-in-time price/EPS distribution and EPS-quality evidence are supplied.",
             "Growth/ROIC multiple adjustments are disabled unless an independently held-out calibration is accepted.",

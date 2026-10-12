@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from scripts.update_valuations import _latest_available_at, _stale_prior_result
+from scripts.update_valuations import (
+    _latest_available_at,
+    _latest_valuation_input_available_at,
+    _stale_prior_result,
+)
 from stocklens.valuation import MODEL_VERSION, ValuationResult
 
 
@@ -56,3 +60,18 @@ def test_latest_financial_availability_ignores_invalid_timestamps() -> None:
         SimpleNamespace(available_at_utc="2026-04-01T20:00:00+00:00"),
     ]
     assert _latest_available_at(rows) == datetime(2026, 4, 1, 20, tzinfo=timezone.utc)
+
+
+def test_new_quarter_does_not_refresh_annual_only_valuation_input() -> None:
+    rows = [
+        SimpleNamespace(
+            period_type="FY", available_at_utc="2026-02-05T02:56:03+00:00"
+        ),
+        SimpleNamespace(
+            period_type="Q", available_at_utc="2026-07-22T20:01:36+00:00"
+        ),
+    ]
+    assert _latest_available_at(rows) == datetime(2026, 7, 22, 20, 1, 36, tzinfo=timezone.utc)
+    assert _latest_valuation_input_available_at(rows) == datetime(
+        2026, 2, 5, 2, 56, 3, tzinfo=timezone.utc
+    )
