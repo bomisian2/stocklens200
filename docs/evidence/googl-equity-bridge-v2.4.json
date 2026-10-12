@@ -9,7 +9,19 @@
       "accession": "0001652044-26-000071",
       "form": "10-Q",
       "period_end": "2026-06-30",
-      "limitation": "Official filing URL was inspected for this audit; a local source-file hash was not captured, so this is not an automated operating input."
+      "filing_date": "2026-07-23",
+      "sec_accepted_display_time": "2026-07-22 21:15:54 ET",
+      "accepted_at_utc": "2026-07-23T01:15:54Z",
+      "reported_document_size_bytes": 2464133,
+      "local_acquisition_attempt": {
+        "attempted_at_utc": "2026-10-12T13:00:16.8923889Z",
+        "domain": "www.sec.gov",
+        "http_status": 403,
+        "retry_count": 0,
+        "response_body_stored": false,
+        "source_file_sha256": null
+      },
+      "limitation": "The official filing index fixes accession, filing date, acceptance time and reported document size. The local fair-access request returned HTTP 403 and was not retried, so raw-file SHA-256 remains unavailable and this is not an automated operating input."
     },
     "alphabet_2026_q2_release": {
       "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf",

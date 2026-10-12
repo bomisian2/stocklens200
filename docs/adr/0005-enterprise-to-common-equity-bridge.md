@@ -2,7 +2,7 @@
 
 - Status: Accepted for Draft PR research
 - Date: 2026-10-12
-- Research audit: `googl-equity-bridge-audit-v2.4.0`
+- Research audits: `googl-equity-bridge-audit-v2.4.0`, `googl-practical-reference-audit-v2.4.1`
 - Formal valuation model remains: `valuation-v2.2.0`
 
 ## Context
@@ -26,7 +26,10 @@ The model applies three value states:
 - **B**: research range using official actuals and explicitly identified estimates, never an operating signal;
 - **C**: required inputs are incomplete, so the relevant equity or per-share output is unavailable.
 
-GOOGL currently has a B-grade research range at enterprise-value level and C-grade common-equity/per-share outputs.
+The initial v2.4 audit left GOOGL at B-grade enterprise value and C-grade common-equity/per-share outputs. The v2.4.1
+addendum permits a B-grade per-share *research envelope* only when every endpoint is an explicit bound with a source/basis,
+no midpoint or probability is selected, mutually exclusive claim policies are shown separately, and the result remains
+non-operational. This does not promote the result to A-grade formal fair value.
 
 Operating lease liabilities cannot be subtracted when FCFF begins with unadjusted GAAP EBIT that already includes operating
 lease expense. Mandatory convertible preferred is handled either as a claim or through if-converted dilution, never both.
@@ -34,7 +37,8 @@ Issued shares and period-weighted diluted shares cannot substitute for point-in-
 
 ## Consequences
 
-- No partial net-cash bridge is divided by shares.
+- No unexplained partial net-cash bridge is divided by shares. A B-grade envelope may divide explicitly bounded bridge values
+  by explicitly bounded share counts, provided both are labelled mechanical research limits rather than verified fair value.
 - Official carrying values can be displayed as evidence while remaining ineligible for formal arithmetic.
 - Investment gains excluded from operating income are not automatically double-counted, but investment balances still need
   operating/non-operating, restriction, liquidity and tax classification before addition.
