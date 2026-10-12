@@ -6,7 +6,7 @@ Branch: `feat/v2-valuation-engine`
 ## Corrected conclusion
 
 The original dashboard source was found at the local read-only path
-`C:\Users\leegeon\Desktop\클로드\files`. The earlier audit of
+`C:\Users\<local-user>\Desktop\클로드\files`. The earlier audit of
 `D:\GPT\StockLens200_prototype` examined a different prototype and must not be used to conclude that
 the legacy features were absent.
 
