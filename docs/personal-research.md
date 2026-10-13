@@ -22,6 +22,7 @@ py -3.12 -m venv .venv-personal
 .\.venv-personal\Scripts\python.exe -m pip install -r requirements.txt -r requirements-personal.txt
 .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data
 .\.venv-personal\Scripts\python.exe scripts\audit_personal_data.py --data-dir private_data
+.\.venv-personal\Scripts\python.exe scripts\audit_personal_market.py --data-dir private_data
 .\.venv-personal\Scripts\streamlit.exe run personal_app.py
 ```
 
@@ -30,8 +31,17 @@ and QCOM. Price collection remains disabled unless the user supplies their own
 Alpha Vantage key:
 
 ```powershell
-$env:ALPHAVANTAGE_API_KEY = "your-own-key"
-.\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM QQQ
+$secureKey = Read-Host "Alpha Vantage API key" -AsSecureString
+$keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+try {
+    $env:ALPHAVANTAGE_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr)
+    .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM QQQ
+}
+finally {
+    Remove-Item Env:ALPHAVANTAGE_API_KEY -ErrorAction SilentlyContinue
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPtr)
+    Remove-Variable secureKey, keyPtr -ErrorAction SilentlyContinue
+}
 ```
 
 The key is read only from the process environment. Do not put it in source,
@@ -42,6 +52,17 @@ is merged into the ignored local cache. Consequently EMA20/EMA50/RSI14 may be
 available after the first successful call, but EMA200 and the 252-session
 drawdown remain null until enough locally accumulated sessions exist. QQQ
 relative strength is calculated only from dates present in both caches.
+
+The market audit is offline and makes zero provider requests. It checks OHLCV
+ranges, duplicate dates, XNYS-session gaps, manifest date and SHA-256, indicator
+eligibility, and aligned QQQ relative strength. Its result is stored only in
+`private_data/audit/market/summary.json`.
+
+Future blocked responses are reduced to safe diagnostic categories such as
+`rate_limit`, `entitlement_required`, `authentication_failed`, and
+`invalid_request_or_symbol`. The API key, full request URL, and provider response
+body are never stored. Runs made by the older adapter remain
+`legacy_unclassified_response`; their exact cause must not be guessed.
 
 ## Data contract
 
@@ -81,5 +102,7 @@ calling scheduling successful. A manual run is not scheduler evidence.
 
 Both source documents for a ticker must download and parse before its previous
 raw and normalized snapshot is replaced. HTTP errors, unexpected content, small
-responses, and missing table anchors produce `blocked`; prior good files remain.
+responses, and missing table anchors produce `blocked`; prior good files remain
+and are counted separately as `financial_tickers_available`, never as a newly
+verified refresh.
 The UI never labels collection time as market time or publication time.

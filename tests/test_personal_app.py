@@ -57,3 +57,4 @@ def test_personal_app_renders_financials_without_market_signal(tmp_path, monkeyp
     assert "개인 연구" in rendered
     assert "매수 신호: 보류" in rendered
     assert "공식 목표가격" not in rendered
+    assert any("개인용 시장 데이터 현황" in item.value for item in app.subheader)

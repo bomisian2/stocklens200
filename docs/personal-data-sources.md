@@ -25,8 +25,9 @@ feature or keeps the data local and marks redistribution as unauthorized.
   available.
 - Market capitalization and shares outstanding are not collected yet. Adding an
   `OVERVIEW` request doubles Alpha Vantage calls and requires field-quality tests.
-- Historical price, current price, and volume are zero verified pilot symbols in
-  the current run because no key was supplied.
+- Actual personal price/history availability is determined from the ignored
+  local audit. Cache contents and derived values are not committed or published
+  by this branch.
 - Guidance is the issuer's published range. It is not an analyst consensus and is
   never silently converted into a target price.
 

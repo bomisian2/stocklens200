@@ -27,6 +27,36 @@ class MarketCollectionResult:
     message: str
     as_of: str | None = None
     rows_returned: int = 0
+    diagnostic_code: str | None = None
+    retryable: bool = False
+    provider_field: str | None = None
+
+
+def diagnose_provider_payload(payload: dict[str, Any]) -> tuple[str, bool, str | None]:
+    """Classify a non-series response without retaining provider text or secrets."""
+
+    diagnostic_fields = ("Error Message", "Note", "Information")
+    provider_field = next((field for field in diagnostic_fields if field in payload), None)
+    text = str(payload.get(provider_field, "")).casefold() if provider_field else ""
+    if any(token in text for token in ("rate limit", "call frequency", "25 requests", "too many")):
+        return "rate_limit", True, provider_field
+    if any(token in text for token in ("premium", "entitlement", "subscription")):
+        return "entitlement_required", False, provider_field
+    if any(token in text for token in ("invalid api key", "api key is invalid", "apikey")):
+        return "authentication_failed", False, provider_field
+    if provider_field == "Error Message" or any(token in text for token in ("invalid api call", "invalid symbol")):
+        return "invalid_request_or_symbol", False, provider_field
+    return "daily_series_missing", False, provider_field
+
+
+def _http_diagnostic(status_code: int) -> tuple[str, bool]:
+    if status_code == 429:
+        return "rate_limit", True
+    if status_code in {401, 403}:
+        return "authentication_or_entitlement", False
+    if 500 <= status_code <= 599:
+        return "provider_unavailable", True
+    return "http_error", False
 
 
 def _validate_ohlcv(frame: pd.DataFrame) -> None:
@@ -72,14 +102,44 @@ class AlphaVantagePersonalClient:
             timeout=30,
         )
         if response.status_code != 200:
-            return MarketCollectionResult(symbol, "blocked", 0, f"HTTP {response.status_code}")
+            code, retryable = _http_diagnostic(response.status_code)
+            return MarketCollectionResult(
+                symbol,
+                "blocked",
+                0,
+                f"Provider HTTP {response.status_code}; request URL and credentials withheld",
+                diagnostic_code=code,
+                retryable=retryable,
+            )
         try:
             payload = response.json()
         except ValueError:
-            return MarketCollectionResult(symbol, "blocked", 0, "Provider returned non-JSON data")
+            return MarketCollectionResult(
+                symbol,
+                "blocked",
+                0,
+                "Provider returned non-JSON data; response body withheld",
+                diagnostic_code="invalid_json",
+            )
         series = payload.get("Time Series (Daily)")
         if not isinstance(series, dict) or not series:
-            return MarketCollectionResult(symbol, "blocked", 0, "Provider quota, entitlement, or symbol response did not include daily history")
+            code, retryable, provider_field = diagnose_provider_payload(payload)
+            messages = {
+                "rate_limit": "Provider rate limit was reported",
+                "entitlement_required": "Provider reported that this dataset requires another entitlement",
+                "authentication_failed": "Provider rejected the API credential",
+                "invalid_request_or_symbol": "Provider rejected the request or symbol",
+                "daily_series_missing": "Provider response did not include daily history",
+            }
+            return MarketCollectionResult(
+                symbol,
+                "blocked",
+                0,
+                messages[code],
+                diagnostic_code=code,
+                retryable=retryable,
+                provider_field=provider_field,
+            )
 
         rows: list[dict[str, Any]] = []
         try:
@@ -93,7 +153,13 @@ class AlphaVantagePersonalClient:
                     "volume": int(values["5. volume"]),
                 })
         except (KeyError, TypeError, ValueError) as exc:
-            return MarketCollectionResult(symbol, "blocked", 0, f"Invalid OHLCV payload: {type(exc).__name__}")
+            return MarketCollectionResult(
+                symbol,
+                "blocked",
+                0,
+                f"Invalid OHLCV payload structure: {type(exc).__name__}",
+                diagnostic_code="invalid_ohlcv_payload",
+            )
 
         returned = pd.DataFrame(rows)
         root = Path(data_dir)
@@ -104,7 +170,14 @@ class AlphaVantagePersonalClient:
         try:
             _validate_ohlcv(frame)
         except ValueError as exc:
-            return MarketCollectionResult(symbol, "blocked", 0, str(exc), rows_returned=len(returned))
+            return MarketCollectionResult(
+                symbol,
+                "blocked",
+                0,
+                str(exc),
+                rows_returned=len(returned),
+                diagnostic_code="ohlcv_quality_failed",
+            )
 
         collected_at = (self._now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         market_date = str(frame.iloc[-1]["date"])

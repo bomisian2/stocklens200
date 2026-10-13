@@ -13,7 +13,7 @@ import requests
 
 from .catalog import IRDocument, PILOT_IR_DOCUMENTS
 from .financial_audit import audit_normalized_snapshot
-from .storage import atomic_write_bytes, atomic_write_json
+from .storage import atomic_write_bytes, atomic_write_json, load_json
 
 
 USER_AGENT = "Mozilla/5.0 StockLens200-PersonalResearch"
@@ -505,6 +505,7 @@ def collect_pilot_financials(
     collected_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
     results: list[dict[str, Any]] = []
     for ticker, documents in PILOT_IR_DOCUMENTS.items():
+        existing = load_json(root / "normalized" / "financials" / f"{ticker}.json")
         try:
             payloads = [_download(document, client) for document in documents]
             normalized = PARSERS[ticker](payloads[0], payloads[1])
@@ -550,12 +551,15 @@ def collect_pilot_financials(
                 }
             )
         except Exception as exc:
+            last_good_preserved = bool(existing and existing.get("status") == "verified")
             results.append(
                 {
                     "ticker": ticker,
                     "status": "blocked",
                     "periods": 0,
                     "reason": f"{type(exc).__name__}: {exc}",
+                    "last_good_preserved": last_good_preserved,
+                    "stored_periods": len(existing.get("periods", [])) if last_good_preserved else 0,
                 }
             )
     status = {
@@ -567,6 +571,13 @@ def collect_pilot_financials(
         "financial_tickers_verified": sum(row["status"] == "verified" for row in results),
         "financial_periods_verified": sum(row["periods"] for row in results),
         "financial_audits_verified": sum(row["status"] == "verified" for row in results),
+        "financial_tickers_available": sum(
+            row["status"] == "verified" or row.get("last_good_preserved", False) for row in results
+        ),
+        "financial_periods_available": sum(
+            row["periods"] if row["status"] == "verified" else row.get("stored_periods", 0)
+            for row in results
+        ),
         "market": {
             "status": "blocked",
             "reason": "No ALPHAVANTAGE_API_KEY was supplied; Yahoo automated collection is disabled by policy.",

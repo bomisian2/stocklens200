@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
+from stocklens.personal.market_data import compute_technical_snapshot
 
 
 DATA_DIR = Path(os.environ.get("STOCKLENS_PERSONAL_DATA_DIR", "private_data"))
@@ -62,10 +63,46 @@ if status is None:
     st.stop()
 
 st.info(
-    f"공식 재무 검증 {status.get('financial_tickers_verified', 0)}종목 / "
-    f"{status.get('financial_periods_verified', 0)}개 기간 · "
+    f"사용 가능한 공식 재무 스냅샷 "
+    f"{status.get('financial_tickers_available', status.get('financial_tickers_verified', 0))}종목 / "
+    f"{status.get('financial_periods_available', status.get('financial_periods_verified', 0))}개 기간 · "
     f"시장 데이터 {status.get('market', {}).get('status', 'unavailable')}"
 )
+
+market_results = {
+    str(row.get("ticker", "")).upper(): row
+    for row in status.get("market", {}).get("results", [])
+}
+market_summary_rows: list[dict[str, Any]] = []
+for market_ticker in ("AMAT", "AVGO", "QCOM", "QQQ"):
+    result = market_results.get(market_ticker, {})
+    summary_path = DATA_DIR / "market" / f"{market_ticker}.csv"
+    summary_frame = load_market(str(summary_path), _mtime(summary_path))
+    technical = compute_technical_snapshot(summary_frame)
+    diagnostic_code = result.get("diagnostic_code")
+    reason = result.get("message")
+    if result.get("status") == "blocked" and not diagnostic_code:
+        diagnostic_code = "legacy_unclassified_response"
+        reason = "기존 어댑터가 안전한 공급자 오류 분류를 저장하지 않음"
+    market_summary_rows.append(
+        {
+            "종목": market_ticker,
+            "수집 상태": result.get("status", "unavailable"),
+            "기준일": result.get("as_of"),
+            "행": result.get("rows", 0),
+            "EMA20": technical.get("ema20"),
+            "EMA50": technical.get("ema50"),
+            "RSI14": technical.get("rsi14"),
+            "EMA200": technical.get("ema200"),
+            "52주 낙폭": technical.get("drawdown_from_52w_high"),
+            "진단": diagnostic_code,
+            "사유": reason,
+        }
+    )
+
+st.subheader("개인용 시장 데이터 현황")
+st.dataframe(pd.DataFrame(market_summary_rows), hide_index=True, width="stretch")
+st.caption("실제 로컬 캐시만 표시합니다. 기술지표 계산 성공은 검증된 매수 신호를 뜻하지 않습니다.")
 
 financial_dir = DATA_DIR / "normalized" / "financials"
 available = [path.stem for path in sorted(financial_dir.glob("*.json"))]
@@ -105,7 +142,18 @@ if analysis and analysis["market"]["status"] != "unavailable" and not market.emp
         f"상태 {analysis['market']['status']} · {analysis['market']['price_policy']}"
     )
 else:
-    st.warning("개인 API 키로 검증된 가격이 없습니다. 가격·시가총액·PER·FCF yield를 계산하지 않습니다.")
+    selected_market_result = market_results.get(ticker, {})
+    diagnostic_code = selected_market_result.get("diagnostic_code") or (
+        "legacy_unclassified_response" if selected_market_result.get("status") == "blocked" else "unavailable"
+    )
+    reason = selected_market_result.get("message") or "검증된 가격 파일이 없습니다."
+    if diagnostic_code == "legacy_unclassified_response":
+        reason = "기존 어댑터가 공급자 오류 유형을 저장하지 않아 원인을 확정할 수 없습니다."
+    st.warning(
+        f"가격 상태: {selected_market_result.get('status', 'unavailable')} · "
+        f"진단: {diagnostic_code} · {reason}"
+    )
+    st.caption("가격·시가총액·PER·FCF yield를 계산하지 않습니다.")
 
 st.subheader("3. 공식 실적과 TTM")
 period_rows: list[dict[str, Any]] = []

@@ -8,8 +8,14 @@ import pandas as pd
 from stocklens.personal.analysis import compute_fundamental_indicators
 from stocklens.personal.catalog import PILOT_IR_DOCUMENTS
 from stocklens.personal.financial_audit import METRIC_KEYS, OFFICIAL_FACT_CONTRACTS, audit_normalized_snapshot
-from stocklens.personal.ir_financials import _ttm_values
-from stocklens.personal.market_data import AlphaVantagePersonalClient, compute_relative_strength, compute_technical_snapshot
+from stocklens.personal.ir_financials import _ttm_values, collect_pilot_financials
+from stocklens.personal.market_audit import audit_saved_market_data
+from stocklens.personal.market_data import (
+    AlphaVantagePersonalClient,
+    compute_relative_strength,
+    compute_technical_snapshot,
+    diagnose_provider_payload,
+)
 
 
 def test_ttm_uses_annual_plus_current_ytd_minus_prior_ytd_and_withholds_eps() -> None:
@@ -101,6 +107,119 @@ def test_alpha_vantage_personal_cache_never_stores_api_key(tmp_path) -> None:
     assert session.params["apikey"] == "top-secret"
     assert session.params["outputsize"] == "compact"
     assert json.loads(manifest)["price_policy"] == "raw_as_traded_unadjusted"
+
+
+def test_provider_diagnostics_are_safe_and_specific() -> None:
+    assert diagnose_provider_payload({"Note": "API call frequency and rate limit reached"}) == (
+        "rate_limit", True, "Note"
+    )
+    assert diagnose_provider_payload({"Information": "This endpoint is premium"}) == (
+        "entitlement_required", False, "Information"
+    )
+    assert diagnose_provider_payload({"Error Message": "Invalid API call for this symbol"}) == (
+        "invalid_request_or_symbol", False, "Error Message"
+    )
+
+
+class DiagnosticResponse:
+    status_code = 200
+
+    def json(self):
+        return {"Note": "API call frequency and rate limit reached; secret response details"}
+
+
+class DiagnosticSession:
+    def get(self, *args, **kwargs):
+        return DiagnosticResponse()
+
+
+def test_blocked_market_call_preserves_prior_cache_and_does_not_store_provider_body(tmp_path) -> None:
+    market_dir = tmp_path / "market"
+    market_dir.mkdir(parents=True)
+    previous = "date,open,high,low,close,volume\n2026-10-09,1,2,1,2,3\n"
+    (market_dir / "AVGO.csv").write_text(previous, encoding="utf-8")
+
+    result = AlphaVantagePersonalClient("not-persisted", session=DiagnosticSession()).collect_daily("AVGO", tmp_path)
+
+    assert result.status == "blocked"
+    assert result.diagnostic_code == "rate_limit"
+    assert result.retryable is True
+    assert "secret response details" not in result.message
+    assert (market_dir / "AVGO.csv").read_text(encoding="utf-8") == previous
+
+
+class HttpFailureResponse:
+    status_code = 403
+    content = b"withheld"
+
+
+class HttpFailureSession:
+    def get(self, *args, **kwargs):
+        return HttpFailureResponse()
+
+
+def test_failed_financial_refresh_preserves_last_good_snapshots(tmp_path) -> None:
+    financial_dir = tmp_path / "normalized" / "financials"
+    financial_dir.mkdir(parents=True)
+    before = {}
+    for ticker in PILOT_IR_DOCUMENTS:
+        payload = json.dumps({"ticker": ticker, "status": "verified", "sentinel": "last-good"})
+        path = financial_dir / f"{ticker}.json"
+        path.write_text(payload, encoding="utf-8")
+        before[ticker] = path.read_bytes()
+
+    result = collect_pilot_financials(tmp_path, session=HttpFailureSession())
+
+    assert result["financial_tickers_verified"] == 0
+    assert result["financial_tickers_available"] == 3
+    for ticker in PILOT_IR_DOCUMENTS:
+        assert (financial_dir / f"{ticker}.json").read_bytes() == before[ticker]
+
+
+def test_local_market_audit_makes_no_network_claim_and_labels_legacy_failures(tmp_path) -> None:
+    import hashlib
+
+    market_dir = tmp_path / "market"
+    market_dir.mkdir(parents=True)
+    for ticker in ("AMAT", "QQQ"):
+        csv_payload = b"date,open,high,low,close,volume\n2026-10-09,100,102,99,101,12345\n"
+        (market_dir / f"{ticker}.csv").write_bytes(csv_payload)
+        (market_dir / f"{ticker}.manifest.json").write_text(
+            json.dumps(
+                {
+                    "market_date": "2026-10-09",
+                    "freshness_status": "verified",
+                    "price_policy": "raw_as_traded_unadjusted",
+                    "adjusted_prices_available": False,
+                    "sha256": hashlib.sha256(csv_payload).hexdigest(),
+                }
+            ),
+            encoding="utf-8",
+        )
+    (tmp_path / "status.json").write_text(
+        json.dumps(
+            {
+                "market": {
+                    "results": [
+                        {"ticker": "AMAT", "status": "verified"},
+                        {"ticker": "AVGO", "status": "blocked", "message": "old generic message"},
+                        {"ticker": "QCOM", "status": "blocked", "message": "old generic message"},
+                        {"ticker": "QQQ", "status": "verified"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    audit = audit_saved_market_data(tmp_path)
+
+    assert audit["network_calls_made"] == 0
+    rows = {row["ticker"]: row for row in audit["results"]}
+    assert rows["AMAT"]["data_status"] == "verified"
+    assert rows["QQQ"]["data_status"] == "verified"
+    assert rows["AVGO"]["diagnostic_code"] == "legacy_unclassified_response"
+    assert rows["QCOM"]["diagnostic_code"] == "legacy_unclassified_response"
 
 
 def test_fundamental_indicators_do_not_invent_market_valuation() -> None:
