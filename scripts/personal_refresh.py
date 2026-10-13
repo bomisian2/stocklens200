@@ -46,6 +46,7 @@ def main() -> int:
                 "tickers_verified": sum(item.status == "verified" for item in results),
                 "results": [item.__dict__ for item in results],
                 "scope": "local_personal_only",
+                "note": "Free TIME_SERIES_DAILY returns up to 100 raw sessions per call; repeated runs merge the ignored local cache.",
             }
         atomic_write_json(data_dir / "status.json", status)
     persisted = load_json(data_dir / "status.json") or status

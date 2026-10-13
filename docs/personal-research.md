@@ -21,6 +21,7 @@ Copy and run this block from the repository root:
 py -3.12 -m venv .venv-personal
 .\.venv-personal\Scripts\python.exe -m pip install -r requirements.txt -r requirements-personal.txt
 .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data
+.\.venv-personal\Scripts\python.exe scripts\audit_personal_data.py --data-dir private_data
 .\.venv-personal\Scripts\streamlit.exe run personal_app.py
 ```
 
@@ -30,11 +31,17 @@ Alpha Vantage key:
 
 ```powershell
 $env:ALPHAVANTAGE_API_KEY = "your-own-key"
-.\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM
+.\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM QQQ
 ```
 
 The key is read only from the process environment. Do not put it in source,
 command history shared with others, screenshots, or Git.
+
+The free price call returns at most the latest 100 raw, unadjusted sessions and
+is merged into the ignored local cache. Consequently EMA20/EMA50/RSI14 may be
+available after the first successful call, but EMA200 and the 252-session
+drawdown remain null until enough locally accumulated sessions exist. QQQ
+relative strength is calculated only from dates present in both caches.
 
 ## Data contract
 
@@ -47,6 +54,11 @@ Each `private_data/normalized/financials/{TICKER}.json` contains:
 - issuer guidance kept separately from reported results;
 - source URL, publication time, period end, byte length, and SHA-256;
 - explicit local-only and redistribution-not-authorized flags.
+
+Before replacing a prior normalized snapshot, the collector now compares every
+reported figure, TTM formula input, source URL, publication timestamp, byte
+length, and SHA-256 with an independent issuer-fact contract. A mismatch blocks
+replacement. The standalone audit writes only beneath ignored `private_data/`.
 
 TTM is `FY2025 + current 9M - prior 9M`. TTM diluted EPS is intentionally null:
 the two documents do not provide one consistent TTM weighted-average diluted

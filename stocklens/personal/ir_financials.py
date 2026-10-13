@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from .catalog import IRDocument, PILOT_IR_DOCUMENTS
+from .financial_audit import audit_normalized_snapshot
 from .storage import atomic_write_bytes, atomic_write_json
 
 
@@ -526,9 +527,18 @@ def collect_pilot_financials(
                 }
                 for document, raw in zip(documents, payloads, strict=True)
             ]
+            payload_map = {
+                document.key: raw for document, raw in zip(documents, payloads, strict=True)
+            }
+            audit = audit_normalized_snapshot(normalized, payload_map, verified_at=now)
+            if audit["status"] != "verified":
+                raise FinancialExtractionError(
+                    f"{ticker}: independent fact audit failed ({len(audit['mismatches'])} mismatches)"
+                )
             for document, raw in zip(documents, payloads, strict=True):
                 extension = "pdf" if document.media_type == "application/pdf" else "html"
                 atomic_write_bytes(root / "raw" / f"{ticker}_{document.key}.{extension}", raw)
+            atomic_write_json(root / "audit" / "financials" / f"{ticker}.json", audit)
             atomic_write_json(root / "normalized" / "financials" / f"{ticker}.json", normalized)
             results.append(
                 {
@@ -536,6 +546,7 @@ def collect_pilot_financials(
                     "status": "verified",
                     "periods": len(normalized["periods"]),
                     "latest_period_end": normalized["periods"][-1]["period_end"],
+                    "audit_checks": audit["checks_passed"],
                 }
             )
         except Exception as exc:
@@ -555,6 +566,7 @@ def collect_pilot_financials(
         "financials": results,
         "financial_tickers_verified": sum(row["status"] == "verified" for row in results),
         "financial_periods_verified": sum(row["periods"] for row in results),
+        "financial_audits_verified": sum(row["status"] == "verified" for row in results),
         "market": {
             "status": "blocked",
             "reason": "No ALPHAVANTAGE_API_KEY was supplied; Yahoo automated collection is disabled by policy.",
