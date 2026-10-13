@@ -5,3 +5,7 @@ __pycache__/
 .tmp/
 *.py[cod]
 .streamlit/secrets.toml
+private_data/
+personal_logs/
+/tmp/
+/data/sec-import/
