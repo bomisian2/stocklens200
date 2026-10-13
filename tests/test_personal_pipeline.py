@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from stocklens.personal.analysis import compute_fundamental_indicators
+from stocklens.personal.analysis import compute_fundamental_indicators, compute_personal_analysis
 from stocklens.personal.catalog import PILOT_IR_DOCUMENTS
 from stocklens.personal.financial_audit import METRIC_KEYS, OFFICIAL_FACT_CONTRACTS, audit_normalized_snapshot
 from stocklens.personal.ir_financials import _ttm_values, collect_pilot_financials
@@ -237,6 +237,65 @@ def test_fundamental_indicators_do_not_invent_market_valuation() -> None:
     assert result["metrics"]["known_net_cash"]["value_usd_millions"] == 10.0
     assert result["valuation_inputs"]["market_cap"]["status"] == "unavailable"
     assert result["valuation_inputs"]["fair_value"]["status"] == "hold"
+
+
+def test_integrated_analysis_keeps_research_references_out_of_operational_decision() -> None:
+    dates = pd.bdate_range("2026-05-20", periods=100).strftime("%Y-%m-%d")
+    closes = pd.Series([400 + index for index in range(100)], dtype=float)
+    market = pd.DataFrame({
+        "date": dates, "open": closes - 1, "high": closes + 2,
+        "low": closes - 2, "close": closes, "volume": [1_000_000 + index for index in range(100)],
+    })
+    benchmark = market.assign(close=pd.Series([500 + index * 0.5 for index in range(100)]))
+    financial = {
+        "ticker": "AMAT", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 8.0}},
+            {"kind": "quarter", "label": "Q3 FY2026", "metrics": {"diluted_shares": 800.0}},
+            {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+        ],
+        "balance_sheet": {
+            "cash_and_equivalents": 10.0, "short_term_investments": 2.0,
+            "long_term_investments": 3.0, "short_term_debt": 1.0, "long_term_debt": 4.0,
+        },
+        "guidance": {},
+    }
+
+    result = compute_personal_analysis(
+        financial, market, benchmark,
+        {"freshness_status": "verified", "market_date": dates[-1], "price_policy": "raw_as_traded_unadjusted"},
+    )
+
+    references = result["valuation_references"]
+    assert references["status"] == "research_only"
+    assert references["proxy_equity_value_usd_millions"] == 499.0 * 800.0
+    assert references["formal_market_cap"] is None
+    assert references["formal_per"] is None
+    assert references["fair_value"] is None
+    assert references["reverse_dcf"]["status"] == "underdetermined"
+    assert result["signal_research"]["independent_validated_strategies"] == 0
+    assert result["decision"] == {
+        "status": "hold",
+        "is_buy_signal": False,
+        "reason": "Technical indicators are descriptive; fair value and independently validated signals are unavailable",
+    }
+
+
+def test_technical_snapshot_adds_observed_ranges_without_claiming_52_week_history() -> None:
+    frame = pd.DataFrame({
+        "close": [100 + index for index in range(100)],
+        "low": [99 + index for index in range(100)],
+        "high": [101 + index for index in range(100)],
+        "volume": [1_000 + index for index in range(100)],
+    })
+
+    result = compute_technical_snapshot(frame)
+
+    assert result["return_20d"] > 0
+    assert result["range_20d"] == {"low": 179.0, "high": 200.0}
+    assert result["ema200"] is None
+    assert result["drawdown_from_52w_high"] is None
+    assert result["is_buy_signal"] is False
 
 
 def test_official_fact_contract_catches_no_mismatches() -> None:

@@ -247,6 +247,28 @@ def compute_technical_snapshot(frame: pd.DataFrame) -> dict[str, Any]:
         missing.append("52-week drawdown requires 252 sessions")
     if volume_trend is None:
         missing.append("volume trend requires 40 valid sessions")
+
+    returns: dict[str, float | None] = {}
+    for sessions in (5, 20, 63):
+        returns[f"return_{sessions}d"] = (
+            round(float(close.iloc[-1] / close.iloc[-sessions - 1] - 1), 6)
+            if len(close) >= sessions + 1 else None
+        )
+    recent_ranges: dict[str, dict[str, float] | None] = {}
+    ordered = frame.loc[close.index].copy()
+    for sessions in (20, 50):
+        if len(ordered) < sessions:
+            recent_ranges[f"range_{sessions}d"] = None
+            continue
+        window = ordered.tail(sessions)
+        low_values = pd.to_numeric(window["low"], errors="coerce") if "low" in window else pd.to_numeric(window["close"], errors="coerce")
+        high_values = pd.to_numeric(window["high"], errors="coerce") if "high" in window else pd.to_numeric(window["close"], errors="coerce")
+        recent_ranges[f"range_{sessions}d"] = {
+            "low": round(float(low_values.min()), 4),
+            "high": round(float(high_values.max()), 4),
+        }
+    running_peak = close.cummax()
+    observed_max_drawdown = round(float((close / running_peak - 1).min()), 6)
     return {
         "status": "verified" if not missing else "partial",
         "latest_close": round(float(close.iloc[-1]), 4),
@@ -256,6 +278,9 @@ def compute_technical_snapshot(frame: pd.DataFrame) -> dict[str, Any]:
         "rsi14": round(float(rsi14), 2) if rsi14 is not None else None,
         "drawdown_from_52w_high": round(float(drawdown), 6) if drawdown is not None else None,
         "volume_trend_20d_vs_prior_20d": round(float(volume_trend), 6) if volume_trend is not None else None,
+        **returns,
+        **recent_ranges,
+        "observed_period_max_drawdown": observed_max_drawdown,
         "observations": int(len(close)),
         "price_policy": column,
         "missing_reasons": missing,

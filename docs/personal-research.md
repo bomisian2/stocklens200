@@ -106,3 +106,30 @@ responses, and missing table anchors produce `blocked`; prior good files remain
 and are counted separately as `financial_tickers_available`, never as a newly
 verified refresh.
 The UI never labels collection time as market time or publication time.
+
+## AMAT vertical analysis MVP
+
+`personal_app.py` now connects the already-audited AMAT financial snapshot to
+the local AMAT and QQQ caches in one read-only screen. It adds no network call
+and writes no derived value to the public app or operational signal files.
+
+The screen distinguishes three layers:
+
+- verified facts: issuer financial periods, guidance, local EOD date, and
+  descriptive EMA/RSI calculations;
+- research-only references: a capitalization proxy using the latest-quarter
+  diluted weighted-average shares, its proxy FCF yield, and an FY GAAP EPS
+  reference multiple;
+- unavailable operational outputs: formal market capitalization, TTM PER,
+  fair value, buy zone, and independently validated trading signals.
+
+The weighted-average share count is not relabeled as point-in-time common
+shares outstanding. Reverse DCF remains `underdetermined` until a verified
+forecast, WACC, terminal assumptions, and a consistent share denominator are
+available. With only 100 raw, unadjusted sessions, EMA200, the 52-week range,
+and PR #3's independent-validation gate remain unavailable.
+
+FinanceToolkit is not added because the displayed ratios are simpler and more
+auditable in the existing pure functions, while its provider/dependency layer
+does not supply the missing evidence. QuantStats is not added because there is
+no validated daily portfolio-return series or operating strategy to evaluate.
