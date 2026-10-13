@@ -79,12 +79,27 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         "documents": [{"key": "fixture", "published_at": "2026-08-13T20:01:00+00:00", "period_end": "2026-07-26", "distribution": "fixture", "sha256": "0" * 64, "url": "https://example.invalid/fixture"}],
     }
     (financial_dir / "AMAT.json").write_text(json.dumps(financial), encoding="utf-8")
+    avgo_financial = json.loads(json.dumps(financial))
+    avgo_financial["company"] = "Broadcom Inc."
+    avgo_financial["ticker"] = "AVGO"
+    avgo_financial["guidance"] = {
+        "period": "Q4 FY2026",
+        "revenue_approx": 40.0,
+        "non_gaap_operating_margin_percent": 66.0,
+    }
+    (financial_dir / "AVGO.json").write_text(json.dumps(avgo_financial), encoding="utf-8")
     dates = pd.bdate_range("2026-05-20", periods=100).strftime("%Y-%m-%d")
     prices = pd.Series([400 + index for index in range(100)], dtype=float)
     frame = pd.DataFrame({"date": dates, "open": prices - 1, "high": prices + 2, "low": prices - 2, "close": prices, "volume": 1_000_000})
     frame.to_csv(market_dir / "AMAT.csv", index=False)
+    frame.assign(close=prices * 0.8).to_csv(market_dir / "AVGO.csv", index=False)
     frame.assign(close=prices * 1.1).to_csv(market_dir / "QQQ.csv", index=False)
     (market_dir / "AMAT.manifest.json").write_text(json.dumps({
+        "freshness_status": "verified", "market_date": dates[-1],
+        "collected_at_utc": "2026-10-13T00:00:00+00:00", "provider": "fixture",
+        "price_policy": "raw_as_traded_unadjusted", "classification": "test_fixture",
+    }), encoding="utf-8")
+    (market_dir / "AVGO.manifest.json").write_text(json.dumps({
         "freshness_status": "verified", "market_date": dates[-1],
         "collected_at_utc": "2026-10-13T00:00:00+00:00", "provider": "fixture",
         "price_policy": "raw_as_traded_unadjusted", "classification": "test_fixture",
@@ -93,6 +108,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         "financial_tickers_available": 1, "financial_periods_available": 3,
         "market": {"status": "partial", "results": [
             {"ticker": "AMAT", "status": "verified", "as_of": dates[-1], "rows": 100},
+            {"ticker": "AVGO", "status": "verified", "as_of": dates[-1], "rows": 100},
             {"ticker": "QQQ", "status": "verified", "as_of": dates[-1], "rows": 100},
         ]},
     }), encoding="utf-8")
@@ -107,6 +123,11 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert metrics["발행 보통주"] == "793.597M"
     assert metrics["시점 불일치 주식가치 참고"] != "미확보"
     assert metrics["EMA20"] != "미확보"
+    rendered_text = " ".join(item.value for item in [*app.subheader, *app.markdown, *app.caption])
+    assert "AMAT·AVGO 실제 투자 분석 비교" in rendered_text
+    assert "실적은 개선되고 있는가?" in rendered_text
+    assert "현재 가격에는 높은 성장이 요구되는가?" in rendered_text
+    assert "대용 P/FCF" in metrics
     warnings = " ".join(item.value for item in app.warning)
     errors = " ".join(item.value for item in app.error)
     assert "연구 참고 전용" in warnings

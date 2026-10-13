@@ -170,17 +170,33 @@ forecast, WACC, terminal assumptions, and a consistent share denominator are
 available. With only 100 raw, unadjusted sessions, EMA200, the 52-week range,
 and PR #3's independent-validation gate remain unavailable.
 
-The same vertical screen now works for AVGO and QCOM even when price collection
-is blocked. Their verified FY/quarter/YTD/TTM financials, issuer guidance,
-accounting-quality warnings, and follow-up conditions remain visible; price,
-technical, market-cap, yield, and multiple fields stay unavailable. Guidance is
-rendered from a common contract while retaining each issuer's basis: AMAT
-Non-GAAP EPS, AVGO Non-GAAP operating margin, and QCOM GAAP EPS are never mixed.
+The same vertical screen now works for AVGO and QCOM. AVGO has a verified
+100-session local price cache through 2026-10-12, so the common contract produces
+the same descriptive EMA20/EMA50/RSI14, QQQ-relative return, and research-only
+value references used for AMAT. QCOM remains blocked by a safely classified
+provider rate-limit response, so its verified financial analysis remains visible
+without a substituted price. Guidance retains each issuer's basis: AMAT Non-GAAP
+EPS, AVGO Non-GAAP operating margin, and QCOM GAAP EPS are never mixed.
 
-Alpha Vantage documents `SHARES_OUTSTANDING` and `EARNINGS_ESTIMATES` endpoints,
-but no ticker-level response, free-plan entitlement, or local-cache permission
-for those datasets has been validated in this branch. The screen therefore does
-not turn documented capabilities into actual consensus, forward PER, or formal
+The app places AMAT and AVGO side by side using one calculation contract. It
+compares verified TTM revenue, operating income and FCF, issuer guidance versus
+the latest reported quarter, descriptive price trend, and the same proxy P/FCF
+and FCF-yield definitions. It also answers five practical questions: whether
+reported performance improved, how growth-dependent the proxy valuation is,
+whether the short price trend strengthened or weakened, what to watch next, and
+what cannot yet be decided.
+
+The five-year FCF sensitivity grid uses 0%, 10%, 15%, 20%, and 25% CAGR. These
+rates are not forecasts. Every row holds the current proxy equity value, price,
+share count and capital structure constant, excludes dilution, buybacks, M&A and
+terminal value, and grows only the audited TTM CFO-minus-CAPEX reference. The
+result is a transparent growth-dependence diagnostic, never a fair value, target
+price or buy range.
+
+Alpha Vantage documents `SHARES_OUTSTANDING` and `EARNINGS_ESTIMATES` endpoints.
+The single approved AMAT estimate call returned no usable estimate periods, so
+actual consensus remains zero companies and forward PER remains unavailable.
+The screen does not turn a documented endpoint into actual consensus or formal
 capitalization. Different displayed prices are compared only when trading date,
 regular-session/EOD basis, and adjustment policy match.
 
@@ -191,6 +207,27 @@ shows the resulting equity value and FCF yield only as time-mismatched research
 references. It does not promote either to formal market capitalization or a
 valuation signal. The other connected financial issuers remain unavailable for
 point-in-time common shares, including Alphabet's unresolved multi-class bridge.
+The acquired Broadcom issuer releases provide a Q3 FY2026 diluted weighted-average
+share count but not a point-in-time common-share count. AVGO therefore remains a
+proxy capitalization even though its local closing price is verified.
+
+## Personal market-data scale options
+
+No additional provider call was made for this comparison release. The current
+Alpha Vantage free allowance remains suitable for a small rotating personal
+watchlist, not a claim of daily 200-company coverage. Its documented standard
+free limit is [25 requests per day](https://www.alphavantage.co/premium/). A 10-company price refresh plus QQQ can fit
+within that budget when one request per symbol succeeds; 200 companies cannot.
+
+Two personal-use candidates remain evaluation options rather than configured
+providers. [Tiingo](https://www.tiingo.com/products/end-of-day-stock-price-data)
+advertises a free individual EOD tier with 1,000 requests per day and a $30/month
+individual tier with higher limits, while
+[Massive](https://www.massive.com/stocks) advertises a free EOD tier at five
+requests per minute and paid individual tiers starting at $29/month. Before either is implemented, the exact local-cache, adjustment,
+history, and derived-analysis rights must be accepted and verified for the
+intended personal workflow. No subscription was purchased and no provider was
+called during this work.
 
 FinanceToolkit is not added because the displayed ratios are simpler and more
 auditable in the existing pure functions, while its provider/dependency layer

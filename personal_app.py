@@ -82,6 +82,84 @@ st.info(
     f"시장 데이터 {status.get('market', {}).get('status', 'unavailable')}"
 )
 
+qqq_path = DATA_DIR / "market" / "QQQ.csv"
+comparison_qqq = load_market(str(qqq_path), _mtime(qqq_path))
+comparison_results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+for comparison_ticker in ("AMAT", "AVGO"):
+    comparison_financial_path = DATA_DIR / "normalized" / "financials" / f"{comparison_ticker}.json"
+    comparison_market_path = DATA_DIR / "market" / f"{comparison_ticker}.csv"
+    comparison_manifest_path = DATA_DIR / "market" / f"{comparison_ticker}.manifest.json"
+    comparison_financial = load_json(str(comparison_financial_path), _mtime(comparison_financial_path))
+    comparison_market = load_market(str(comparison_market_path), _mtime(comparison_market_path))
+    comparison_manifest = load_json(str(comparison_manifest_path), _mtime(comparison_manifest_path)) or {}
+    if comparison_financial and not comparison_market.empty:
+        comparison_results[comparison_ticker] = (
+            comparison_financial,
+            compute_personal_analysis(
+                comparison_financial,
+                comparison_market,
+                comparison_qqq,
+                comparison_manifest,
+            ),
+        )
+
+if comparison_results:
+    st.subheader("AMAT·AVGO 실제 투자 분석 비교")
+    st.caption("동일한 공통 계약과 로컬 검증 캐시로 계산합니다. 대용 가치와 기술지표는 연구 참고이며 매수 신호가 아닙니다.")
+    comparison_columns = st.columns(2)
+    for comparison_column, comparison_ticker in zip(comparison_columns, ("AMAT", "AVGO"), strict=True):
+        with comparison_column:
+            with st.container(border=True):
+                if comparison_ticker not in comparison_results:
+                    st.markdown(f"**{comparison_ticker}**")
+                    st.warning("공식 재무 또는 검증 가격이 없어 비교 분석을 계산하지 않았습니다.")
+                    continue
+                comparison_financial, comparison_analysis = comparison_results[comparison_ticker]
+                comparison_ttm = next(
+                    row for row in comparison_financial["periods"] if row.get("kind") == "ttm"
+                )
+                comparison_metrics = comparison_analysis["fundamental"]["metrics"]
+                comparison_valuation = comparison_analysis["valuation_references"]
+                comparison_technical = comparison_analysis["technical"]
+                comparison_guidance = comparison_analysis["fundamental"]["guidance_analysis"]
+                comparison_guidance_mid = comparison_guidance.get("comparison", {}).get("midpoint")
+                st.markdown(f"### {comparison_ticker} · {comparison_financial['company']}")
+                st.write(COMPANY_PROFILES[comparison_ticker]["business"])
+                st.info(comparison_analysis["practical_summary"]["one_line"])
+                st.metric(
+                    "검증 EOD 종가",
+                    f"${comparison_technical['latest_close']:,.2f}",
+                    help=f"기준일 {comparison_analysis['market']['price_as_of']} · 원시 비조정 종가",
+                )
+                st.markdown(
+                    f"**TTM 실적** · 매출 {_money_millions(comparison_ttm['metrics'].get('revenue'))} · "
+                    f"영업이익 {_money_millions(comparison_ttm['metrics'].get('operating_income'))} · "
+                    f"FCF {_money_millions(comparison_ttm['metrics'].get('fcf'))}"
+                )
+                st.markdown(
+                    f"**수익성** · 영업마진 {_pct(_metric_value(comparison_metrics, 'ttm_operating_margin'))} · "
+                    f"FCF 마진 {_pct(_metric_value(comparison_metrics, 'ttm_fcf_margin'))}"
+                )
+                st.markdown(
+                    f"**공식 가이던스** · {comparison_guidance.get('period', '미확보')} · "
+                    + (
+                        f"매출 중간값은 직전 분기 대비 {_pct(comparison_guidance_mid)}"
+                        if comparison_guidance_mid is not None
+                        else "수치 비교 미확보"
+                    )
+                )
+                st.markdown(
+                    f"**기술** · EMA20 {_number(comparison_technical.get('ema20'), prefix='$')} · "
+                    f"EMA50 {_number(comparison_technical.get('ema50'), prefix='$')} · "
+                    f"RSI14 {_number(comparison_technical.get('rsi14'), decimals=1)} · "
+                    f"QQQ 대비 63일 {_pct(comparison_analysis['relative_strength'].get('relative_return_63d'))}"
+                )
+                st.markdown(
+                    f"**대용 가치** · P/FCF {_number(comparison_valuation.get('proxy_p_fcf'), suffix='배', decimals=1)} · "
+                    f"FCF yield {_pct(comparison_valuation.get('proxy_ttm_fcf_yield'))}"
+                )
+                st.caption("희석 가중평균 주식 수 대용치이므로 확정 시가총액·정식 적정가가 아닙니다.")
+
 market_results = {
     str(row.get("ticker", "")).upper(): row
     for row in status.get("market", {}).get("results", [])
@@ -187,7 +265,6 @@ if not financial:
 market_path = DATA_DIR / "market" / f"{ticker}.csv"
 manifest_path = DATA_DIR / "market" / f"{ticker}.manifest.json"
 estimates_path = DATA_DIR / "estimates" / "normalized" / f"{ticker}.json"
-qqq_path = DATA_DIR / "market" / "QQQ.csv"
 market = load_market(str(market_path), _mtime(market_path))
 qqq = load_market(str(qqq_path), _mtime(qqq_path))
 manifest = load_json(str(manifest_path), _mtime(manifest_path)) or {}
@@ -230,22 +307,25 @@ else:
     st.caption("가격·시가총액·PER·FCF yield를 계산하지 않습니다.")
 
 if analysis:
-    summary = analysis["practical_summary"]
+    questions = analysis["investment_questions"]
     with st.container(border=True):
-        st.markdown("**지금 확인된 강점**")
-        for item in summary["strengths"]:
+        st.markdown(f"**{questions['performance']['question']}**")
+        st.write(questions["performance"]["answer"])
+        st.caption(questions["performance"].get("warning", ""))
+    with st.container(border=True):
+        st.markdown(f"**{questions['growth_expectation']['question']}**")
+        st.write(questions["growth_expectation"]["answer"])
+        st.caption("연구 민감도이며 목표가격·성장 전망·매수 조건이 아닙니다.")
+    with st.container(border=True):
+        st.markdown(f"**{questions['technical']['question']}**")
+        st.write(questions["technical"]["answer"])
+    with st.container(border=True):
+        st.markdown(f"**{questions['watch']['question']}**")
+        for item in questions["watch"]["items"]:
             st.write(f"- {item}")
     with st.container(border=True):
-        st.markdown("**현재 가격에 반영된 기대**")
-        st.write(summary["embedded_expectations"])
-        st.caption(summary["price_comparison_rule"])
-    with st.container(border=True):
-        st.markdown("**지금 판단할 수 없는 항목**")
-        for item in summary["unknowns"]:
-            st.write(f"- {item}")
-    with st.container(border=True):
-        st.markdown("**다음 실적·가격 조건에서 확인할 것**")
-        for item in summary["watch_conditions"]:
+        st.markdown(f"**{questions['unknowns']['question']}**")
+        for item in questions["unknowns"]["items"]:
             st.write(f"- {item}")
 
 st.subheader("B. 실적 흐름")
@@ -319,6 +399,7 @@ if analysis:
             f"주식수 기준: {references['share_basis_period']} ({references['share_basis_as_of']}) · "
             "해당 분기 희석 가중평균 주식수(기준일 현재 실제 발행주식 수 아님)"
         )
+        st.metric("대용 P/FCF", _number(references.get("proxy_p_fcf"), suffix="배", decimals=1))
         st.error("대용 시가가치는 실제 기준일 발행주식 수로 계산한 확정 시가총액이 아닙니다.")
         point_shares = references.get("point_in_time_share_evidence")
         point_reference = references.get("point_in_time_equity_reference")
@@ -354,6 +435,32 @@ if analysis:
                 st.write(f"- {label}: `{formula}`")
             st.write(f"- 주식 수 공시 접수: {references.get('share_source_published_at', '미확보')}")
             st.write(f"- 주식 수 원문: {references.get('share_source_url', '미확보')}")
+        sensitivity = references.get("fcf_growth_sensitivity", {})
+        if sensitivity.get("rows"):
+            with st.expander("5년 FCF 성장 민감도 · 연구 전용"):
+                sensitivity_frame = pd.DataFrame(
+                    {
+                        "FCF CAGR": [row["fcf_cagr"] for row in sensitivity["rows"]],
+                        "5년 후 FCF ($M)": [row["year5_fcf_usd_millions"] for row in sensitivity["rows"]],
+                        "5년 후 대용 FCF yield": [row["year5_proxy_fcf_yield"] for row in sensitivity["rows"]],
+                        "5년 후 대용 P/FCF": [row["year5_proxy_p_fcf"] for row in sensitivity["rows"]],
+                    }
+                )
+                st.dataframe(
+                    sensitivity_frame,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "FCF CAGR": st.column_config.NumberColumn(format="percent"),
+                        "5년 후 FCF ($M)": st.column_config.NumberColumn(format="$%.0fM"),
+                        "5년 후 대용 FCF yield": st.column_config.NumberColumn(format="percent"),
+                        "5년 후 대용 P/FCF": st.column_config.NumberColumn(format="%.1f배"),
+                    },
+                )
+                st.caption(sensitivity["formula"])
+                for assumption in sensitivity["assumptions"]:
+                    st.write(f"- {assumption}")
+                st.warning("시나리오 성장률은 전망치가 아니라 민감도 격자입니다. 가격·주식 수·자본구조가 고정된다는 강한 가정 때문에 정식 가치평가에 사용할 수 없습니다.")
         st.write(f"현재 가격의 내재 기대: {references['interpretation']}")
     else:
         st.info(references.get("reason", "연구 참고 지표를 계산할 수 없습니다."))

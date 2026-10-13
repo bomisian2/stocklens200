@@ -492,12 +492,70 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert point_reference["equity_value_usd_millions"] == 499.0 * 793.597443
     assert point_reference["date_gap_days"] > 0
     assert references["reverse_dcf"]["status"] == "underdetermined"
+    assert references["proxy_p_fcf"] == references["proxy_equity_value_usd_millions"] / 12.0
+    sensitivity = references["fcf_growth_sensitivity"]
+    assert sensitivity["status"] == "research_only"
+    assert [row["fcf_cagr"] for row in sensitivity["rows"]] == [0.0, 0.10, 0.15, 0.20, 0.25]
+    assert sensitivity["rows"][0]["year5_fcf_usd_millions"] == 12.0
+    assert sensitivity["operational_eligible"] is False
+    questions = result["investment_questions"]
+    assert questions["growth_expectation"]["status"] == "research_only"
+    assert "5년간 연 15%" in questions["growth_expectation"]["answer"]
+    assert questions["technical"]["status"] == "descriptive_only"
     assert result["signal_research"]["independent_validated_strategies"] == 0
     assert result["decision"] == {
         "status": "hold",
         "is_buy_signal": False,
         "reason": "Technical indicators are descriptive; fair value and independently validated signals are unavailable",
     }
+
+
+def test_fundamental_trend_metrics_compare_ttm_with_fiscal_year_without_claiming_yoy() -> None:
+    financial = {
+        "ticker": "AVGO",
+        "status": "verified",
+        "periods": [
+            {
+                "kind": "fiscal_year",
+                "label": "FY2025",
+                "period_end": "2025-11-02",
+                "metrics": {
+                    "revenue": 100.0,
+                    "operating_income": 25.0,
+                    "fcf": 20.0,
+                    "diluted_eps": 2.0,
+                },
+            },
+            {
+                "kind": "quarter",
+                "label": "Q3 FY2026",
+                "period_end": "2026-08-02",
+                "metrics": {"revenue": 30.0, "diluted_shares": 10.0},
+            },
+            {
+                "kind": "ttm",
+                "label": "TTM through Q3 FY2026",
+                "period_end": "2026-08-02",
+                "metrics": {"revenue": 120.0, "operating_income": 36.0, "fcf": 30.0},
+            },
+        ],
+        "balance_sheet": {
+            "cash_and_equivalents": 1.0,
+            "short_term_debt": 0.0,
+            "long_term_debt": 0.0,
+        },
+        "guidance": {},
+        "documents": [],
+    }
+
+    metrics = compute_fundamental_indicators(financial)["metrics"]
+
+    assert abs(metrics["ttm_revenue_change_vs_fy2025"]["value"] - 0.2) < 1e-12
+    assert abs(metrics["ttm_operating_income_change_vs_fy2025"]["value"] - 0.44) < 1e-12
+    assert abs(metrics["ttm_fcf_change_vs_fy2025"]["value"] - 0.5) < 1e-12
+    assert abs(metrics["ttm_operating_margin_change_bps_vs_fy2025"]["value"] - 500.0) < 1e-9
+    assert abs(metrics["ttm_fcf_margin_change_bps_vs_fy2025"]["value"] - 500.0) < 1e-9
+    assert metrics["ttm_fcf_change_vs_fy2025"]["note"] == "Rolling twelve-month change, not year-over-year growth"
 
 
 def test_issuer_guidance_stays_separate_by_accounting_basis() -> None:

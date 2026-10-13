@@ -167,6 +167,18 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
     current = ttm["metrics"]
 
     revenue_growth = current["revenue"] / fy["revenue"] - 1 if fy.get("revenue") else None
+    operating_income_change = (
+        current["operating_income"] / fy["operating_income"] - 1
+        if fy.get("operating_income") and current.get("operating_income") is not None
+        else None
+    )
+    fcf_change = current["fcf"] / fy["fcf"] - 1 if fy.get("fcf") and current.get("fcf") is not None else None
+    fy_operating_margin = (
+        fy["operating_income"] / fy["revenue"]
+        if fy.get("revenue") and fy.get("operating_income") is not None
+        else None
+    )
+    fy_fcf_margin = fy["fcf"] / fy["revenue"] if fy.get("revenue") and fy.get("fcf") is not None else None
     operating_margin = current["operating_income"] / current["revenue"] if current.get("revenue") else None
     fcf_margin = current["fcf"] / current["revenue"] if current.get("revenue") else None
 
@@ -202,9 +214,35 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
                 "formula": "TTM operating income / TTM revenue",
                 "status": "verified",
             },
+            "ttm_operating_income_change_vs_fy2025": {
+                "value": operating_income_change,
+                "formula": f"TTM operating income / {fiscal_year.get('label', 'latest fiscal year')} operating income - 1",
+                "status": "verified",
+                "note": "Rolling twelve-month change, not year-over-year growth",
+            },
+            "ttm_operating_margin_change_bps_vs_fy2025": {
+                "value": (operating_margin - fy_operating_margin) * 10_000
+                if operating_margin is not None and fy_operating_margin is not None
+                else None,
+                "formula": "(TTM operating margin - latest fiscal-year operating margin) × 10,000",
+                "status": "verified",
+            },
             "ttm_fcf_margin": {
                 "value": fcf_margin,
                 "formula": "(TTM CFO - TTM CAPEX) / TTM revenue",
+                "status": "verified",
+            },
+            "ttm_fcf_change_vs_fy2025": {
+                "value": fcf_change,
+                "formula": f"TTM FCF / {fiscal_year.get('label', 'latest fiscal year')} FCF - 1",
+                "status": "verified",
+                "note": "Rolling twelve-month change, not year-over-year growth",
+            },
+            "ttm_fcf_margin_change_bps_vs_fy2025": {
+                "value": (fcf_margin - fy_fcf_margin) * 10_000
+                if fcf_margin is not None and fy_fcf_margin is not None
+                else None,
+                "formula": "(TTM FCF margin - latest fiscal-year FCF margin) × 10,000",
                 "status": "verified",
             },
             "known_net_cash": {
@@ -287,6 +325,19 @@ def _research_valuation_references(
         }
     proxy_equity_value = latest_price * float(diluted_share_proxy)
     proxy_fcf_yield = float(ttm_fcf) / proxy_equity_value if ttm_fcf is not None else None
+    proxy_p_fcf = proxy_equity_value / float(ttm_fcf) if ttm_fcf else None
+    sensitivity_rows: list[dict[str, Any]] = []
+    if ttm_fcf and proxy_equity_value:
+        for growth_rate in (0.0, 0.10, 0.15, 0.20, 0.25):
+            year5_fcf = float(ttm_fcf) * (1 + growth_rate) ** 5
+            sensitivity_rows.append(
+                {
+                    "fcf_cagr": growth_rate,
+                    "year5_fcf_usd_millions": year5_fcf,
+                    "year5_proxy_fcf_yield": year5_fcf / proxy_equity_value,
+                    "year5_proxy_p_fcf": proxy_equity_value / year5_fcf,
+                }
+            )
     point_in_time_reference = None
     if share_evidence and price_as_of:
         try:
@@ -321,6 +372,7 @@ def _research_valuation_references(
         "point_in_time_equity_reference": point_in_time_reference,
         "proxy_equity_value_usd_millions": proxy_equity_value,
         "proxy_ttm_fcf_yield": proxy_fcf_yield,
+        "proxy_p_fcf": proxy_p_fcf,
         "fy_gaap_eps_reference_multiple": latest_price / float(fy_eps) if fy_eps else None,
         "fy_gaap_eps_period": fiscal_year.get("label"),
         "formulas": {
@@ -335,12 +387,118 @@ def _research_valuation_references(
                 "diluted shares are unavailable; no implied growth rate is solved"
             ),
         },
+        "fcf_growth_sensitivity": {
+            "status": "research_only",
+            "horizon_years": 5,
+            "rows": sensitivity_rows,
+            "assumptions": [
+                "Starting FCF is the verified TTM reported CFO minus reported CAPEX",
+                "Proxy equity value, price, share count, and capital structure remain unchanged",
+                "No dilution, buyback, acquisition, divestiture, or terminal value is modeled",
+                "The 0%, 10%, 15%, 20%, and 25% rates are a standard sensitivity grid, not forecasts",
+            ],
+            "formula": "year-5 FCF = TTM FCF × (1 + scenario CAGR)^5; proxy yield = year-5 FCF / current proxy equity value",
+            "operational_eligible": False,
+        },
         "interpretation": (
             (f"대용 FCF yield {proxy_fcf_yield:.1%}와 " if proxy_fcf_yield is not None else "대용 FCF yield 미확보와 ")
             + (f"FY GAAP EPS 참고 배수 {latest_price / float(fy_eps):.1f}배는 " if fy_eps else "")
             + "높은 성장과 수익성 지속 기대를 시사합니다. 다만 확정 시가총액·미래 전망·할인율이 "
             "없어 고평가·저평가 또는 적정가를 뜻하지 않습니다."
         ),
+    }
+
+
+def _investment_questions(
+    financial: dict[str, Any],
+    fundamental: dict[str, Any],
+    valuation: dict[str, Any],
+    technical: dict[str, Any],
+    relative: dict[str, Any],
+    technical_label: str,
+) -> dict[str, dict[str, Any]]:
+    """Answer practical investor questions without promoting research inputs."""
+
+    metrics = fundamental.get("metrics", {})
+    revenue_change = metrics.get("ttm_revenue_change_vs_fy2025", {}).get("value")
+    operating_change = metrics.get("ttm_operating_income_change_vs_fy2025", {}).get("value")
+    fcf_change = metrics.get("ttm_fcf_change_vs_fy2025", {}).get("value")
+    margin_change_bps = metrics.get("ttm_operating_margin_change_bps_vs_fy2025", {}).get("value")
+    guidance_midpoint = fundamental.get("guidance_analysis", {}).get("comparison", {}).get("midpoint")
+
+    performance_parts: list[str] = []
+    if revenue_change is not None:
+        performance_parts.append(f"TTM 매출 {revenue_change:+.1%}")
+    if operating_change is not None:
+        performance_parts.append(f"영업이익 {operating_change:+.1%}")
+    if fcf_change is not None:
+        performance_parts.append(f"FCF {fcf_change:+.1%}")
+    if margin_change_bps is not None:
+        performance_parts.append(f"영업마진 {margin_change_bps:+.0f}bp")
+    if guidance_midpoint is not None:
+        performance_parts.append(f"다음 분기 매출 가이던스 중간값/직전 분기 {guidance_midpoint:+.1%}")
+
+    sensitivity = valuation.get("fcf_growth_sensitivity", {})
+    row_15 = next((row for row in sensitivity.get("rows", []) if row.get("fcf_cagr") == 0.15), None)
+    if valuation.get("status") == "research_only" and valuation.get("proxy_p_fcf") is not None:
+        expectation_answer = (
+            f"현재 대용 P/FCF는 {valuation['proxy_p_fcf']:.1f}배입니다. 가격·주식 수가 변하지 않고 FCF가 "
+            f"5년간 연 15% 성장하는 연구 시나리오에서도 5년 후 대용 FCF yield는 "
+            f"{row_15['year5_proxy_fcf_yield']:.1%}입니다. 높은 성장 의존도는 확인되지만 적정가 판단은 아닙니다."
+            if row_15
+            else "대용 가치 참고치는 있으나 미래 현금흐름 민감도를 계산할 수 없습니다."
+        )
+    else:
+        expectation_answer = "검증된 가격과 주식 수 연결이 부족해 현재 가격의 성장 기대를 정량화하지 않았습니다."
+
+    if technical.get("status") == "unavailable" or any(
+        technical.get(key) is None for key in ("latest_close", "ema20", "ema50", "rsi14")
+    ):
+        technical_answer = "검증된 가격 이력이 없어 추세를 판단하지 않았습니다."
+    else:
+        relative_63d = relative.get("relative_return_63d")
+        technical_answer = (
+            f"기술 상태는 {technical_label}입니다. 종가 {technical.get('latest_close'):.2f}, "
+            f"EMA20 {technical.get('ema20'):.2f}, EMA50 {technical.get('ema50'):.2f}, "
+            f"RSI14 {technical.get('rsi14'):.1f}"
+            + (f", 63거래일 QQQ 대비 {relative_63d:+.1%}p입니다." if relative_63d is not None else "입니다.")
+        )
+
+    watch = _practical_summary(
+        financial, fundamental, valuation, technical, technical_label
+    )["watch_conditions"]
+    return {
+        "performance": {
+            "question": "실적은 개선되고 있는가?",
+            "status": "verified_calculation" if performance_parts else "unavailable",
+            "answer": " · ".join(performance_parts) if performance_parts else "비교 가능한 FY·TTM 실적이 부족합니다.",
+            "warning": "TTM 대 FY 변화이며 전년동기 성장률이 아닙니다.",
+        },
+        "growth_expectation": {
+            "question": "현재 가격에는 높은 성장이 요구되는가?",
+            "status": "research_only" if valuation.get("status") == "research_only" else "unavailable",
+            "answer": expectation_answer,
+        },
+        "technical": {
+            "question": "주가 추세가 개선되는가, 약해지는가?",
+            "status": "descriptive_only" if technical.get("status") != "unavailable" else "unavailable",
+            "answer": technical_answer,
+        },
+        "watch": {
+            "question": "다음에 무엇을 확인해야 하는가?",
+            "status": "research_only",
+            "items": watch,
+        },
+        "unknowns": {
+            "question": "현재 판단할 수 없는 부분은 무엇인가?",
+            "status": "hold",
+            "items": [
+                "동일 기준일의 보통주 발행주식 수와 완전희석 주식 수",
+                "일관된 TTM 희석 EPS와 검증된 미래 EPS·매출 컨센서스",
+                "검증된 할인율·장기 성장률에 기반한 정식 적정가",
+                "충분한 조정가격 이력과 독립 검증된 운영 매수 신호",
+            ],
+        },
     }
 
 
@@ -514,6 +672,14 @@ def compute_personal_analysis(
     practical_summary = _practical_summary(
         financial, fundamental, valuation_references, technical, technical_interpretation["label"]
     )
+    investment_questions = _investment_questions(
+        financial,
+        fundamental,
+        valuation_references,
+        technical,
+        relative,
+        technical_interpretation["label"],
+    )
     return {
         "ticker": financial["ticker"],
         "status": "research_only",
@@ -537,6 +703,7 @@ def compute_personal_analysis(
             "corporate_actions": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("corporate_action_evidence", []),
         },
         "practical_summary": practical_summary,
+        "investment_questions": investment_questions,
         "interpretation": {
             "business": {"label": "중립", "reason": "사업 설명과 주요 위험은 확인했지만 경쟁력 점수는 검증하지 않았습니다."},
             "performance": {
