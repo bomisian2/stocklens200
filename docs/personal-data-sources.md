@@ -38,9 +38,12 @@ feature or keeps the data local and marks redistribution as unauthorized.
 
 ## Expansion limit
 
-The financial pilot proves three issuer-specific paths, not a universal 200-company
-collector. A 200-company implementation needs a common licensed market source and
-a scalable official filing source. Under the current free Alpha Vantage limit,
+The local inventory connects eight companies and 31 financial periods. The
+AMAT/AVGO/QCOM path has a 160-check issuer-fact/provenance audit; the five extended
+company mappings have 51 fixed-hash and field-map integrity checks, which are not
+claimed to be the same exhaustive raw-table audit. This is not a universal
+200-company collector. A 200-company implementation needs a common licensed
+market source and a scalable official filing source. Under the current free Alpha Vantage limit,
 one EOD request per company requires at least eight quota days for a full sweep;
 adding QQQ or forecasts makes daily Top-200 refresh infeasible. Ten daily price
 calls fit, while ten price plus ten forecast calls would consume 20 of 25 calls;
