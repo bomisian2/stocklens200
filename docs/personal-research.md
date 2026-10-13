@@ -35,7 +35,7 @@ $secureKey = Read-Host "Alpha Vantage API key" -AsSecureString
 $keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
 try {
     $env:ALPHAVANTAGE_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr)
-    .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM QQQ
+    .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --market-tickers AMAT AVGO QCOM QQQ --max-market-calls 4
 }
 finally {
     Remove-Item Env:ALPHAVANTAGE_API_KEY -ErrorAction SilentlyContinue
@@ -46,6 +46,12 @@ finally {
 
 The key is read only from the process environment. Do not put it in source,
 command history shared with others, screenshots, or Git.
+
+`--max-market-calls` is an explicit one-run budget. Its default is zero, so a
+misspelled command cannot consume quota. The requested ticker count must fit
+inside the budget or the script makes no market request. A failed attempt is
+recorded only as a safe diagnostic and never deletes a previously verified
+cache or its status row.
 
 The free price call returns at most the latest 100 raw, unadjusted sessions and
 is merged into the ignored local cache. Consequently EMA20/EMA50/RSI14 may be
@@ -137,11 +143,19 @@ rendered from a common contract while retaining each issuer's basis: AMAT
 Non-GAAP EPS, AVGO Non-GAAP operating margin, and QCOM GAAP EPS are never mixed.
 
 Alpha Vantage documents `SHARES_OUTSTANDING` and `EARNINGS_ESTIMATES` endpoints,
-but no ticker-level response or reuse eligibility has been validated in this
-branch. The screen therefore does not turn those documented capabilities into
-actual consensus, forward PER, or formal capitalization. Different displayed
-prices are compared only when trading date, regular-session/EOD basis, and
-adjustment policy match.
+but no ticker-level response, free-plan entitlement, or local-cache permission
+for those datasets has been validated in this branch. The screen therefore does
+not turn documented capabilities into actual consensus, forward PER, or formal
+capitalization. Different displayed prices are compared only when trading date,
+regular-session/EOD basis, and adjustment policy match.
+
+Official issuer evidence currently supplies point-in-time common shares for
+AMAT (793.597443 million at 2026-07-26) and MSFT (7,427 million at 2026-06-30).
+AMAT's local price is dated 2026-10-12, a 78-calendar-day mismatch, so the UI
+shows the resulting equity value and FCF yield only as time-mismatched research
+references. It does not promote either to formal market capitalization or a
+valuation signal. The other connected financial issuers remain unavailable for
+point-in-time common shares, including Alphabet's unresolved multi-class bridge.
 
 FinanceToolkit is not added because the displayed ratios are simpler and more
 auditable in the existing pure functions, while its provider/dependency layer

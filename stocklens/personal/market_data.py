@@ -96,11 +96,32 @@ class AlphaVantagePersonalClient:
 
     def collect_daily(self, ticker: str, data_dir: str | Path) -> MarketCollectionResult:
         symbol = ticker.upper().strip()
-        response = self._session.get(
-            self.endpoint,
-            params={"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": "compact", "apikey": self._api_key},
-            timeout=30,
-        )
+        try:
+            response = self._session.get(
+                self.endpoint,
+                params={"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": "compact", "apikey": self._api_key},
+                timeout=30,
+            )
+        except requests.exceptions.SSLError:
+            return MarketCollectionResult(
+                symbol, "blocked", 0, "Provider TLS validation failed; request details withheld",
+                diagnostic_code="tls_error", retryable=False,
+            )
+        except requests.exceptions.Timeout:
+            return MarketCollectionResult(
+                symbol, "blocked", 0, "Provider request timed out; request details withheld",
+                diagnostic_code="timeout", retryable=True,
+            )
+        except requests.exceptions.ConnectionError:
+            return MarketCollectionResult(
+                symbol, "blocked", 0, "Provider connection failed; DNS and connection details withheld",
+                diagnostic_code="network_connection_failed", retryable=True,
+            )
+        except requests.exceptions.RequestException:
+            return MarketCollectionResult(
+                symbol, "blocked", 0, "Provider request failed; request details withheld",
+                diagnostic_code="request_failed", retryable=False,
+            )
         if response.status_code != 200:
             code, retryable = _http_diagnostic(response.status_code)
             return MarketCollectionResult(

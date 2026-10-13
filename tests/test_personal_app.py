@@ -104,10 +104,13 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     metrics = {item.label: item.value for item in app.metric}
     assert metrics["검증 EOD 종가"] == "$499.00"
     assert metrics["대용 TTM FCF yield"] == "0.0%"
+    assert metrics["발행 보통주"] == "793.597M"
+    assert metrics["시점 불일치 주식가치 참고"] != "미확보"
     assert metrics["EMA20"] != "미확보"
     warnings = " ".join(item.value for item in app.warning)
     errors = " ".join(item.value for item in app.error)
     assert "연구 참고 전용" in warnings
+    assert "확정 시가총액" in warnings
     assert "운영 판단: hold" in errors
     assert "정식 적정가" in errors
 

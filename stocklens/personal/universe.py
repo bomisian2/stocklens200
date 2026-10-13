@@ -10,6 +10,16 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "share_count_evidence": {
+            "value_millions": 793.597443,
+            "kind": "common_stock_outstanding",
+            "as_of": "2026-07-26",
+            "published_at": "2026-08-20",
+            "source_url": "https://ir.appliedmaterials.com/node/29581/xbrl-viewer",
+            "source_label": "Applied Materials official IR XBRL Form 10-Q cover page",
+            "source_integrity": "official_read_only_unhashed",
+            "classes": "single listed common-stock class",
+        },
     },
     "AVGO": {
         "company": "Broadcom Inc.",
@@ -46,6 +56,16 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "share_count_evidence": {
+            "value_millions": 7427.0,
+            "kind": "common_stock_outstanding",
+            "as_of": "2026-06-30",
+            "published_at": "2026-07-29T16:05:00-04:00",
+            "source_url": "https://www.microsoft.com/en-us/Investor/earnings/FY-2026-Q4/press-release-webcast",
+            "source_label": "Microsoft official FY2026 Form 10-K financial statements",
+            "source_integrity": "official_hash_pinned_ir",
+            "classes": "common stock",
+        },
     },
     "MU": {
         "company": "Micron Technology, Inc.",

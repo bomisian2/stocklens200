@@ -318,6 +318,35 @@ if analysis:
             "해당 분기 희석 가중평균 주식수(기준일 현재 실제 발행주식 수 아님)"
         )
         st.error("대용 시가가치는 실제 기준일 발행주식 수로 계산한 확정 시가총액이 아닙니다.")
+        point_shares = references.get("point_in_time_share_evidence")
+        point_reference = references.get("point_in_time_equity_reference")
+        if point_shares:
+            st.markdown("**공식 기준일 발행주식 수 증거**")
+            share_cards = st.columns(3)
+            share_cards[0].metric("발행 보통주", f"{point_shares['value_millions']:,.3f}M")
+            share_cards[1].metric("주식 수 기준일", point_shares["as_of"])
+            share_cards[2].metric("증거 상태", point_shares["source_integrity"])
+            st.caption(
+                f"종류: {point_shares['kind']} · 공시: {point_shares['published_at']} · "
+                f"출처: {point_shares['source_label']}"
+            )
+            if point_reference and point_reference.get("status") == "time_mismatched_research_only":
+                point_cards = st.columns(2)
+                point_cards[0].metric(
+                    "시점 불일치 주식가치 참고",
+                    _money_millions(point_reference.get("equity_value_usd_millions")),
+                )
+                point_cards[1].metric(
+                    "시점 불일치 TTM FCF yield",
+                    _pct(point_reference.get("ttm_fcf_yield")),
+                )
+                st.warning(
+                    f"가격일 {point_reference['price_as_of']}과 주식 수 기준일 "
+                    f"{point_reference['shares_as_of']}이 {point_reference['date_gap_days']}일 차이입니다. "
+                    "따라서 확정 시가총액·정식 FCF yield로 사용하지 않습니다."
+                )
+            elif point_reference and point_reference.get("formal_market_cap_eligible"):
+                st.success("가격일과 주식 수 기준일이 일치하는 검증 참고치입니다.")
         with st.expander("연구용 계산식과 근거"):
             for label, formula in references.get("formulas", {}).items():
                 st.write(f"- {label}: `{formula}`")

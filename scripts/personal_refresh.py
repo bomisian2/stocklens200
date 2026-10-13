@@ -32,7 +32,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not download issuer files; normalize only hash-pinned files already in private_data/raw",
     )
+    parser.add_argument(
+        "--max-market-calls",
+        type=int,
+        default=0,
+        help="Explicit Alpha Vantage call budget. Zero makes market refresh read-only.",
+    )
     return parser.parse_args()
+
+
+def _merge_market_results(existing: list[dict], attempts: list[dict]) -> list[dict]:
+    """Merge attempts without erasing a previously verified local snapshot."""
+
+    by_ticker = {str(row.get("ticker", "")).upper(): dict(row) for row in existing if row.get("ticker")}
+    for attempt in attempts:
+        ticker = str(attempt.get("ticker", "")).upper()
+        prior = by_ticker.get(ticker)
+        if prior and prior.get("status") == "verified" and attempt.get("status") != "verified":
+            prior["last_attempt"] = attempt
+            prior["last_good_preserved"] = True
+            by_ticker[ticker] = prior
+        else:
+            by_ticker[ticker] = attempt
+    return [by_ticker[ticker] for ticker in sorted(by_ticker)]
 
 
 def main() -> int:
@@ -91,20 +113,42 @@ def main() -> int:
     status["registered_pilot_tickers"] = 10
     atomic_write_json(data_dir / "status.json", status)
     if args.market_tickers:
+        requested = list(dict.fromkeys(ticker.upper().strip() for ticker in args.market_tickers if ticker.strip()))
+        existing_market = status.get("market") if isinstance(status.get("market"), dict) else {}
+        existing_results = existing_market.get("results") if isinstance(existing_market.get("results"), list) else []
+        attempt_summary = {
+            "requested_tickers": requested,
+            "call_budget": args.max_market_calls,
+            "calls_made": 0,
+        }
         key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
-        if not key:
-            status["market"] = {
+        if args.max_market_calls < len(requested):
+            attempt_summary.update({
                 "status": "blocked",
-                "reason": "ALPHAVANTAGE_API_KEY is missing",
-                "tickers_verified": 0,
-            }
+                "reason": "Explicit call budget is smaller than the requested ticker count; no calls made",
+            })
+            status["market"] = {**existing_market, "last_attempt": attempt_summary}
+        elif not key:
+            attempt_summary.update({
+                "status": "blocked",
+                "reason": "ALPHAVANTAGE_API_KEY is missing; no calls made",
+            })
+            status["market"] = {**existing_market, "last_attempt": attempt_summary}
         else:
             client = AlphaVantagePersonalClient(key)
-            results = [client.collect_daily(ticker, data_dir) for ticker in args.market_tickers]
+            results = [client.collect_daily(ticker, data_dir) for ticker in requested]
+            attempts = [item.__dict__ for item in results]
+            merged = _merge_market_results(existing_results, attempts)
+            attempt_summary.update({
+                "status": "completed",
+                "calls_made": len(results),
+                "results": attempts,
+            })
             status["market"] = {
                 "status": "verified" if all(item.status == "verified" for item in results) else "partial",
-                "tickers_verified": sum(item.status == "verified" for item in results),
-                "results": [item.__dict__ for item in results],
+                "tickers_verified": sum(item.get("status") == "verified" for item in merged),
+                "results": merged,
+                "last_attempt": attempt_summary,
                 "scope": "local_personal_only",
                 "note": "Free TIME_SERIES_DAILY returns up to 100 raw sessions per call; repeated runs merge the ignored local cache.",
             }

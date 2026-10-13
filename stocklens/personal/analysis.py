@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -232,7 +233,7 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
 
 
 def _research_valuation_references(
-    financial: dict[str, Any], latest_price: float | None,
+    financial: dict[str, Any], latest_price: float | None, price_as_of: str | None = None,
 ) -> dict[str, Any]:
     """Build explicitly non-operational references from verified reported values.
 
@@ -263,6 +264,7 @@ def _research_valuation_references(
             "operational_eligible": False,
         }
     latest_document = _latest_document(financial)
+    share_evidence = PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("share_count_evidence")
     common = {
         "operational_eligible": False,
         "share_basis": "latest-quarter diluted weighted-average shares; not point-in-time shares outstanding",
@@ -274,6 +276,8 @@ def _research_valuation_references(
         "formal_market_cap": None,
         "formal_per": None,
         "fair_value": None,
+        "point_in_time_share_evidence": share_evidence,
+        "point_in_time_equity_reference": None,
     }
     if latest_price is None or latest_price <= 0:
         return {
@@ -283,9 +287,38 @@ def _research_valuation_references(
         }
     proxy_equity_value = latest_price * float(diluted_share_proxy)
     proxy_fcf_yield = float(ttm_fcf) / proxy_equity_value if ttm_fcf is not None else None
+    point_in_time_reference = None
+    if share_evidence and price_as_of:
+        try:
+            share_as_of = date.fromisoformat(str(share_evidence["as_of"]))
+            price_date = date.fromisoformat(str(price_as_of))
+            gap_days = abs((price_date - share_as_of).days)
+            point_equity_value = latest_price * float(share_evidence["value_millions"])
+            point_in_time_reference = {
+                "status": "date_aligned" if gap_days == 0 else "time_mismatched_research_only",
+                "price_as_of": price_as_of,
+                "shares_as_of": share_evidence["as_of"],
+                "date_gap_days": gap_days,
+                "equity_value_usd_millions": point_equity_value,
+                "ttm_fcf_yield": float(ttm_fcf) / point_equity_value if ttm_fcf is not None else None,
+                "formal_market_cap_eligible": gap_days == 0,
+                "formula": "verified EOD close × official point-in-time common shares outstanding",
+                "warning": (
+                    None
+                    if gap_days == 0
+                    else "가격일과 발행주식 수 기준일이 달라 정식 시가총액이 아닌 연구용 시점 불일치 참고치"
+                ),
+            }
+        except (KeyError, TypeError, ValueError):
+            point_in_time_reference = {
+                "status": "invalid_evidence",
+                "formal_market_cap_eligible": False,
+                "warning": "발행주식 수 또는 가격 기준일을 검증할 수 없음",
+            }
     return {
         **common,
         "status": "research_only",
+        "point_in_time_equity_reference": point_in_time_reference,
         "proxy_equity_value_usd_millions": proxy_equity_value,
         "proxy_ttm_fcf_yield": proxy_fcf_yield,
         "fy_gaap_eps_reference_multiple": latest_price / float(fy_eps) if fy_eps else None,
@@ -411,7 +444,7 @@ def compute_personal_analysis(
     if not market_frame.empty and "close" in market_frame:
         candidate = pd.to_numeric(market_frame["close"], errors="coerce").dropna()
         latest_price = float(candidate.iloc[-1]) if not candidate.empty else None
-    valuation_references = _research_valuation_references(financial, latest_price)
+    valuation_references = _research_valuation_references(financial, latest_price, manifest.get("market_date"))
     technical_interpretation = _technical_interpretation(technical, relative)
     performance_label = "판단 부족"
     metrics = fundamental.get("metrics", {})
@@ -439,7 +472,10 @@ def compute_personal_analysis(
         "valuation_references": valuation_references,
         "future_estimates": {
             "status": "unavailable",
-            "reason": "No ticker-level analyst consensus was collected or validated",
+            "reason": (
+                "No ticker-level response was collected: a local API key is not configured, and free-plan "
+                "entitlement, cache rights, and response fields were not validated"
+            ),
             "documented_candidate": "Alpha Vantage EARNINGS_ESTIMATES",
             "candidate_scope": "annual/quarterly EPS and revenue estimates, analyst count, and revision history",
             "access_and_reuse_validated": False,

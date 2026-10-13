@@ -24,6 +24,7 @@ from stocklens.personal.market_data import (
     compute_technical_snapshot,
     diagnose_provider_payload,
 )
+from scripts.personal_refresh import _merge_market_results
 
 
 def test_ttm_uses_annual_plus_current_ytd_minus_prior_ytd_and_withholds_eps() -> None:
@@ -156,6 +157,34 @@ def test_blocked_market_call_preserves_prior_cache_and_does_not_store_provider_b
     assert (market_dir / "AVGO.csv").read_text(encoding="utf-8") == previous
 
 
+class TimeoutSession:
+    def get(self, *args, **kwargs):
+        import requests
+
+        raise requests.exceptions.Timeout("secret provider detail")
+
+
+def test_market_timeout_is_safely_classified_without_secret_detail(tmp_path) -> None:
+    result = AlphaVantagePersonalClient("not-persisted", session=TimeoutSession()).collect_daily("QCOM", tmp_path)
+
+    assert result.status == "blocked"
+    assert result.diagnostic_code == "timeout"
+    assert result.retryable is True
+    assert "secret provider detail" not in result.message
+
+
+def test_market_status_merge_preserves_last_good_snapshot() -> None:
+    merged = _merge_market_results(
+        [{"ticker": "AMAT", "status": "verified", "as_of": "2026-10-12"}],
+        [{"ticker": "AMAT", "status": "blocked", "diagnostic_code": "rate_limit"}],
+    )
+
+    assert merged[0]["status"] == "verified"
+    assert merged[0]["as_of"] == "2026-10-12"
+    assert merged[0]["last_good_preserved"] is True
+    assert merged[0]["last_attempt"]["diagnostic_code"] == "rate_limit"
+
+
 class HttpFailureResponse:
     status_code = 403
     content = b"withheld"
@@ -282,6 +311,12 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert "weighted-average" in references["share_basis"]
     assert references["formal_per"] is None
     assert references["fair_value"] is None
+    assert references["point_in_time_share_evidence"]["kind"] == "common_stock_outstanding"
+    point_reference = references["point_in_time_equity_reference"]
+    assert point_reference["status"] == "time_mismatched_research_only"
+    assert point_reference["formal_market_cap_eligible"] is False
+    assert point_reference["equity_value_usd_millions"] == 499.0 * 793.597443
+    assert point_reference["date_gap_days"] > 0
     assert references["reverse_dcf"]["status"] == "underdetermined"
     assert result["signal_research"]["independent_validated_strategies"] == 0
     assert result["decision"] == {
