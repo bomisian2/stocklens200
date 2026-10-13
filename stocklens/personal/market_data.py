@@ -49,7 +49,7 @@ def diagnose_provider_payload(payload: dict[str, Any]) -> tuple[str, bool, str |
     return "daily_series_missing", False, provider_field
 
 
-def _http_diagnostic(status_code: int) -> tuple[str, bool]:
+def diagnose_http_status(status_code: int) -> tuple[str, bool]:
     if status_code == 429:
         return "rate_limit", True
     if status_code in {401, 403}:
@@ -123,7 +123,7 @@ class AlphaVantagePersonalClient:
                 diagnostic_code="request_failed", retryable=False,
             )
         if response.status_code != 200:
-            code, retryable = _http_diagnostic(response.status_code)
+            code, retryable = diagnose_http_status(response.status_code)
             return MarketCollectionResult(
                 symbol,
                 "blocked",

@@ -27,6 +27,17 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "corporate_action_evidence": [
+            {
+                "type": "forward_split",
+                "ratio": 10.0,
+                "effective_date": "2024-07-12",
+                "split_adjusted_trading_date": "2024-07-15",
+                "source_url": "https://investors.broadcom.com/static-files/5b6d75ad-3f6f-4e5d-a2d6-cf9a517ab9f3",
+                "source_label": "Broadcom official Form 8-K",
+                "status": "verified_official",
+            }
+        ],
     },
     "QCOM": {
         "company": "QUALCOMM Incorporated",
@@ -34,6 +45,16 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "corporate_action_evidence": [
+            {
+                "type": "split_history",
+                "latest_effective_date": "2004-08-16",
+                "latest_ratio": 2.0,
+                "source_url": "https://investor.qualcomm.com/about/faq/default.aspx",
+                "source_label": "Qualcomm official investor FAQ",
+                "status": "verified_official",
+            }
+        ],
     },
     "GOOGL": {
         "company": "Alphabet Inc.",
@@ -41,6 +62,22 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "share_classes": {
+            "listed": ["Class A (GOOGL)", "Class C (GOOG)"],
+            "unlisted": ["Class B super-voting"],
+            "formal_market_cap_policy": "aggregate all outstanding classes; do not multiply GOOGL price by one-class shares",
+        },
+        "corporate_action_evidence": [
+            {
+                "type": "forward_split",
+                "ratio": 20.0,
+                "effective_date": "2022-07-15",
+                "classes_affected": ["Class A", "Class B", "Class C"],
+                "source_url": "https://abc.xyz/assets/e1/31/38e9bf5540a2bf9a90221b96aa95/2022-alphabet-annual-report.pdf",
+                "source_label": "Alphabet 2022 official annual report",
+                "status": "verified_official",
+            }
+        ],
     },
     "NVDA": {
         "company": "NVIDIA Corporation",
@@ -49,6 +86,17 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "currency": "USD",
         "financial_source_state": "partial",
         "financial_source_reason": "공식 10-Q의 최근 분기·반기만 확보; FY2026 원문 미연결로 TTM 미산출",
+        "corporate_action_evidence": [
+            {
+                "type": "forward_split",
+                "ratio": 10.0,
+                "effective_date": "2024-06-07",
+                "split_adjusted_trading_date": "2024-06-10",
+                "source_url": "https://investor.nvidia.com/news/press-release-details/2024/NVIDIA-Announces-Financial-Results-for-First-Quarter-Fiscal-2025/",
+                "source_label": "NVIDIA official investor release",
+                "status": "verified_official",
+            }
+        ],
     },
     "MSFT": {
         "company": "Microsoft Corporation",
@@ -81,6 +129,16 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "corporate_action_evidence": [
+            {
+                "type": "split_history",
+                "latest_effective_date": "2000-08-21",
+                "latest_ratio": 2.0,
+                "source_url": "https://ir.amd.com/stock-data/stock-split-history",
+                "source_label": "AMD official split history",
+                "status": "verified_official",
+            }
+        ],
     },
     "TSM": {
         "company": "Taiwan Semiconductor Manufacturing Company Limited",
@@ -89,6 +147,15 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "currency": "TWD",
         "financial_source_state": "blocked",
         "financial_source_reason": "공식 IR PDF가 HTTP 403; TIFRS·TWD·ADR을 US GAAP/USD로 강제 변환하지 않음",
+        "adr_evidence": {
+            "ads_to_common_share_ratio": 5.0,
+            "meaning": "one NYSE-listed ADS represents five TSMC common shares",
+            "as_of_document": "2025 annual report",
+            "source_url": "https://investor.tsmc.com/sites/ir/annual-report/2025/2025%20Annual%20Report.E.pdf",
+            "source_label": "TSMC official 2025 annual report",
+            "status": "verified_official",
+            "formal_market_cap_policy": "convert common shares to ADS-equivalent or use total equity consistently; never mix TWD common-share counts with USD ADS price",
+        },
     },
     "LRCX": {
         "company": "Lam Research Corporation",
@@ -96,6 +163,17 @@ PERSONAL_PILOT_UNIVERSE: dict[str, dict[str, Any]] = {
         "accounting_standard": "US GAAP",
         "currency": "USD",
         "financial_source_state": "verified",
+        "corporate_action_evidence": [
+            {
+                "type": "forward_split",
+                "ratio": 10.0,
+                "effective_date": "2024-10-02",
+                "split_adjusted_trading_date": "2024-10-03",
+                "source_url": "https://investor.lamresearch.com/faqs",
+                "source_label": "Lam Research official investor FAQ",
+                "status": "verified_official",
+            }
+        ],
     },
 }
 

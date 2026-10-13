@@ -7,7 +7,8 @@ feature or keeps the data local and marks redistribution as unauthorized.
 | Source | Official policy / source | Local personal automation decision | Free-scale consequence |
 |---|---|---|---|
 | Yahoo Finance / yfinance | [Yahoo Terms](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html) prohibit automated data collection without express prior permission | Disabled in the personal pipeline; existing public code is not reused | No compliant automatic path established |
-| Alpha Vantage | [Terms](https://www.alphavantage.co/terms_of_service/) grant personal, non-commercial device use; [support](https://www.alphavantage.co/support/) states 25 free requests/day and that real-time/15-minute US data is premium; [documentation](https://www.alphavantage.co/documentation/) limits free `TIME_SERIES_DAILY` to `compact` (latest 100 points), while `full` and adjusted daily history are premium | Optional user-key raw EOD adapter; local cache only; no redistribution claim; repeated calls merge new rows | Three pilot symbols plus QQQ fit within a day, but an initial free call cannot produce EMA200 or a 252-session drawdown; 200 symbols cannot refresh daily at 25 requests/day |
+| Alpha Vantage | [Terms](https://www.alphavantage.co/terms_of_service/) grant personal, non-commercial device use; [support](https://www.alphavantage.co/support/) states 25 free requests/day and that real-time/15-minute US data is premium; [documentation](https://www.alphavantage.co/documentation/) limits free `TIME_SERIES_DAILY` to `compact` (latest 100 points), while `full` and adjusted daily history are premium | Optional user-key raw EOD adapter; local cache only; no redistribution claim; repeated calls merge new rows | Ten pilot symbols plus QQQ require 11 daily calls, but an initial free call cannot produce EMA200 or a 252-session drawdown; 200 symbols cannot refresh daily at 25 requests/day |
+| FMP | [Personal pricing](https://site.financialmodelingprep.com/pricing-plans) currently lists a Basic plan with 250 calls/day, EOD history, and profile/reference data; [analyst-estimate documentation](https://site.financialmodelingprep.com/developer/docs) exposes EPS/revenue ranges and analyst counts but labels endpoint parameters `Limited Access`; the pricing page says display/redistribution needs a separate agreement | Candidate only. No FMP key, ticker response, endpoint entitlement, revision snapshot, or explicit persistent-cache permission was validated on this PC; no adapter is enabled | Published call volume could cover 200 single-dataset requests, but access scope and storage rights remain blocking and are not inferred from HTTP success |
 | Tiingo | [Pricing](https://www.tiingo.com/about/pricing) lists a free Starter plan with 500 symbols/month, 50 requests/hour, and 1,000/day; [terms](https://app.tiingo.com/tos) restrict persistent storage/archive on free access | Rejected for this local persistent-cache design; transient throughput does not cure the storage restriction | Call capacity could cover the pilot, but the free storage condition is incompatible |
 | Twelve Data | [Pricing](https://twelvedata.com/pricing) lists Basic at 8 credits/minute and 800/day for internal non-display use; [terms](https://twelvedata.com/terms) make storage/display rights tier-dependent | Not adopted: local dashboard display/cache scope and free EOD entitlement are not sufficiently established | Nominal daily call capacity could cover 200, but rights and dataset scope remain blocking |
 | Marketstack | [Product site](https://marketstack.com/) lists 100 free requests/month; [documentation](https://marketstack.com/documentation) says each symbol consumes a request even in a multi-symbol query | Not adopted; persistent local/derived display rights were not established | 10 daily symbols exhaust 100 calls in about ten sessions; 50/200 daily are infeasible |
@@ -26,6 +27,14 @@ feature or keeps the data local and marks redistribution as unauthorized.
   it real-time, and does not authorize public display. The free adapter requests
   `outputsize=compact`; it does not pretend that premium full/adjusted history is
   available.
+- Alpha Vantage documents `EARNINGS_ESTIMATES` as annual and quarterly EPS/revenue
+  estimates with analyst counts and revisions. The new adapter is disabled unless
+  the user supplies the process-only key and an explicit estimate-call budget.
+  Even a successful response remains `research_only`: provider snapshot time,
+  historical point-in-time reproducibility, and free entitlement must be proven.
+- FMP Basic and analyst-estimate documentation were reviewed, but `Limited Access`
+  markers and absent local-cache permission prevent adoption. No FMP network call
+  was made and no FMP result is counted.
 - Official point-in-time common shares are verified for AMAT and MSFT only.
   AMAT's share date and local price date differ by 78 days, so the derived equity
   value remains a time-mismatched research reference rather than formal market
@@ -45,9 +54,39 @@ claimed to be the same exhaustive raw-table audit. This is not a universal
 200-company collector. A 200-company implementation needs a common licensed
 market source and a scalable official filing source. Under the current free Alpha Vantage limit,
 one EOD request per company requires at least eight quota days for a full sweep;
-adding QQQ or forecasts makes daily Top-200 refresh infeasible. Ten daily price
-calls fit, while ten price plus ten forecast calls would consume 20 of 25 calls;
+adding QQQ or forecasts makes daily Top-200 refresh infeasible. Ten company price
+calls plus QQQ fit, while those 11 calls plus ten forecast calls would consume 21 of 25 calls;
 50 and 200 do not fit. Monthly cost can remain zero for the ten-company research
 shell, but daily 200-company automation is not
 proven. Corporate actions also make raw-price long-horizon backtests unsuitable
 until an adjusted-data source is licensed.
+
+For the ten-company pilot, the deterministic plan is 10 company price calls plus
+QQQ (11 calls) after a completed US session. Ten estimate calls may run weekly
+only after ticker-level access is validated. A combined validation day would use
+21 calls and leave four calls unused; automatic retries are zero. This arithmetic
+does not account for other calls made from the same Alpha Vantage account, so the
+user must still approve each runtime budget.
+
+## Official security-structure evidence
+
+The shared company registry records official, non-price evidence needed before
+long-horizon ratios can be trusted:
+
+- Broadcom: official Form 8-K, 10-for-1 split effective 2024-07-12; adjusted
+  trading began 2024-07-15.
+- NVIDIA: official investor release, 10-for-1 split effective 2024-06-07;
+  adjusted trading began 2024-06-10.
+- Alphabet: official 2022 annual report, 20-for-1 split across Classes A/B/C;
+  market capitalization must aggregate all outstanding classes.
+- Lam Research: official investor FAQ, 10-for-1 split effective 2024-10-02;
+  adjusted trading began 2024-10-03.
+- Qualcomm and AMD: official investor split histories; their latest splits were
+  2004 and 2000 respectively.
+- TSMC: official 2025 annual report says one NYSE ADS represents five common
+  shares. USD ADS price must not be multiplied directly by the TWD common-share
+  count without this conversion.
+
+These facts do not make the raw Alpha Vantage series adjusted. They are audit
+metadata and a reason to block incompatible calculations, not adjustment factors
+silently applied by StockLens.

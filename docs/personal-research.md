@@ -47,6 +47,41 @@ finally {
 The key is read only from the process environment. Do not put it in source,
 command history shared with others, screenshots, or Git.
 
+Inspect the ten-company request plan without making a network call or changing
+local data:
+
+```powershell
+.\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --print-call-plan
+```
+
+The current plan is 11 daily EOD calls (ten companies plus QQQ) and, only after
+access validation, 10 weekly estimate calls. The combined validation-day maximum
+is 21 of the published 25 calls; four calls remain unused and the code performs
+no automatic retry.
+
+To validate analyst estimates later, the user must explicitly approve the call
+budget and set the key only in the current process. For one AMAT validation call:
+
+```powershell
+$secureKey = Read-Host "Alpha Vantage API key" -AsSecureString
+$keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+try {
+    $env:ALPHAVANTAGE_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr)
+    .\.venv-personal\Scripts\python.exe scripts\personal_refresh.py --data-dir private_data --saved-only --estimate-tickers AMAT --max-estimate-calls 1
+}
+finally {
+    Remove-Item Env:ALPHAVANTAGE_API_KEY -ErrorAction SilentlyContinue
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPtr)
+    Remove-Variable secureKey, keyPtr -ErrorAction SilentlyContinue
+}
+```
+
+This command is an example, not authorization to run it. A successful payload is
+stored only below ignored `private_data/estimates/`, with raw SHA-256 and without
+the key or full request URL. It remains `research_only`; company guidance stays
+separate, and the provider collection time is not relabeled as the consensus
+formation time.
+
 `--max-market-calls` is an explicit one-run budget. Its default is zero, so a
 misspelled command cannot consume quota. The requested ticker count must fit
 inside the budget or the script makes no market request. A failed attempt is

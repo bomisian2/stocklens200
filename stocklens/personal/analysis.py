@@ -429,11 +429,69 @@ def _technical_interpretation(technical: dict[str, Any], relative: dict[str, Any
     return {"label": label, "reason": reason, "signal": False}
 
 
+def _future_estimate_references(
+    estimates: dict[str, Any] | None,
+    latest_price: float | None,
+    price_date: str | None,
+) -> dict[str, Any]:
+    if not estimates:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "No ticker-level response was collected: a local API key is not configured, and free-plan "
+                "entitlement, cache rights, and response fields were not validated"
+            ),
+            "documented_candidate": "Alpha Vantage EARNINGS_ESTIMATES",
+            "candidate_scope": "annual/quarterly EPS and revenue estimates, analyst count, and revision history",
+            "access_and_reuse_validated": False,
+            "source_url": "https://www.alphavantage.co/documentation/#earnings-estimates",
+            "operational_eligible": False,
+        }
+    periods = estimates.get("periods") if isinstance(estimates.get("periods"), list) else []
+    annual = sorted(
+        (row for row in periods if row.get("frequency") == "annual"),
+        key=lambda row: str(row.get("fiscal_date_ending", "")),
+    )
+    eligible_annual = [
+        row
+        for row in annual
+        if row.get("eps", {}).get("average") is not None
+        and (row.get("eps", {}).get("analyst_count") or 0) > 0
+    ]
+    next_annual = next(
+        (row for row in eligible_annual if price_date and str(row.get("fiscal_date_ending", "")) >= price_date),
+        None,
+    )
+    forward_per = None
+    if latest_price is not None and next_annual:
+        eps_average = float(next_annual["eps"]["average"])
+        if eps_average > 0:
+            forward_per = latest_price / eps_average
+    return {
+        "status": "research_only",
+        "provider": estimates.get("provider"),
+        "dataset": estimates.get("dataset"),
+        "collected_at_utc": estimates.get("collected_at_utc"),
+        "provider_snapshot_time": estimates.get("provider_snapshot_time"),
+        "provider_snapshot_time_status": estimates.get("provider_snapshot_time_status"),
+        "periods": periods,
+        "period_count": len(periods),
+        "next_annual": next_annual,
+        "forward_per_reference": forward_per,
+        "formula": "verified local EOD close / analyst-consensus average EPS for the selected annual fiscal period",
+        "issuer_guidance_mixed": False,
+        "operational_eligible": False,
+        "reason": "Consensus snapshot timing and historical revision reproducibility are not sufficient for an operating valuation",
+        "source": estimates.get("source", {}),
+    }
+
+
 def compute_personal_analysis(
     financial: dict[str, Any],
     market: pd.DataFrame | None = None,
     benchmark: pd.DataFrame | None = None,
     market_manifest: dict[str, Any] | None = None,
+    estimates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fundamental = compute_fundamental_indicators(financial)
     market_frame = market if market is not None else pd.DataFrame()
@@ -445,6 +503,7 @@ def compute_personal_analysis(
         candidate = pd.to_numeric(market_frame["close"], errors="coerce").dropna()
         latest_price = float(candidate.iloc[-1]) if not candidate.empty else None
     valuation_references = _research_valuation_references(financial, latest_price, manifest.get("market_date"))
+    future_estimates = _future_estimate_references(estimates, latest_price, manifest.get("market_date"))
     technical_interpretation = _technical_interpretation(technical, relative)
     performance_label = "판단 부족"
     metrics = fundamental.get("metrics", {})
@@ -470,16 +529,12 @@ def compute_personal_analysis(
         "technical": technical,
         "relative_strength": relative,
         "valuation_references": valuation_references,
-        "future_estimates": {
-            "status": "unavailable",
-            "reason": (
-                "No ticker-level response was collected: a local API key is not configured, and free-plan "
-                "entitlement, cache rights, and response fields were not validated"
-            ),
-            "documented_candidate": "Alpha Vantage EARNINGS_ESTIMATES",
-            "candidate_scope": "annual/quarterly EPS and revenue estimates, analyst count, and revision history",
-            "access_and_reuse_validated": False,
-            "source_url": "https://www.alphavantage.co/documentation/#earnings-estimates",
+        "future_estimates": future_estimates,
+        "security_structure": {
+            "point_in_time_share_evidence": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("share_count_evidence"),
+            "share_classes": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("share_classes"),
+            "adr_evidence": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("adr_evidence"),
+            "corporate_actions": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("corporate_action_evidence", []),
         },
         "practical_summary": practical_summary,
         "interpretation": {

@@ -24,7 +24,9 @@ from stocklens.personal.market_data import (
     compute_technical_snapshot,
     diagnose_provider_payload,
 )
-from scripts.personal_refresh import _merge_market_results
+from stocklens.personal.estimates import AlphaVantageEstimatesClient, normalize_alpha_vantage_estimates
+from stocklens.personal.planning import build_alpha_vantage_call_plan
+from scripts.personal_refresh import _merge_estimate_results, _merge_market_results
 
 
 def test_ttm_uses_annual_plus_current_ytd_minus_prior_ytd_and_withholds_eps() -> None:
@@ -183,6 +185,178 @@ def test_market_status_merge_preserves_last_good_snapshot() -> None:
     assert merged[0]["as_of"] == "2026-10-12"
     assert merged[0]["last_good_preserved"] is True
     assert merged[0]["last_attempt"]["diagnostic_code"] == "rate_limit"
+
+
+def test_ten_company_call_plan_fits_prices_and_weekly_estimates_without_retries() -> None:
+    plan = build_alpha_vantage_call_plan((*pilot_tickers(), "QQQ"), pilot_tickers())
+
+    assert plan["market"]["calls"] == 11
+    assert plan["estimates"]["calls"] == 10
+    assert plan["total_calls_if_all_enabled"] == 21
+    assert plan["reserve_calls"] == 4
+    assert plan["within_published_limit"] is True
+    assert plan["automatic_retries"] == 0
+    assert plan["estimates"]["enabled"] is False
+
+
+def _estimate_payload() -> dict:
+    return {
+        "symbol": "AMAT",
+        "annualEarnings": [
+            {
+                "fiscalDateEnding": "2027-10-31",
+                "horizon": "12month",
+                "eps_estimate_average": "10.50",
+                "eps_estimate_low": "9.00",
+                "eps_estimate_high": "12.00",
+                "eps_estimate_analyst_count": "22",
+                "revenue_estimate_average": "34000000000",
+                "revenue_estimate_low": "32000000000",
+                "revenue_estimate_high": "36000000000",
+                "revenue_estimate_analyst_count": "18",
+                "eps_estimate_revision_up_trailing_7_days": "2",
+            }
+        ],
+        "quarterlyEarnings": [
+            {
+                "fiscalDateEnding": "2027-01-31",
+                "eps_estimate_average": "2.10",
+                "eps_estimate_analyst_count": "20",
+                "revenue_estimate_average": "8000000000",
+                "revenue_estimate_analyst_count": "17",
+            }
+        ],
+    }
+
+
+def test_estimate_normalization_keeps_consensus_separate_and_non_operational() -> None:
+    result = normalize_alpha_vantage_estimates(
+        _estimate_payload(), ticker="AMAT", collected_at_utc="2026-10-13T00:00:00+00:00"
+    )
+
+    assert result["data_kind"] == "analyst_consensus"
+    assert result["issuer_guidance_mixed"] is False
+    assert result["provider_snapshot_time"] is None
+    assert result["operational_eligible"] is False
+    assert len(result["periods"]) == 2
+    assert result["periods"][0]["eps"]["analyst_count"] == 22
+
+
+class EstimateResponse:
+    status_code = 200
+
+    def json(self):
+        return _estimate_payload()
+
+
+class EstimateSession:
+    def __init__(self) -> None:
+        self.params = None
+
+    def get(self, *args, **kwargs):
+        self.params = kwargs["params"]
+        return EstimateResponse()
+
+
+class MissingEstimateResponse:
+    status_code = 200
+
+    def json(self):
+        return {"Information": "Dataset is unavailable for this request"}
+
+
+class MissingEstimateSession:
+    def get(self, *args, **kwargs):
+        return MissingEstimateResponse()
+
+
+def test_estimate_client_writes_only_ignored_local_contract_without_key(tmp_path) -> None:
+    session = EstimateSession()
+    result = AlphaVantageEstimatesClient(
+        "estimate-secret", session=session, now=datetime(2026, 10, 13, tzinfo=timezone.utc)
+    ).collect("amat", tmp_path)
+
+    assert result.status == "research_only"
+    assert result.periods == 2
+    raw = (tmp_path / "estimates" / "raw" / "AMAT.json").read_text(encoding="utf-8")
+    normalized = (tmp_path / "estimates" / "normalized" / "AMAT.json").read_text(encoding="utf-8")
+    assert "estimate-secret" not in raw + normalized
+    saved = json.loads(normalized)
+    assert saved["source"]["redistribution_authorized"] is False
+    assert saved["operational_eligible"] is False
+    assert session.params["function"] == "EARNINGS_ESTIMATES"
+
+
+def test_estimate_client_uses_dataset_specific_missing_diagnostic(tmp_path) -> None:
+    result = AlphaVantageEstimatesClient("estimate-secret", session=MissingEstimateSession()).collect("AMAT", tmp_path)
+
+    assert result.status == "blocked"
+    assert result.diagnostic_code == "estimate_periods_missing"
+    assert not (tmp_path / "estimates").exists()
+
+
+def test_estimate_status_merge_preserves_last_good_local_snapshot() -> None:
+    merged = _merge_estimate_results(
+        [{"ticker": "AMAT", "status": "research_only", "periods": 2}],
+        [{"ticker": "AMAT", "status": "blocked", "diagnostic_code": "rate_limit"}],
+    )
+
+    assert merged[0]["status"] == "research_only"
+    assert merged[0]["last_good_preserved"] is True
+    assert merged[0]["last_attempt"]["diagnostic_code"] == "rate_limit"
+
+
+def test_actual_consensus_contract_can_compute_only_research_forward_per() -> None:
+    financial = {
+        "ticker": "AMAT", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 8.0}},
+            {"kind": "quarter", "label": "Q3 FY2026", "period_end": "2026-07-26", "metrics": {"diluted_shares": 800.0}},
+            {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+        ],
+        "balance_sheet": {"cash_and_equivalents": 1.0, "short_term_debt": 0.0, "long_term_debt": 0.0},
+        "guidance": {}, "documents": [],
+    }
+    market = pd.DataFrame({"date": ["2026-10-12"] * 50, "close": [100.0] * 50})
+    estimates = normalize_alpha_vantage_estimates(
+        _estimate_payload(), ticker="AMAT", collected_at_utc="2026-10-13T00:00:00+00:00"
+    )
+
+    result = compute_personal_analysis(financial, market, market, {"market_date": "2026-10-12"}, estimates)
+
+    assert result["future_estimates"]["status"] == "research_only"
+    assert round(result["future_estimates"]["forward_per_reference"], 4) == round(100 / 10.5, 4)
+    assert result["future_estimates"]["operational_eligible"] is False
+    assert result["decision"]["is_buy_signal"] is False
+
+
+def test_past_consensus_period_is_not_used_as_forward_per() -> None:
+    financial = {
+        "ticker": "AMAT", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 8.0}},
+            {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+        ],
+        "balance_sheet": {}, "guidance": {}, "documents": [],
+    }
+    market = pd.DataFrame({"date": ["2026-10-12"], "close": [100.0]})
+    payload = _estimate_payload()
+    payload["annualEarnings"][0]["fiscalDateEnding"] = "2025-10-31"
+    estimates = normalize_alpha_vantage_estimates(
+        payload, ticker="AMAT", collected_at_utc="2026-10-13T00:00:00+00:00"
+    )
+
+    result = compute_personal_analysis(financial, market, None, {"market_date": "2026-10-12"}, estimates)
+
+    assert result["future_estimates"]["next_annual"] is None
+    assert result["future_estimates"]["forward_per_reference"] is None
+
+
+def test_official_security_structure_evidence_covers_splits_classes_and_adr_ratio() -> None:
+    assert PERSONAL_PILOT_UNIVERSE["AVGO"]["corporate_action_evidence"][0]["ratio"] == 10.0
+    assert PERSONAL_PILOT_UNIVERSE["NVDA"]["corporate_action_evidence"][0]["split_adjusted_trading_date"] == "2024-06-10"
+    assert "Class B super-voting" in PERSONAL_PILOT_UNIVERSE["GOOGL"]["share_classes"]["unlisted"]
+    assert PERSONAL_PILOT_UNIVERSE["TSM"]["adr_evidence"]["ads_to_common_share_ratio"] == 5.0
 
 
 class HttpFailureResponse:

@@ -186,13 +186,15 @@ if not financial:
 
 market_path = DATA_DIR / "market" / f"{ticker}.csv"
 manifest_path = DATA_DIR / "market" / f"{ticker}.manifest.json"
+estimates_path = DATA_DIR / "estimates" / "normalized" / f"{ticker}.json"
 qqq_path = DATA_DIR / "market" / "QQQ.csv"
 market = load_market(str(market_path), _mtime(market_path))
 qqq = load_market(str(qqq_path), _mtime(qqq_path))
 manifest = load_json(str(manifest_path), _mtime(manifest_path)) or {}
+estimates_snapshot = load_json(str(estimates_path), _mtime(estimates_path))
 
 can_analyze = ticker in COMPANY_PROFILES and any(row.get("kind") == "ttm" for row in financial.get("periods", []))
-analysis = compute_personal_analysis(financial, market, qqq, manifest) if can_analyze else None
+analysis = compute_personal_analysis(financial, market, qqq, manifest, estimates_snapshot) if can_analyze else None
 
 st.header(f"{financial['company']} ({ticker})")
 st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수집: {financial['collected_at_utc']}")
@@ -361,10 +363,25 @@ if analysis:
                 f"{references['diluted_share_proxy_millions']:,.0f}M은 확보했지만 가격이 없어 대용 시가가치를 계산하지 않았습니다."
             )
     estimates = analysis["future_estimates"]
-    st.caption(
-        "미래 EPS 컨센서스: 미확보 · Alpha Vantage에 관련 엔드포인트는 문서화되어 있으나 "
-        "종목별 실제 응답·이용 범위·재현성을 검증하지 않아 미래 PER을 계산하지 않음"
-    )
+    if estimates.get("status") == "research_only":
+        st.warning("애널리스트 컨센서스 연구 참고 전용 · 회사 공식 가이던스와 혼합하지 않음")
+        estimate_cards = st.columns(3)
+        estimate_cards[0].metric("컨센서스 기간 수", estimates.get("period_count", 0))
+        next_annual = estimates.get("next_annual") or {}
+        estimate_cards[1].metric("다음 연간 기준", next_annual.get("fiscal_date_ending", "미확보"))
+        estimate_cards[2].metric(
+            "미래 PER 참고",
+            f"{estimates['forward_per_reference']:.1f}배" if estimates.get("forward_per_reference") is not None else "미확보",
+        )
+        st.caption(
+            f"수집시각 {estimates.get('collected_at_utc', '미확보')} · 공급자 스냅샷 시각 "
+            f"{estimates.get('provider_snapshot_time_status', '미확보')} · 운영 자격 false"
+        )
+    else:
+        st.caption(
+            "미래 EPS 컨센서스: 미확보 · Alpha Vantage에 관련 엔드포인트는 문서화되어 있으나 "
+            "종목별 실제 응답·이용 범위·재현성을 검증하지 않아 미래 PER을 계산하지 않음"
+        )
 else:
     st.info("가치 참고 지표 계약을 적용할 수 없습니다.")
 
