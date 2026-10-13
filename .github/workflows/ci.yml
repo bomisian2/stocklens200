@@ -21,8 +21,10 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt -r requirements-personal.txt
       - name: Run unit and Streamlit smoke tests
         run: python -m pytest -q
-      - name: Validate committed Top-200 snapshot
-        run: python scripts/validate_snapshot.py --strict
+      - name: Validate committed Top-200 snapshot integrity
+        # A committed snapshot is a reproducible historical artifact. Current
+        # market-session freshness is enforced by the separate live job below.
+        run: python scripts/validate_snapshot.py
 
   live-collection:
     # A temporary runner directory has no last-good cache. The job therefore

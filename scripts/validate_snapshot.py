@@ -14,6 +14,31 @@ from stocklens.market_calendar import latest_completed_session
 from stocklens.storage import SnapshotStore
 
 
+def validate_snapshot_integrity(report: dict) -> None:
+    """Validate the stored artifact without pretending it is current today."""
+
+    metrics = report["quality"]
+    if report["company_count"] != 200:
+        raise SystemExit("snapshot must contain exactly 200 companies")
+    if report["data_state"] != "healthy":
+        raise SystemExit("snapshot was not healthy when it was stored")
+    if report["freshness_state"] != "verified":
+        raise SystemExit("snapshot market session was not verified when stored")
+    if not report["market_session_date"]:
+        raise SystemExit("snapshot market session date is missing")
+    if not (report.get("cross_validation") or {}).get("passed"):
+        raise SystemExit("independent-source cross-validation did not pass")
+    if metrics["sector_coverage"] < 0.80 or metrics["country_coverage"] < 0.80:
+        raise SystemExit("metadata coverage is below 80%")
+
+
+def validate_current_freshness(report: dict) -> None:
+    """Require the snapshot to match the actual latest completed session."""
+
+    if report["market_session_date"] != report["expected_session_date"]:
+        raise SystemExit("snapshot does not represent the latest completed market session")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a stored StockLens universe snapshot")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
@@ -35,15 +60,9 @@ def main() -> int:
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
+    validate_snapshot_integrity(report)
     if args.strict:
-        if status.get("freshness_state") != "verified":
-            raise SystemExit("snapshot freshness is not verified")
-        if status.get("market_session_date") != report["expected_session_date"]:
-            raise SystemExit("snapshot does not represent the latest completed market session")
-        if not (status.get("cross_validation") or {}).get("passed"):
-            raise SystemExit("independent-source cross-validation did not pass")
-        if metrics["sector_coverage"] < 0.80 or metrics["country_coverage"] < 0.80:
-            raise SystemExit("metadata coverage is below 80%")
+        validate_current_freshness(report)
     return 0
 
 
