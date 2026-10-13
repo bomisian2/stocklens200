@@ -20,6 +20,8 @@ class MarketSession:
 @dataclass(frozen=True)
 class FreshnessAssessment:
     state: str
+    evaluated_at_utc: str
+    evaluation_phase: str
     expected_session_date: str
     observed_session_dates: tuple[str, ...]
     valid_time_count: int
@@ -74,9 +76,34 @@ def latest_completed_session(now: datetime) -> MarketSession:
     )
 
 
+def market_phase(now: datetime) -> str:
+    """Describe where *now* falls relative to the regular XNYS session.
+
+    This is diagnostic context only. It never relaxes the requirement that a
+    publishable snapshot represent the latest fully completed regular session.
+    """
+
+    current = _as_utc(now)
+    calendar = _xnys_calendar()
+    day = current.date().isoformat()
+    sessions = calendar.sessions_in_range(day, day)
+    if len(sessions) == 0:
+        return "non_session"
+    session = sessions[0]
+    opened = calendar.session_open(session).to_pydatetime().astimezone(timezone.utc)
+    closed = calendar.session_close(session).to_pydatetime().astimezone(timezone.utc)
+    if current < opened:
+        return "pre_open"
+    if current < closed:
+        return "regular_session"
+    return "post_close"
+
+
 def assess_market_times(values: Iterable[str | None], now: datetime) -> FreshnessAssessment:
     """Validate per-security market times against the latest completed US session."""
-    expected = latest_completed_session(now)
+    evaluated_at = _as_utc(now).replace(microsecond=0)
+    phase = market_phase(evaluated_at)
+    expected = latest_completed_session(evaluated_at)
     expected_open = datetime.fromisoformat(expected.open_utc)
     expected_close = datetime.fromisoformat(expected.close_utc)
     parsed: list[datetime] = []
@@ -107,7 +134,10 @@ def assess_market_times(values: Iterable[str | None], now: datetime) -> Freshnes
 
     if missing or invalid or not parsed:
         state = "unverified"
-        reason = "one or more market timestamps are missing or invalid"
+        reason = (
+            "market timestamps are missing or invalid "
+            f"(missing={missing}, invalid={invalid}, phase={phase})"
+        )
     elif len(observed_dates) != 1:
         state = "degraded"
         reason = "market timestamps span multiple UTC dates"
@@ -116,7 +146,10 @@ def assess_market_times(values: Iterable[str | None], now: datetime) -> Freshnes
         reason = "market timestamps precede the latest completed session"
     elif observed_dates[0] > expected.session_date:
         state = "unverified"
-        reason = "market timestamps are later than the expected completed session"
+        reason = (
+            "market timestamps are later than the expected completed session "
+            f"(expected={expected.session_date}, observed={observed_dates[0]}, phase={phase})"
+        )
     elif any(value < expected_open or value > expected_close + timedelta(minutes=15) for value in parsed):
         state = "degraded"
         reason = "market timestamps fall outside the expected regular-session window"
@@ -126,6 +159,8 @@ def assess_market_times(values: Iterable[str | None], now: datetime) -> Freshnes
 
     return FreshnessAssessment(
         state=state,
+        evaluated_at_utc=evaluated_at.isoformat(),
+        evaluation_phase=phase,
         expected_session_date=expected.session_date,
         observed_session_dates=observed_dates,
         valid_time_count=len(parsed),

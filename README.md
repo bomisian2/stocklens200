@@ -14,7 +14,7 @@
 - yfinance 호출은 60초 제한 subprocess에서 실행해 전체 작업이 무기한 멈추지 않게 합니다.
 - Streamlit은 외부 API를 호출하지 않고 저장 스냅샷만 읽습니다.
 - `exchange-calendars`의 XNYS 캘린더로 휴장일과 EDT/EST 정규장 마감 시각을 판정합니다.
-- GitHub Actions는 PR에서 읽기 권한으로 테스트하고, 예약 작업에서만 쓰기 권한으로 데이터를 갱신합니다.
+- GitHub Actions는 PR에서 외부 호출 없는 코드/AppTest와 저장 스냅샷 무결성을 각각 검사하고, 예약 작업에서만 쓰기 권한으로 데이터를 갱신합니다.
 
 23:15 UTC는 미국 동부 서머타임(EDT)에는 19:15, 표준시(EST)에는 18:15이므로 두 경우 모두 16:00 정규장 마감 이후입니다. 예약 작업 자체는 평일 휴장일에도 시작할 수 있지만, XNYS 캘린더가 최근 완료 거래 세션을 계산합니다. 거래 시각이 그 세션과 일치하지 않으면 `stale`, 시각을 검증할 수 없으면 `unverified`, 일부 시각·품질 문제가 있으면 `degraded`로 분류하고 신규 스냅샷을 게시하지 않습니다.
 
@@ -35,8 +35,10 @@ streamlit run app.py
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python scripts/validate_snapshot.py --strict
+python scripts/validate_snapshot.py
 ```
+
+`--strict`는 현재 최신 완료 시장 세션과 비교하는 라이브 운영 검사입니다. 과거에 정상 저장된 스냅샷의 재현성 검사와 혼동하지 않으며, PR의 오프라인 코드 검사에는 사용하지 않습니다.
 
 ## 데이터 파일
 
@@ -73,7 +75,7 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
                                                                   Streamlit 읽기 전용 표시
 ```
 
-하루 한 번 15분 제한의 단일 예약 작업과 작은 CSV/JSON만 사용합니다. PR CI는 `contents: read`, 예약 갱신 job만 `contents: write`입니다. API 키가 필요 없으며 `.streamlit/secrets.toml`은 Git에서 제외됩니다. 향후 키가 필요한 공급원을 추가할 때는 GitHub Actions Secrets와 Streamlit Secrets만 사용하고 값이나 응답 본문을 로그에 기록하지 않아야 합니다.
+하루 한 번 15분 제한의 단일 예약 작업과 작은 CSV/JSON만 사용합니다. PR CI는 `contents: read`이며 외부 공급원을 호출하지 않습니다. 신규 공급원 실수집 진단은 별도 수동 워크플로로 격리되어 있고, 운영자 확인과 `config/provider-rights.json`의 승인 상태를 모두 통과해야 네트워크 호출 단계에 진입합니다. 현재 권리 매니페스트는 Yahoo/Nasdaq의 공개 GitHub runner 자동 수집 권한이 미확정이므로 진단 호출을 차단합니다. 예약 갱신 job만 `contents: write`입니다. API 키가 필요 없으며 `.streamlit/secrets.toml`은 Git에서 제외됩니다. 향후 키가 필요한 공급원을 추가할 때는 GitHub Actions Secrets와 Streamlit Secrets만 사용하고 값이나 응답 본문을 로그에 기록하지 않아야 합니다.
 
 ## 다음 단계(아직 미완료)
 

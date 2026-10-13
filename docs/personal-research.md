@@ -229,6 +229,39 @@ history, and derived-analysis rights must be accepted and verified for the
 intended personal workflow. No subscription was purchased and no provider was
 called during this work.
 
+## PR CI and provider diagnostic separation
+
+PR validation is offline. `code-tests (offline)` runs unit tests and Streamlit
+AppTest, while `stored-snapshot-integrity (offline)` verifies that the committed
+historical Top-200 artifact was valid when stored. Neither job calls Yahoo,
+Nasdaq, Alpha Vantage, or another market-data provider.
+
+The former PR live job ran at 2026-10-13 15:28 UTC, during the regular XNYS
+session. Yahoo returned 2026-10-13 intraday timestamps while the latest completed
+session was still 2026-10-12; rejecting those values was correct. Nasdaq had no
+authoritative per-security market timestamp, so it remained `unverified`. A
+cache-free temporary runner therefore had no eligible snapshot to publish.
+
+Live provider diagnostics now use a separate manual workflow. The workflow logs
+its UTC evaluation time, XNYS phase, and latest completed session before
+collection. It has no schedule or pull-request trigger, performs no automatic
+retry beyond the existing bounded provider behavior, and cannot reach the
+network step until both operator confirmation and `config/provider-rights.json`
+allow it. The current manifest blocks the call because public-runner collection
+and redistribution rights remain unconfirmed.
+
+The locally retained AMAT evidence fixes 793.597443 million common shares at
+2026-07-26, but no later point-in-time issuer value is present before the
+2026-10-12 price date. The next eligible update path is a later official 10-Q or
+10-K cover-page count; a weighted-average income-statement denominator cannot
+fill that gap. Broadcom's retained earnings releases disclose the Q3 FY2026
+4,887 million diluted weighted-average denominator, not point-in-time common
+shares. AVGO therefore needs an official 10-Q/10-K cover-page count (or an
+equivalent issuer filing) before formal capitalization is possible. The tested
+free estimate response contained no usable forecast periods, so issuer guidance
+remains separate and analyst consensus stays unavailable; no paid consensus
+subscription was selected or purchased.
+
 FinanceToolkit is not added because the displayed ratios are simpler and more
 auditable in the existing pure functions, while its provider/dependency layer
 does not supply the missing evidence. QuantStats is not added because there is
