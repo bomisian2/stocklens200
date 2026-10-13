@@ -53,7 +53,14 @@ streamlit run app.py
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python scripts/validate_snapshot.py --strict
+python scripts/validate_snapshot.py --strict --require-current
+python scripts/check_deployment_readiness.py
 ```
+
+`--strict`는 저장 당시 스냅샷의 재현성·스키마·품질을 검사합니다. 현재 운영 시점에도
+최신이어야 하는 라이브 수집과 예약 갱신에는 `--require-current`를 함께 사용합니다.
+공개 배포 게이트는 최신성에 더해 `docs/market-data-rights.json`의 공개 표시·재배포 권한을
+검사하며, 권한이 확인되지 않은 현재 상태에서는 의도적으로 실패합니다.
 
 ## 데이터 파일
 

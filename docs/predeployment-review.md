@@ -52,3 +52,36 @@ covered by a confirmed redistribution grant.
 Technical readiness does not resolve this legal/licensing uncertainty. Public deployment remains
 blocked until written permission or a provider with explicit public-display and redistribution rights
 is selected. This is an engineering compliance finding, not legal advice.
+
+## 2026-10-13 follow-up
+
+The workflow page still showed `0 workflow runs`; no `schedule` event has been observed. Repository
+Actions are enabled, the default token setting is read-only, and the refresh job alone requests
+`contents: write`. No classic branch protection or ruleset blocks an Actions push. These facts rule
+out the visible permission and branch-rule causes, but do not establish why GitHub did not enqueue
+the scheduled event. GitHub documents that scheduled events run only from the default branch and
+may be delayed or dropped under load. A manual dispatch would not prove scheduled execution.
+
+Manual refresh was not run because it can commit a new Yahoo/Nasdaq-derived snapshot to `main` and
+thereby publish it through the existing Streamlit deployment while public-display rights remain
+unconfirmed. The immutable recovery baseline is `main` commit
+`4e7c1f10b065831abaacecd221742713bcc155e1`; its data blobs are:
+
+- `data/universe.csv`: `eb7b4ef3fdb54e9bacaf9640d9126929939f7718`
+- `data/status.json`: `f799732ae7fab8ff6f20dff31b748e8fd03e19e5`
+
+If a future approved refresh publishes bad data, create a recovery branch from the then-current
+`main`, restore only those two paths from the last verified data commit, validate them, and submit a
+recovery pull request. Do not reset or force-push `main`.
+
+PR validation is now separated into: (A) stored-snapshot integrity, which is independent of today's
+date; (B) live operational freshness, which requires the latest completed XNYS session; and (C) a
+fail-closed deployment gate requiring both current data and confirmed public-data rights. Scheduled
+and manually dispatched refresh logs record `github.event_name` so a manual success cannot be
+reported as a scheduled success.
+
+Because Nasdaq's published legal notice does not grant automated extraction for this use, the PR
+freshness job no longer performs an automatic Yahoo/Nasdaq collection. It reassesses the committed
+per-security timestamps against the current XNYS session. A provider call is not evidence of a data
+license, and a technically successful collection must not silently expand the permitted operating
+scope.
