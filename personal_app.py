@@ -10,6 +10,7 @@ import streamlit as st
 
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
 from stocklens.personal.market_data import compute_technical_snapshot
+from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
 
 
 DATA_DIR = Path(os.environ.get("STOCKLENS_PERSONAL_DATA_DIR", "private_data"))
@@ -86,7 +87,7 @@ market_results = {
     for row in status.get("market", {}).get("results", [])
 }
 market_summary_rows: list[dict[str, Any]] = []
-for market_ticker in ("AMAT", "AVGO", "QCOM", "QQQ"):
+for market_ticker in (*pilot_tickers(), "QQQ"):
     result = market_results.get(market_ticker, {})
     summary_path = DATA_DIR / "market" / f"{market_ticker}.csv"
     summary_frame = load_market(str(summary_path), _mtime(summary_path))
@@ -122,16 +123,65 @@ st.dataframe(
 st.caption("실제 로컬 캐시만 표시합니다. 기술지표 계산 성공은 검증된 매수 신호를 뜻하지 않습니다.")
 
 financial_dir = DATA_DIR / "normalized" / "financials"
-available = [path.stem for path in sorted(financial_dir.glob("*.json"))]
-if not available:
-    st.error("정규화된 공식 재무자료가 없습니다.")
-    st.stop()
+financial_summary_rows: list[dict[str, Any]] = []
+for registered_ticker, registry in PERSONAL_PILOT_UNIVERSE.items():
+    registered_path = financial_dir / f"{registered_ticker}.json"
+    registered = load_json(str(registered_path), _mtime(registered_path))
+    periods = (registered or {}).get("periods", [])
+    financial_summary_rows.append({
+        "종목": registered_ticker,
+        "기업": registry["company"],
+        "재무 상태": (registered or {}).get("status", registry["financial_source_state"]),
+        "재무기간": len(periods),
+        "최신 재무일": max((row.get("period_end", "") for row in periods), default=None),
+        "회계/통화": f"{registry['accounting_standard']} / {registry['currency']}",
+        "보류 사유": registry.get("financial_source_reason"),
+    })
 
-ticker = st.selectbox("기업", available)
+st.subheader("10개 기업 공식 재무 연결")
+st.dataframe(
+    pd.DataFrame(financial_summary_rows)[["종목", "재무 상태", "재무기간", "최신 재무일", "회계/통화"]],
+    hide_index=True,
+    width="stretch",
+)
+st.caption("verified와 partial만 실제 로컬 원문·해시 검사를 통과한 자료입니다. blocked는 숫자를 생성하지 않습니다.")
+
+existing_tickers = [path.stem for path in sorted(financial_dir.glob("*.json"))]
+selection_options = list(pilot_tickers()) + [value for value in existing_tickers if value not in PERSONAL_PILOT_UNIVERSE]
+default_ticker = "AMAT" if "AMAT" in existing_tickers else (existing_tickers[0] if existing_tickers else selection_options[0])
+ticker = st.selectbox(
+    "기업",
+    selection_options,
+    index=selection_options.index(default_ticker),
+    format_func=lambda value: (
+        f"{value} · {PERSONAL_PILOT_UNIVERSE[value]['company']}"
+        if value in PERSONAL_PILOT_UNIVERSE else value
+    ),
+)
 financial_path = financial_dir / f"{ticker}.json"
 financial = load_json(str(financial_path), _mtime(financial_path))
 if not financial:
-    st.error("재무 파일을 읽을 수 없습니다.")
+    registry = PERSONAL_PILOT_UNIVERSE[ticker]
+    st.header(f"{registry['company']} ({ticker})")
+    st.subheader("A. 현재 상황")
+    st.write(COMPANY_PROFILES[ticker]["business"])
+    st.warning(
+        f"공식 재무 상태: {registry['financial_source_state']} · "
+        f"{registry.get('financial_source_reason', '검증된 공식 원문이 아직 없습니다.')}"
+    )
+    state_cards = st.columns(3)
+    state_cards[0].metric("공식 재무기간", "0개")
+    state_cards[1].metric("가격 이력", "미확보")
+    state_cards[2].metric("운영 신호", "0개")
+    st.info(f"회계 기준/통화: {registry['accounting_standard']} / {registry['currency']}")
+    st.markdown("**지금 판단할 수 없는 항목**")
+    st.write("- 실적 추세, 가치 참고 지표, 기술적 위치, 정식 적정가와 매수 신호")
+    st.markdown("**필요한 다음 자료**")
+    st.write("- 공식 연차·분기 원문과 게시시각, 검증된 개인용 가격 이력")
+    st.markdown("**핵심 위험**")
+    for risk in COMPANY_PROFILES[ticker]["risks"]:
+        st.write(f"- {risk}")
+    st.error("운영 판단: hold · 원문 미확보 상태에서 숫자나 매수 신호를 생성하지 않음")
     st.stop()
 
 market_path = DATA_DIR / "market" / f"{ticker}.csv"
@@ -212,8 +262,8 @@ st.dataframe(
     column_config={"매출": st.column_config.TextColumn(width="small"), "영업이익": st.column_config.TextColumn(width="small")},
 )
 st.caption(
-    "금액 단위: USD million · TTM = FY2025 + 당기 9M - 전년 9M · "
-    "FCF = 공시 CFO - 공시 CAPEX로 계산한 참고 지표(독립 GAAP 계정 아님) · 검증되지 않은 TTM EPS는 비워 둠"
+    f"금액 단위: {financial.get('currency', 'USD')} million · 회계 기준: {financial.get('accounting_standard', 'US GAAP')} · "
+    "기간별 note에 TTM 산식을 명시 · FCF = 공시 CFO - 공시 CAPEX 참고 지표 · 검증되지 않은 TTM EPS는 비워 둠"
 )
 
 if analysis:
@@ -227,7 +277,8 @@ if analysis:
     if metrics["known_net_cash"].get("note"):
         st.caption(metrics["known_net_cash"]["note"])
 else:
-    st.info("이 fixture/기업에는 공통 투자지표 계약이 적용되지 않습니다.")
+    gap = financial.get("data_gap") or "FY와 TTM을 함께 검증하지 못해 공통 투자지표를 계산하지 않았습니다."
+    st.info(gap)
 
 with st.expander("공식 가이던스와 산식", expanded=True):
     guidance_analysis = analysis["fundamental"]["guidance_analysis"] if analysis else {}

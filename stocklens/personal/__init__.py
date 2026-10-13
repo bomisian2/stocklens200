@@ -9,6 +9,8 @@ from .analysis import compute_fundamental_indicators, compute_personal_analysis
 from .financial_audit import audit_normalized_snapshot, audit_saved_personal_data
 from .market_data import AlphaVantagePersonalClient, compute_relative_strength, compute_technical_snapshot
 from .market_audit import audit_saved_market_data
+from .extended_financials import import_saved_extended_financials
+from .universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
 
 __all__ = [
     "AlphaVantagePersonalClient",
@@ -20,4 +22,7 @@ __all__ = [
     "audit_normalized_snapshot",
     "audit_saved_personal_data",
     "audit_saved_market_data",
+    "import_saved_extended_financials",
+    "PERSONAL_PILOT_UNIVERSE",
+    "pilot_tickers",
 ]

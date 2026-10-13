@@ -152,3 +152,21 @@ def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tm
         assert "가이던스" in rendered
         assert "운영 판단: hold" in rendered
         assert "정식 적정가" in rendered
+
+
+def test_personal_app_registers_all_ten_and_keeps_tsm_blocked(tmp_path, monkeypatch) -> None:
+    (tmp_path / "normalized" / "financials").mkdir(parents=True)
+    (tmp_path / "status.json").write_text(
+        json.dumps({"financial_tickers_available": 0, "financial_periods_available": 0, "market": {"status": "unavailable"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+
+    assert not app.exception
+    assert len(app.selectbox[0].options) == 10
+    app.selectbox[0].set_value("TSM").run(timeout=20)
+    rendered = " ".join(item.value for item in [*app.header, *app.warning, *app.info, *app.error])
+    assert "TIFRS / TWD" in rendered
+    assert "HTTP 403" in rendered
+    assert "운영 판단: hold" in rendered

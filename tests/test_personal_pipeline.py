@@ -9,6 +9,14 @@ from stocklens.personal.analysis import compute_fundamental_indicators, compute_
 from stocklens.personal.catalog import PILOT_IR_DOCUMENTS
 from stocklens.personal.financial_audit import METRIC_KEYS, OFFICIAL_FACT_CONTRACTS, audit_normalized_snapshot
 from stocklens.personal.ir_financials import _ttm_values, collect_pilot_financials
+from stocklens.personal.extended_financials import (
+    _build_amd,
+    _build_googl,
+    _build_lrcx,
+    _build_msft,
+    _build_nvda,
+)
+from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
 from stocklens.personal.market_audit import audit_saved_market_data
 from stocklens.personal.market_data import (
     AlphaVantagePersonalClient,
@@ -366,3 +374,37 @@ def test_official_fact_contract_catches_no_mismatches() -> None:
     audit = audit_normalized_snapshot(snapshot, payloads)
     assert audit["status"] == "verified"
     assert audit["checks_passed"] == audit["checks_total"]
+
+
+def test_ten_company_registry_keeps_tsm_accounting_and_access_state_explicit() -> None:
+    assert pilot_tickers() == ("AMAT", "AVGO", "QCOM", "GOOGL", "NVDA", "MSFT", "MU", "AMD", "TSM", "LRCX")
+    assert PERSONAL_PILOT_UNIVERSE["TSM"]["accounting_standard"] == "TIFRS"
+    assert PERSONAL_PILOT_UNIVERSE["TSM"]["currency"] == "TWD"
+    assert PERSONAL_PILOT_UNIVERSE["TSM"]["financial_source_state"] == "blocked"
+
+
+def test_extended_reviewed_snapshots_preserve_ttm_and_partial_boundaries() -> None:
+    for snapshot in (_build_googl(), _build_amd(), _build_msft(), _build_lrcx()):
+        ttm = next(row for row in snapshot["periods"] if row["kind"] == "ttm")
+        metrics = ttm["metrics"]
+        assert metrics["fcf"] == metrics["cfo"] - metrics["capex"]
+        assert metrics["diluted_eps"] is None
+    googl_ttm = next(row for row in _build_googl()["periods"] if row["kind"] == "ttm")
+    assert googl_ttm["metrics"]["revenue"] == 445866
+    assert googl_ttm["metrics"]["fcf"] == 53273
+    nvda = _build_nvda()
+    assert nvda["status"] == "partial"
+    assert not any(row["kind"] == "ttm" for row in nvda["periods"])
+
+
+def test_common_analysis_contract_runs_for_every_extended_ttm_company() -> None:
+    for snapshot in (_build_googl(), _build_amd(), _build_msft(), _build_lrcx()):
+        snapshot["documents"] = []
+        result = compute_personal_analysis(snapshot)
+        assert result["fundamental"]["status"] in {"verified", "partial"}
+        assert result["valuation_references"]["operational_eligible"] is False
+        assert result["signal_research"]["active_operational_signals"] == 0
+        assert result["decision"]["status"] == "hold"
+
+    nvda = _build_nvda()
+    assert compute_fundamental_indicators(nvda)["status"] == "unavailable"

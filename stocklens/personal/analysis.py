@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from .market_data import compute_relative_strength, compute_technical_snapshot
+from .universe import PERSONAL_PILOT_UNIVERSE
 
 
 COMPANY_PROFILES: dict[str, dict[str, Any]] = {
@@ -19,6 +20,34 @@ COMPANY_PROFILES: dict[str, dict[str, Any]] = {
     "QCOM": {
         "business": "무선 반도체와 특허 라이선스를 중심으로 자동차·IoT·PC로 사업을 확장한다.",
         "risks": ["스마트폰 수요와 고객 집중", "라이선스 규제·소송", "투자손익·세금효과에 따른 GAAP EPS 왜곡"],
+    },
+    "GOOGL": {
+        "business": "검색·광고, YouTube, Cloud와 AI 플랫폼을 운영한다.",
+        "risks": ["AI 인프라 CAPEX와 회수 시차", "광고 경기·규제", "투자증권 평가손익에 따른 EPS 왜곡"],
+    },
+    "NVDA": {
+        "business": "AI 가속기, 데이터센터 컴퓨팅과 CUDA 소프트웨어 플랫폼을 제공한다.",
+        "risks": ["AI 투자 사이클", "고객 집중과 자체 칩", "수출규제·공급망"],
+    },
+    "MSFT": {
+        "business": "Azure, Microsoft 365, Windows, 게임과 AI 서비스를 운영한다.",
+        "risks": ["AI 데이터센터 CAPEX", "클라우드 경쟁", "규제와 사이버보안"],
+    },
+    "MU": {
+        "business": "DRAM·NAND 메모리와 데이터센터용 메모리 제품을 공급한다.",
+        "risks": ["메모리 가격 사이클", "대규모 설비투자", "중국·공급망 규제"],
+    },
+    "AMD": {
+        "business": "데이터센터·PC CPU, GPU와 적응형 컴퓨팅 제품을 제공한다.",
+        "risks": ["AI GPU 경쟁", "파운드리 공급 의존", "인수 무형자산과 주식보상"],
+    },
+    "TSM": {
+        "business": "첨단 공정 중심의 반도체 파운드리 서비스를 제공한다.",
+        "risks": ["대만 지정학", "고객 집중", "TWD·ADR·TIFRS 변환 위험"],
+    },
+    "LRCX": {
+        "business": "식각·증착 중심 반도체 제조 장비와 설치 기반 서비스를 제공한다.",
+        "risks": ["메모리·파운드리 CAPEX 사이클", "중국 수출규제", "고객 집중"],
     },
 }
 
@@ -41,7 +70,7 @@ def _guidance_analysis(financial: dict[str, Any]) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     comparison: dict[str, Any] = {"status": "unavailable"}
 
-    if guidance.get("revenue_midpoint") is not None:
+    if guidance.get("revenue_midpoint") is not None and guidance.get("non_gaap_eps_midpoint") is not None:
         midpoint = float(guidance["revenue_midpoint"])
         spread = float(guidance.get("revenue_plus_minus") or 0.0)
         low, high = midpoint - spread, midpoint + spread
@@ -100,6 +129,23 @@ def _guidance_analysis(financial: dict[str, Any]) -> dict[str, Any]:
                 "high": high / latest_revenue - 1,
                 "formula": "guidance revenue / latest reported quarter revenue - 1",
             }
+    elif guidance.get("revenue_midpoint") is not None and guidance.get("revenue_percent_range") is None:
+        midpoint = float(guidance["revenue_midpoint"])
+        spread = float(guidance.get("revenue_plus_minus") or 0.0)
+        low, high = midpoint - spread, midpoint + spread
+        rows.append({"label": "매출 가이던스", "value": f"${low:,.0f}M~${high:,.0f}M", "basis": "issuer_guidance"})
+        if guidance.get("gaap_eps_midpoint") is not None:
+            eps_midpoint = float(guidance["gaap_eps_midpoint"])
+            eps_spread = float(guidance.get("gaap_eps_plus_minus") or 0.0)
+            rows.append({"label": "GAAP EPS 가이던스", "value": f"${eps_midpoint - eps_spread:.2f}~${eps_midpoint + eps_spread:.2f}", "basis": "issuer_guidance_gaap"})
+        if latest_revenue:
+            comparison = {"status": "verified_calculation", "label": "직전 분기 대비 매출 가이던스", "low": low / latest_revenue - 1, "midpoint": midpoint / latest_revenue - 1, "high": high / latest_revenue - 1, "formula": "guidance revenue / latest reported quarter revenue - 1"}
+    elif guidance.get("capex_low") is not None and guidance.get("capex_high") is not None:
+        rows.append({"label": "연간 CAPEX 가이던스", "value": f"${float(guidance['capex_low']):,.0f}M~${float(guidance['capex_high']):,.0f}M", "basis": "issuer_guidance"})
+    elif guidance.get("revenue_percent_range") is not None and guidance.get("revenue_midpoint") is not None:
+        midpoint = float(guidance["revenue_midpoint"])
+        pct = float(guidance["revenue_percent_range"]) / 100
+        rows.append({"label": "매출 가이던스", "value": f"${midpoint * (1-pct):,.0f}M~${midpoint * (1+pct):,.0f}M", "basis": "issuer_guidance"})
 
     return {
         "status": guidance.get("status", "unavailable"),
@@ -137,7 +183,7 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
     debt_values = (balance.get("short_term_debt"), balance.get("long_term_debt"))
     debt = sum(value for value in debt_values if value is not None)
     known_net_cash = None if cash is None or any(value is None for value in debt_values) else cash + investments - debt
-    investment_scope_complete = ticker in {"AMAT", "QCOM"}
+    investment_scope_complete = bool(balance.get("investment_scope_complete", ticker in {"AMAT", "QCOM"}))
 
     return {
         "status": "verified" if financial.get("status") == "verified" else "partial",
@@ -146,7 +192,7 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
         "metrics": {
             "ttm_revenue_change_vs_fy2025": {
                 "value": revenue_growth,
-                "formula": "TTM revenue / FY2025 revenue - 1",
+                "formula": f"TTM revenue / {fiscal_year.get('label', 'latest fiscal year')} revenue - 1",
                 "status": "verified",
                 "note": "Rolling twelve-month change, not year-over-year growth",
             },
@@ -177,7 +223,7 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
         "guidance_analysis": _guidance_analysis(financial),
         "calculation_basis": {
             "amount_unit": "USD millions except per-share data",
-            "ttm_formula": "FY2025 + current 9M - prior-year 9M",
+            "ttm_formula": ttm.get("note") or "issuer-period bridge or same fiscal-year interval as explicitly labeled",
             "fcf_definition": "reported GAAP CFO - reported CAPEX; derived cash-flow reference, not a GAAP line item",
             "latest_official_document": _latest_document(financial),
         },
@@ -308,6 +354,13 @@ def _practical_summary(
         "AMAT": ["Q4 FY2026 매출·Non-GAAP EPS가 회사 가이던스 범위에 들어오는지", "AI·반도체 설비투자 사이클과 중국 규제 영향", "CFO-CAPEX 마진이 유지되는지"],
         "AVGO": ["Q4 FY2026 매출과 Non-GAAP 영업이익률 가이던스 달성 여부", "AI 고객 집중과 VMware 통합 현금흐름", "부채 축소와 이자 부담"],
         "QCOM": ["Q4 FY2026 매출·GAAP EPS 가이던스 달성 여부", "스마트폰 외 자동차·IoT·PC 성장", "투자손익·세금효과가 GAAP EPS에 미치는 영향"],
+        "GOOGL": ["2026년 CAPEX 가이던스와 AI 투자 회수 속도", "광고·Cloud 영업현금흐름", "투자증권 평가손익을 제외한 이익의 질"],
+        "NVDA": ["Q3 FY2027 공식 매출 가이던스 달성 여부", "AI 고객 집중과 자체 칩 전환", "FY 원문 확보 후 TTM 현금흐름 완성"],
+        "MSFT": ["Azure·AI 매출 성장과 데이터센터 CAPEX 회수", "클라우드 영업마진", "규제·사이버보안 비용"],
+        "MU": ["메모리 가격과 HBM 수요", "설비투자와 공급 증가", "공식 원문 연결 후 TTM 현금흐름"],
+        "AMD": ["데이터센터·AI 가속기 매출 성장", "파운드리 공급과 제품 전환", "공식 수치로 정규화한 다음 분기 가이던스"],
+        "TSM": ["첨단공정 수요와 해외 팹 비용", "TWD·ADR 변환 기준", "TIFRS 원문 접근과 통화 일관성"],
+        "LRCX": ["Q1 FY2027 GAAP 가이던스 달성 여부", "메모리·파운드리 설비투자 사이클", "중국 수출규제와 설치 기반 서비스"],
     }
     risk = COMPANY_PROFILES[ticker]["risks"][0]
     performance_label = "긍정" if revenue_change is not None and revenue_change > 0 and (operating_margin or 0) > 0.20 else "중립"
