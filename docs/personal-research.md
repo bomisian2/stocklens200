@@ -129,6 +129,20 @@ forecast, WACC, terminal assumptions, and a consistent share denominator are
 available. With only 100 raw, unadjusted sessions, EMA200, the 52-week range,
 and PR #3's independent-validation gate remain unavailable.
 
+The same vertical screen now works for AVGO and QCOM even when price collection
+is blocked. Their verified FY/quarter/YTD/TTM financials, issuer guidance,
+accounting-quality warnings, and follow-up conditions remain visible; price,
+technical, market-cap, yield, and multiple fields stay unavailable. Guidance is
+rendered from a common contract while retaining each issuer's basis: AMAT
+Non-GAAP EPS, AVGO Non-GAAP operating margin, and QCOM GAAP EPS are never mixed.
+
+Alpha Vantage documents `SHARES_OUTSTANDING` and `EARNINGS_ESTIMATES` endpoints,
+but no ticker-level response or reuse eligibility has been validated in this
+branch. The screen therefore does not turn those documented capabilities into
+actual consensus, forward PER, or formal capitalization. Different displayed
+prices are compared only when trading date, regular-session/EOD basis, and
+adjustment policy match.
+
 FinanceToolkit is not added because the displayed ratios are simpler and more
 auditable in the existing pure functions, while its provider/dependency layer
 does not supply the missing evidence. QuantStats is not added because there is

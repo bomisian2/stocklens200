@@ -27,6 +27,89 @@ def _period(financial: dict[str, Any], kind: str) -> dict[str, Any] | None:
     return next((row for row in financial.get("periods", []) if row.get("kind") == kind), None)
 
 
+def _latest_document(financial: dict[str, Any]) -> dict[str, Any]:
+    documents = financial.get("documents", [])
+    return max(documents, key=lambda row: str(row.get("published_at", "")), default={})
+
+
+def _guidance_analysis(financial: dict[str, Any]) -> dict[str, Any]:
+    """Explain issuer guidance without mixing GAAP and non-GAAP values."""
+
+    guidance = financial.get("guidance", {})
+    quarter = _period(financial, "quarter")
+    latest_revenue = (quarter or {}).get("metrics", {}).get("revenue")
+    rows: list[dict[str, Any]] = []
+    comparison: dict[str, Any] = {"status": "unavailable"}
+
+    if guidance.get("revenue_midpoint") is not None:
+        midpoint = float(guidance["revenue_midpoint"])
+        spread = float(guidance.get("revenue_plus_minus") or 0.0)
+        low, high = midpoint - spread, midpoint + spread
+        rows.extend([
+            {"label": "매출 가이던스", "value": f"${low:,.0f}M~${high:,.0f}M", "basis": "issuer_guidance"},
+            {
+                "label": "Non-GAAP EPS 가이던스",
+                "value": f"${guidance['non_gaap_eps_midpoint'] - guidance.get('non_gaap_eps_plus_minus', 0):.2f}~"
+                f"${guidance['non_gaap_eps_midpoint'] + guidance.get('non_gaap_eps_plus_minus', 0):.2f}",
+                "basis": "issuer_guidance_non_gaap",
+            },
+        ])
+        if latest_revenue:
+            comparison = {
+                "status": "verified_calculation",
+                "label": "직전 분기 대비 매출 가이던스",
+                "low": low / latest_revenue - 1,
+                "midpoint": midpoint / latest_revenue - 1,
+                "high": high / latest_revenue - 1,
+                "formula": "guidance revenue / latest reported quarter revenue - 1",
+            }
+    elif guidance.get("revenue_approx") is not None:
+        revenue = float(guidance["revenue_approx"])
+        rows.extend([
+            {"label": "매출 가이던스", "value": f"약 ${revenue:,.0f}M", "basis": "issuer_guidance"},
+            {
+                "label": "Non-GAAP 영업이익률",
+                "value": f"약 {float(guidance['non_gaap_operating_margin_percent']):.1f}%",
+                "basis": "issuer_guidance_non_gaap",
+            },
+        ])
+        if latest_revenue:
+            comparison = {
+                "status": "verified_calculation",
+                "label": "직전 분기 대비 매출 가이던스",
+                "midpoint": revenue / latest_revenue - 1,
+                "formula": "guidance revenue / latest reported quarter revenue - 1",
+            }
+    elif guidance.get("revenue_low") is not None and guidance.get("revenue_high") is not None:
+        low, high = float(guidance["revenue_low"]), float(guidance["revenue_high"])
+        midpoint = (low + high) / 2
+        rows.extend([
+            {"label": "매출 가이던스", "value": f"${low:,.0f}M~${high:,.0f}M", "basis": "issuer_guidance"},
+            {
+                "label": "GAAP EPS 가이던스",
+                "value": f"${float(guidance['gaap_eps_low']):.2f}~${float(guidance['gaap_eps_high']):.2f}",
+                "basis": "issuer_guidance_gaap",
+            },
+        ])
+        if latest_revenue:
+            comparison = {
+                "status": "verified_calculation",
+                "label": "직전 분기 대비 매출 가이던스",
+                "low": low / latest_revenue - 1,
+                "midpoint": midpoint / latest_revenue - 1,
+                "high": high / latest_revenue - 1,
+                "formula": "guidance revenue / latest reported quarter revenue - 1",
+            }
+
+    return {
+        "status": guidance.get("status", "unavailable"),
+        "period": guidance.get("period"),
+        "rows": rows,
+        "comparison": comparison,
+        "accounting_warning": "공시의 GAAP·Non-GAAP 표기를 유지하며 서로 직접 비교하거나 혼합하지 않음",
+    }
+
+
 def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
     ticker = financial["ticker"]
     fiscal_year = _period(financial, "fiscal_year")
@@ -91,6 +174,13 @@ def compute_fundamental_indicators(financial: dict[str, Any]) -> dict[str, Any]:
             "fair_value": {"status": "hold", "reason": "Forecast and valuation eligibility inputs are incomplete"},
         },
         "guidance": financial.get("guidance", {}),
+        "guidance_analysis": _guidance_analysis(financial),
+        "calculation_basis": {
+            "amount_unit": "USD millions except per-share data",
+            "ttm_formula": "FY2025 + current 9M - prior-year 9M",
+            "fcf_definition": "reported GAAP CFO - reported CAPEX; derived cash-flow reference, not a GAAP line item",
+            "latest_official_document": _latest_document(financial),
+        },
         "earnings_quality": financial.get("earnings_quality", {"status": "reported_gaap"}),
     }
 
@@ -105,12 +195,6 @@ def _research_valuation_references(
     function never creates a fair value, target price, or recommendation.
     """
 
-    if latest_price is None or latest_price <= 0:
-        return {
-            "status": "unavailable",
-            "reason": "A verified local closing price is required",
-            "operational_eligible": False,
-        }
     fiscal_year = _period(financial, "fiscal_year")
     quarter = _period(financial, "quarter")
     ttm = _period(financial, "ttm")
@@ -132,20 +216,39 @@ def _research_valuation_references(
             "reason": "A reported diluted weighted-average share count is unavailable",
             "operational_eligible": False,
         }
-    proxy_equity_value = latest_price * float(diluted_share_proxy)
-    return {
-        "status": "research_only",
+    latest_document = _latest_document(financial)
+    common = {
         "operational_eligible": False,
         "share_basis": "latest-quarter diluted weighted-average shares; not point-in-time shares outstanding",
         "share_basis_period": quarter.get("label"),
+        "share_basis_as_of": quarter.get("period_end"),
+        "share_source_url": latest_document.get("url"),
+        "share_source_published_at": latest_document.get("published_at"),
         "diluted_share_proxy_millions": float(diluted_share_proxy),
-        "proxy_equity_value_usd_millions": proxy_equity_value,
-        "proxy_ttm_fcf_yield": float(ttm_fcf) / proxy_equity_value if ttm_fcf is not None else None,
-        "fy_gaap_eps_reference_multiple": latest_price / float(fy_eps) if fy_eps else None,
-        "fy_gaap_eps_period": fiscal_year.get("label"),
         "formal_market_cap": None,
         "formal_per": None,
         "fair_value": None,
+    }
+    if latest_price is None or latest_price <= 0:
+        return {
+            **common,
+            "status": "unavailable",
+            "reason": "A verified local closing price is required",
+        }
+    proxy_equity_value = latest_price * float(diluted_share_proxy)
+    proxy_fcf_yield = float(ttm_fcf) / proxy_equity_value if ttm_fcf is not None else None
+    return {
+        **common,
+        "status": "research_only",
+        "proxy_equity_value_usd_millions": proxy_equity_value,
+        "proxy_ttm_fcf_yield": proxy_fcf_yield,
+        "fy_gaap_eps_reference_multiple": latest_price / float(fy_eps) if fy_eps else None,
+        "fy_gaap_eps_period": fiscal_year.get("label"),
+        "formulas": {
+            "proxy_equity_value": "verified EOD close × latest-quarter diluted weighted-average shares",
+            "proxy_fcf_yield": "TTM (CFO - CAPEX) / proxy equity value",
+            "fy_eps_reference_multiple": "verified EOD close / FY reported GAAP diluted EPS",
+        },
         "reverse_dcf": {
             "status": "underdetermined",
             "reason": (
@@ -154,9 +257,67 @@ def _research_valuation_references(
             ),
         },
         "interpretation": (
-            "The low proxy FCF yield and high historical-period EPS reference multiple require "
-            "durable growth and margins, but they do not establish overvaluation or fair value."
+            (f"대용 FCF yield {proxy_fcf_yield:.1%}와 " if proxy_fcf_yield is not None else "대용 FCF yield 미확보와 ")
+            + (f"FY GAAP EPS 참고 배수 {latest_price / float(fy_eps):.1f}배는 " if fy_eps else "")
+            + "높은 성장과 수익성 지속 기대를 시사합니다. 다만 확정 시가총액·미래 전망·할인율이 "
+            "없어 고평가·저평가 또는 적정가를 뜻하지 않습니다."
         ),
+    }
+
+
+def _practical_summary(
+    financial: dict[str, Any],
+    fundamental: dict[str, Any],
+    valuation: dict[str, Any],
+    technical: dict[str, Any],
+    technical_label: str,
+) -> dict[str, Any]:
+    ticker = financial["ticker"]
+    metrics = fundamental.get("metrics", {})
+    revenue_change = metrics.get("ttm_revenue_change_vs_fy2025", {}).get("value")
+    operating_margin = metrics.get("ttm_operating_margin", {}).get("value")
+    fcf_margin = metrics.get("ttm_fcf_margin", {}).get("value")
+    guidance = fundamental.get("guidance_analysis", {})
+    comparison = guidance.get("comparison", {})
+    strengths: list[str] = []
+    if revenue_change is not None:
+        strengths.append(f"TTM 매출은 FY2025 대비 {revenue_change:+.1%} 변화했습니다(전년동기 성장률 아님).")
+    if operating_margin is not None:
+        strengths.append(f"TTM 영업이익률은 {operating_margin:.1%}입니다.")
+    if fcf_margin is not None:
+        strengths.append(f"TTM CFO-CAPEX 마진은 {fcf_margin:.1%}입니다.")
+    if comparison.get("midpoint") is not None:
+        strengths.append(
+            f"공식 다음 분기 매출 가이던스 중간값은 직전 보고 분기보다 {comparison['midpoint']:+.1%} 높습니다."
+        )
+
+    expectations = (
+        valuation.get("interpretation")
+        if valuation.get("status") == "research_only"
+        else "검증된 가격이 없어 현재 가격에 반영된 기대를 정량 평가할 수 없습니다."
+    )
+    unknowns = [
+        "동일 기준일의 보통주 발행주식 수와 완전희석 주식 수",
+        "일관된 TTM 희석 EPS",
+        "검증된 미래 EPS·매출 컨센서스와 자본비용",
+    ]
+    if technical.get("status") == "unavailable":
+        unknowns.append("검증된 로컬 가격 이력과 기술적 위치")
+
+    watch_by_ticker = {
+        "AMAT": ["Q4 FY2026 매출·Non-GAAP EPS가 회사 가이던스 범위에 들어오는지", "AI·반도체 설비투자 사이클과 중국 규제 영향", "CFO-CAPEX 마진이 유지되는지"],
+        "AVGO": ["Q4 FY2026 매출과 Non-GAAP 영업이익률 가이던스 달성 여부", "AI 고객 집중과 VMware 통합 현금흐름", "부채 축소와 이자 부담"],
+        "QCOM": ["Q4 FY2026 매출·GAAP EPS 가이던스 달성 여부", "스마트폰 외 자동차·IoT·PC 성장", "투자손익·세금효과가 GAAP EPS에 미치는 영향"],
+    }
+    risk = COMPANY_PROFILES[ticker]["risks"][0]
+    performance_label = "긍정" if revenue_change is not None and revenue_change > 0 and (operating_margin or 0) > 0.20 else "중립"
+    return {
+        "one_line": f"사업 중립 · 실적 {performance_label} · 가치 판단 부족 · 기술 {technical_label} · 핵심 위험: {risk}",
+        "strengths": strengths,
+        "embedded_expectations": expectations,
+        "unknowns": unknowns,
+        "watch_conditions": watch_by_ticker[ticker],
+        "price_comparison_rule": "가격은 동일 거래일·정규장 종가·조정 정책이 일치할 때만 직접 비교",
     }
 
 
@@ -205,6 +366,9 @@ def compute_personal_analysis(
     operating_margin = metrics.get("ttm_operating_margin", {}).get("value")
     if revenue_change is not None and operating_margin is not None:
         performance_label = "긍정" if revenue_change > 0 and operating_margin > 0.20 else "중립"
+    practical_summary = _practical_summary(
+        financial, fundamental, valuation_references, technical, technical_interpretation["label"]
+    )
     return {
         "ticker": financial["ticker"],
         "status": "research_only",
@@ -220,6 +384,15 @@ def compute_personal_analysis(
         "technical": technical,
         "relative_strength": relative,
         "valuation_references": valuation_references,
+        "future_estimates": {
+            "status": "unavailable",
+            "reason": "No ticker-level analyst consensus was collected or validated",
+            "documented_candidate": "Alpha Vantage EARNINGS_ESTIMATES",
+            "candidate_scope": "annual/quarterly EPS and revenue estimates, analyst count, and revision history",
+            "access_and_reuse_validated": False,
+            "source_url": "https://www.alphavantage.co/documentation/#earnings-estimates",
+        },
+        "practical_summary": practical_summary,
         "interpretation": {
             "business": {"label": "중립", "reason": "사업 설명과 주요 위험은 확인했지만 경쟁력 점수는 검증하지 않았습니다."},
             "performance": {
@@ -242,7 +415,11 @@ def compute_personal_analysis(
             "history_sessions": int(len(market_frame)),
             "independent_validated_strategies": 0,
             "active_operational_signals": 0,
-            "reason": "100거래일 원시 비조정 이력은 EMA200과 독립 전략 검증에 부족합니다.",
+            "reason": (
+                f"{len(market_frame)}거래일 원시 비조정 이력은 EMA200과 독립 전략 검증에 부족합니다."
+                if len(market_frame)
+                else "검증된 가격 이력이 없어 기술 전략을 계산하지 않았습니다."
+            ),
         },
         "decision": {
             "status": "hold",

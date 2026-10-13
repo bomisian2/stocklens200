@@ -270,6 +270,8 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert references["status"] == "research_only"
     assert references["proxy_equity_value_usd_millions"] == 499.0 * 800.0
     assert references["formal_market_cap"] is None
+    assert references["share_basis_as_of"] is None
+    assert "weighted-average" in references["share_basis"]
     assert references["formal_per"] is None
     assert references["fair_value"] is None
     assert references["reverse_dcf"]["status"] == "underdetermined"
@@ -279,6 +281,52 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
         "is_buy_signal": False,
         "reason": "Technical indicators are descriptive; fair value and independently validated signals are unavailable",
     }
+
+
+def test_issuer_guidance_stays_separate_by_accounting_basis() -> None:
+    base_periods = [
+        {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 2.0}},
+        {"kind": "quarter", "label": "Q3 FY2026", "period_end": "2026-07-26", "metrics": {"revenue": 50.0, "diluted_shares": 10.0}},
+        {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+    ]
+    financial = {
+        "ticker": "AMAT", "status": "verified", "periods": base_periods,
+        "balance_sheet": {"cash_and_equivalents": 1.0, "short_term_investments": 0.0, "long_term_investments": 0.0, "short_term_debt": 0.0, "long_term_debt": 0.0},
+        "guidance": {"period": "Q4 FY2026", "revenue_midpoint": 60.0, "revenue_plus_minus": 5.0, "non_gaap_eps_midpoint": 3.0, "non_gaap_eps_plus_minus": 0.2},
+        "documents": [],
+    }
+
+    result = compute_fundamental_indicators(financial)["guidance_analysis"]
+
+    assert abs(result["comparison"]["midpoint"] - 0.2) < 1e-12
+    assert result["rows"][1]["basis"] == "issuer_guidance_non_gaap"
+    assert "혼합하지 않음" in result["accounting_warning"]
+
+
+def test_financial_only_analysis_for_avgo_and_qcom_does_not_require_price() -> None:
+    for ticker, guidance in (
+        ("AVGO", {"period": "Q4 FY2026", "revenue_approx": 140.0, "non_gaap_operating_margin_percent": 66.0}),
+        ("QCOM", {"period": "Q4 FY2026", "revenue_low": 95.0, "revenue_high": 105.0, "gaap_eps_low": 1.2, "gaap_eps_high": 1.4}),
+    ):
+        financial = {
+            "ticker": ticker, "status": "verified",
+            "periods": [
+                {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 2.0}},
+                {"kind": "quarter", "label": "Q3 FY2026", "period_end": "2026-07-26", "metrics": {"revenue": 100.0, "diluted_shares": 10.0}},
+                {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+            ],
+            "balance_sheet": {"cash_and_equivalents": 1.0, "short_term_debt": 0.0, "long_term_debt": 0.0},
+            "guidance": guidance, "documents": [],
+        }
+
+        result = compute_personal_analysis(financial)
+
+        assert result["fundamental"]["status"] == "verified"
+        assert result["valuation_references"]["status"] == "unavailable"
+        assert result["fundamental"]["guidance_analysis"]["rows"]
+        assert result["decision"]["status"] == "hold"
+        assert result["signal_research"]["history_sessions"] == 0
+        assert "매수" not in result["practical_summary"]["one_line"]
 
 
 def test_technical_snapshot_adds_observed_ranges_without_claiming_52_week_history() -> None:

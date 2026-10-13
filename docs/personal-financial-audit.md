@@ -13,9 +13,9 @@ manifest. Raw documents and generated audit JSON stay under ignored
 
 | Ticker | Fiscal periods | Checks | Result | TTM formula | Price / technicals |
 |---|---:|---:|---|---|---|
-| AMAT | FY2025, Q3 FY2026, 9M FY2026, TTM | 55/55 | verified | FY2025 + 9M FY2026 - 9M FY2025 | unavailable; no user API key |
-| AVGO | FY2025, Q3 FY2026, 9M FY2026, TTM | 51/51 | verified | FY2025 + 9M FY2026 - 9M FY2025 | unavailable; no user API key |
-| QCOM | FY2025, Q3 FY2026, 9M FY2026, TTM | 54/54 | verified | FY2025 + 9M FY2026 - 9M FY2025 | unavailable; no user API key |
+| AMAT | FY2025, Q3 FY2026, 9M FY2026, TTM | 55/55 | verified | FY2025 + 9M FY2026 - 9M FY2025 | 100 raw, unadjusted sessions; 2026-10-12 verified EOD close |
+| AVGO | FY2025, Q3 FY2026, 9M FY2026, TTM | 51/51 | verified | FY2025 + 9M FY2026 - 9M FY2025 | blocked; prior provider response was not safely classified |
+| QCOM | FY2025, Q3 FY2026, 9M FY2026, TTM | 54/54 | verified | FY2025 + 9M FY2026 - 9M FY2025 | blocked; prior provider response was not safely classified |
 
 ## Findings
 
@@ -28,8 +28,12 @@ manifest. Raw documents and generated audit JSON stay under ignored
   those cash-flow lines on a nine-month basis. Its investment/other income and
   tax benefit are disclosed separately; no normalized EPS is invented.
 - TTM diluted EPS and a point-in-time common-share count remain unavailable.
-  Therefore market capitalization, PER, FCF yield, fair value, target price, and
-  buy range are not produced.
+  AMAT's Q3 FY2026 800 million share figure is the three-month diluted
+  weighted-average denominator from the issuer statement of operations, not
+  shares outstanding on 2026-07-26. Price × 800 million and the resulting FCF
+  yield are therefore research proxies, not formal market capitalization or a
+  valuation conclusion. Formal PER, fair value, target price, and buy range are
+  not produced.
 
 The audit validates transcription and provenance, not the economic accuracy of
 future forecasts or an investment recommendation.

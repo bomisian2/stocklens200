@@ -113,7 +113,12 @@ for market_ticker in ("AMAT", "AVGO", "QCOM", "QQQ"):
     )
 
 st.subheader("개인용 시장 데이터 현황")
-st.dataframe(pd.DataFrame(market_summary_rows), hide_index=True, width="stretch")
+market_summary = pd.DataFrame(market_summary_rows)
+st.dataframe(
+    market_summary[["종목", "수집 상태", "기준일", "행"]],
+    hide_index=True,
+    width="stretch",
+)
 st.caption("실제 로컬 캐시만 표시합니다. 기술지표 계산 성공은 검증된 매수 신호를 뜻하지 않습니다.")
 
 financial_dir = DATA_DIR / "normalized" / "financials"
@@ -144,6 +149,8 @@ st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수
 if ticker in COMPANY_PROFILES:
     st.subheader("A. 현재 상황")
     st.write(COMPANY_PROFILES[ticker]["business"])
+    if analysis:
+        st.info(analysis["practical_summary"]["one_line"])
 
 if analysis and analysis["market"]["status"] != "unavailable" and not market.empty:
     latest = market.iloc[-1]
@@ -156,7 +163,6 @@ if analysis and analysis["market"]["status"] != "unavailable" and not market.emp
         f"기준일 {analysis['market']['price_as_of']} · 수집 {analysis['market']['collected_at_utc']} · "
         f"상태 {analysis['market']['status']} · {analysis['market']['price_policy']}"
     )
-    st.info(analysis["interpretation"]["overall"])
 else:
     selected_market_result = market_results.get(ticker, {})
     diagnostic_code = selected_market_result.get("diagnostic_code") or (
@@ -170,6 +176,25 @@ else:
         f"진단: {diagnostic_code} · {reason}"
     )
     st.caption("가격·시가총액·PER·FCF yield를 계산하지 않습니다.")
+
+if analysis:
+    summary = analysis["practical_summary"]
+    with st.container(border=True):
+        st.markdown("**지금 확인된 강점**")
+        for item in summary["strengths"]:
+            st.write(f"- {item}")
+    with st.container(border=True):
+        st.markdown("**현재 가격에 반영된 기대**")
+        st.write(summary["embedded_expectations"])
+        st.caption(summary["price_comparison_rule"])
+    with st.container(border=True):
+        st.markdown("**지금 판단할 수 없는 항목**")
+        for item in summary["unknowns"]:
+            st.write(f"- {item}")
+    with st.container(border=True):
+        st.markdown("**다음 실적·가격 조건에서 확인할 것**")
+        for item in summary["watch_conditions"]:
+            st.write(f"- {item}")
 
 st.subheader("B. 실적 흐름")
 period_rows: list[dict[str, Any]] = []
@@ -186,7 +211,10 @@ st.dataframe(
     pd.DataFrame(period_rows), hide_index=True, width="stretch",
     column_config={"매출": st.column_config.TextColumn(width="small"), "영업이익": st.column_config.TextColumn(width="small")},
 )
-st.caption("금액 단위: USD million · TTM = FY2025 + 당기 9M - 전년 9M · 검증되지 않은 TTM EPS는 비워 둠")
+st.caption(
+    "금액 단위: USD million · TTM = FY2025 + 당기 9M - 전년 9M · "
+    "FCF = 공시 CFO - 공시 CAPEX로 계산한 참고 지표(독립 GAAP 계정 아님) · 검증되지 않은 TTM EPS는 비워 둠"
+)
 
 if analysis:
     metrics = analysis["fundamental"]["metrics"]
@@ -201,17 +229,23 @@ if analysis:
 else:
     st.info("이 fixture/기업에는 공통 투자지표 계약이 적용되지 않습니다.")
 
-guidance = financial.get("guidance", {})
 with st.expander("공식 가이던스와 산식", expanded=True):
-    if guidance.get("revenue_midpoint") is not None:
-        guide_cols = st.columns(3)
-        guide_cols[0].metric("가이던스 기간", guidance.get("period", "미확보"))
-        guide_cols[1].metric("매출 중간값", _money_millions(guidance.get("revenue_midpoint")))
-        guide_cols[2].metric("Non-GAAP EPS 중간값", f"${guidance['non_gaap_eps_midpoint']:.2f}")
-        st.caption(
-            f"매출 ±${guidance.get('revenue_plus_minus', 0):,.0f}M · EPS ±${guidance.get('non_gaap_eps_plus_minus', 0):.2f} · "
-            "회사 공시의 GAAP/Non-GAAP 표기를 유지하며 서로 혼용하지 않음"
-        )
+    guidance_analysis = analysis["fundamental"]["guidance_analysis"] if analysis else {}
+    if guidance_analysis.get("rows"):
+        st.metric("가이던스 기간", guidance_analysis.get("period", "미확보"))
+        for row in guidance_analysis["rows"]:
+            st.metric(row["label"], row["value"], help=row["basis"])
+        comparison = guidance_analysis.get("comparison", {})
+        if comparison.get("midpoint") is not None:
+            st.write(
+                f"{comparison['label']}: 중간값 **{_pct(comparison['midpoint'])}**"
+                + (
+                    f" (범위 {_pct(comparison.get('low'))}~{_pct(comparison.get('high'))})"
+                    if comparison.get("low") is not None else ""
+                )
+            )
+            st.caption(comparison["formula"])
+        st.warning(guidance_analysis["accounting_warning"])
     else:
         st.write("공식 가이던스 미확보")
 
@@ -228,10 +262,29 @@ if analysis:
             f"{references['fy_gaap_eps_period']} GAAP EPS 참고 배수",
             f"{references['fy_gaap_eps_reference_multiple']:.1f}배",
         )
-        st.caption(f"주식수 기준: {references['share_basis_period']} {references['share_basis']}")
-        st.write("현재 가격의 내재 기대: 높은 성장·마진 지속과 설비투자 사이클 회복이 필요하지만, 검증된 전망과 WACC가 없어 단일 역산 성장률은 계산하지 않습니다.")
+        st.caption(
+            f"주식수 기준: {references['share_basis_period']} ({references['share_basis_as_of']}) · "
+            "해당 분기 희석 가중평균 주식수(기준일 현재 실제 발행주식 수 아님)"
+        )
+        st.error("대용 시가가치는 실제 기준일 발행주식 수로 계산한 확정 시가총액이 아닙니다.")
+        with st.expander("연구용 계산식과 근거"):
+            for label, formula in references.get("formulas", {}).items():
+                st.write(f"- {label}: `{formula}`")
+            st.write(f"- 주식 수 공시 접수: {references.get('share_source_published_at', '미확보')}")
+            st.write(f"- 주식 수 원문: {references.get('share_source_url', '미확보')}")
+        st.write(f"현재 가격의 내재 기대: {references['interpretation']}")
     else:
         st.info(references.get("reason", "연구 참고 지표를 계산할 수 없습니다."))
+        if references.get("diluted_share_proxy_millions") is not None:
+            st.caption(
+                f"{references.get('share_basis_period')} 희석 가중평균 주식수 "
+                f"{references['diluted_share_proxy_millions']:,.0f}M은 확보했지만 가격이 없어 대용 시가가치를 계산하지 않았습니다."
+            )
+    estimates = analysis["future_estimates"]
+    st.caption(
+        "미래 EPS 컨센서스: 미확보 · Alpha Vantage에 관련 엔드포인트는 문서화되어 있으나 "
+        "종목별 실제 응답·이용 범위·재현성을 검증하지 않아 미래 PER을 계산하지 않음"
+    )
 else:
     st.info("가치 참고 지표 계약을 적용할 수 없습니다.")
 

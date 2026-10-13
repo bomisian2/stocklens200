@@ -110,3 +110,45 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "연구 참고 전용" in warnings
     assert "운영 판단: hold" in errors
     assert "정식 적정가" in errors
+
+
+def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:
+    financial_dir = tmp_path / "normalized" / "financials"
+    financial_dir.mkdir(parents=True)
+    guidance_by_ticker = {
+        "AVGO": {"period": "Q4 FY2026", "revenue_approx": 140.0, "non_gaap_operating_margin_percent": 66.0},
+        "QCOM": {"period": "Q4 FY2026", "revenue_low": 95.0, "revenue_high": 105.0, "gaap_eps_low": 1.2, "gaap_eps_high": 1.4},
+    }
+    for ticker in ("AVGO", "QCOM"):
+        financial = {
+            "company": ticker, "ticker": ticker, "status": "verified",
+            "collected_at_utc": "2026-10-13T00:00:00+00:00",
+            "periods": [
+                {"kind": "fiscal_year", "label": "FY2025", "period_end": "2025-10-31", "accounting_basis": "reported_gaap", "metrics": {"revenue": 100.0, "operating_income": 25.0, "net_income": 20.0, "diluted_eps": 2.0, "diluted_shares": 10.0, "cfo": 30.0, "capex": 10.0, "fcf": 20.0}},
+                {"kind": "quarter", "label": "Q3 FY2026", "period_end": "2026-07-31", "accounting_basis": "reported_gaap", "metrics": {"revenue": 30.0, "operating_income": 9.0, "net_income": 7.0, "diluted_eps": 0.7, "diluted_shares": 9.0, "cfo": 9.0, "capex": 3.0, "fcf": 6.0}},
+                {"kind": "ttm", "label": "TTM through Q3 FY2026", "period_end": "2026-07-31", "accounting_basis": "derived_from_reported_gaap", "metrics": {"revenue": 120.0, "operating_income": 30.0, "net_income": 24.0, "diluted_eps": None, "diluted_shares": None, "cfo": 36.0, "capex": 12.0, "fcf": 24.0}},
+            ],
+            "balance_sheet": {"cash_and_equivalents": 10.0, "short_term_debt": 1.0, "long_term_debt": 4.0},
+            "guidance": guidance_by_ticker[ticker],
+            "documents": [{"key": "fixture", "published_at": "2026-08-13T20:01:00+00:00", "period_end": "2026-07-31", "distribution": "fixture", "sha256": "0" * 64, "url": "https://example.invalid/fixture"}],
+        }
+        (financial_dir / f"{ticker}.json").write_text(json.dumps(financial), encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps({
+        "financial_tickers_available": 2, "financial_periods_available": 6,
+        "market": {"status": "blocked", "results": [
+            {"ticker": "AVGO", "status": "blocked", "message": "safe"},
+            {"ticker": "QCOM", "status": "blocked", "message": "safe"},
+        ]},
+    }), encoding="utf-8")
+    monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
+
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+    assert not app.exception
+    for ticker in ("AVGO", "QCOM"):
+        app.selectbox[0].set_value(ticker).run(timeout=20)
+        assert not app.exception
+        rendered = " ".join(item.value for item in [*app.header, *app.subheader, *app.warning, *app.error, *app.markdown])
+        assert ticker in rendered
+        assert "가이던스" in rendered
+        assert "운영 판단: hold" in rendered
+        assert "정식 적정가" in rendered
