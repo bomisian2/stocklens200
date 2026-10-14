@@ -16,6 +16,7 @@ from stocklens.personal.market_regime import (
     build_market_regime,
     build_qqq_proxy_observations,
     build_regime_adjusted_candidate,
+    explain_market_regime_ko,
     load_market_regime_snapshot,
 )
 from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
@@ -377,9 +378,13 @@ qqq_manifest_path = DATA_DIR / "market" / "QQQ.manifest.json"
 analysis_as_of = datetime.now(timezone.utc).isoformat()
 regime_error: str | None = None
 try:
-    if REGIME_SNAPSHOT_PATH:
+    default_regime_snapshot = DATA_DIR / "macro" / "market_regime_snapshot.json"
+    selected_regime_snapshot = (
+        Path(REGIME_SNAPSHOT_PATH) if REGIME_SNAPSHOT_PATH else default_regime_snapshot
+    )
+    if selected_regime_snapshot.is_file():
         market_regime = load_market_regime_snapshot(
-            REGIME_SNAPSHOT_PATH,
+            selected_regime_snapshot,
             analysis_as_of=analysis_as_of,
         )
     else:
@@ -821,6 +826,15 @@ if analysis:
             st.markdown(f"**{label} 규칙 추적**")
             for trace in market_regime[axis_key]["rule_trace"]:
                 st.write(f"- {trace}")
+        explanations_ko = explain_market_regime_ko(market_regime)
+        if explanations_ko:
+            st.markdown("**공식 입력의 방향성 설명**")
+            for explanation in explanations_ko:
+                st.write(f"- {explanation}")
+        st.caption(
+            "FRED 고지: This product uses the FRED® API but is not endorsed or certified by "
+            "the Federal Reserve Bank of St. Louis. Cboe VIX 원문은 개인 로컬 연구에서만 사용합니다."
+        )
 
     if implied_range:
         st.info(
@@ -1154,6 +1168,8 @@ else:
                 f"- {observation['metric_id']}: {observation['value']:.4g} {observation['unit']} · "
                 f"{observation['status']} · 기준 {observation['as_of']}"
             )
+        for explanation in explain_market_regime_ko(market_regime):
+            st.write(f"- {explanation}")
 
 st.subheader("D. 기술적 분석")
 if not analysis or analysis["technical"].get("status") == "unavailable":

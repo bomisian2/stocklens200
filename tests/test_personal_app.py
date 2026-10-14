@@ -272,3 +272,72 @@ def test_personal_app_registers_all_ten_and_keeps_tsm_blocked(tmp_path, monkeypa
     assert "TIFRS / TWD" in rendered
     assert "HTTP 403" in rendered
     assert "운영 판단: hold" in rendered
+
+
+def test_personal_app_loads_official_macro_snapshot_and_explains_directions(tmp_path, monkeypatch) -> None:
+    financial_dir = tmp_path / "normalized" / "financials"
+    financial_dir.mkdir(parents=True)
+    (financial_dir / "AMAT.json").write_text(
+        json.dumps(
+            {
+                "company": "Applied Materials, Inc.",
+                "ticker": "AMAT",
+                "status": "verified",
+                "collected_at_utc": "2026-10-13T00:00:00+00:00",
+                "periods": [
+                    {
+                        "kind": "fiscal_year",
+                        "label": "FY2025",
+                        "period_end": "2025-10-26",
+                        "accounting_basis": "reported_gaap",
+                        "metrics": {"revenue": 100.0, "operating_income": 25.0, "net_income": 20.0, "diluted_eps": 8.0, "diluted_shares": 808.0, "cfo": 30.0, "capex": 10.0, "fcf": 20.0},
+                    },
+                    {
+                        "kind": "ttm",
+                        "label": "TTM through Q3 FY2026",
+                        "period_end": "2026-07-26",
+                        "accounting_basis": "derived_from_reported_gaap",
+                        "metrics": {"revenue": 120.0, "operating_income": 30.0, "net_income": 24.0, "diluted_eps": None, "diluted_shares": None, "cfo": 36.0, "capex": 12.0, "fcf": 24.0},
+                    },
+                ],
+                "balance_sheet": {"cash_and_equivalents": 10.0, "short_term_debt": 1.0, "long_term_debt": 4.0},
+                "guidance": {"status": "unavailable"},
+                "documents": [{"key": "fixture", "published_at": "2026-08-13T20:01:00+00:00", "period_end": "2026-07-26", "distribution": "fixture", "sha256": "0" * 64, "url": "https://example.invalid/fixture"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "status.json").write_text(
+        json.dumps(
+            {
+                "financial_tickers_available": 1,
+                "financial_periods_available": 2,
+                "market": {"status": "unavailable"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "market_regime_favorable.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snapshot_path = tmp_path / "macro" / "market_regime_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text(
+        json.dumps({"observations": payload["observations"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STOCKLENS_REGIME_SNAPSHOT_PATH", str(snapshot_path))
+
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+
+    assert not app.exception
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["경기"] == "확장"
+    assert metrics["물가"] == "물가 안정·둔화"
+    assert metrics["리스크"] == "리스크온"
+    rendered = " ".join(item.value for item in [*app.markdown, *app.caption, *app.info])
+    assert "공식 입력의 방향성 설명" in rendered
+    assert "operational_eligible=false" in rendered

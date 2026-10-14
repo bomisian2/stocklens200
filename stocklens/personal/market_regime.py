@@ -104,14 +104,14 @@ METRIC_RULES: dict[str, dict[str, Any]] = {
         "axes": {"inflation": (1.5, lambda v: _score_low_good(v, -0.20, 0.20))},
         "threshold": "<=-0.20 disinflationary; >=0.20 inflationary",
     },
-    "dxy_return_63d_ratio": {
+    "broad_dollar_return_63d_ratio": {
         "unit": "ratio",
         "max_age_days": 10,
         "axes": {
             "inflation": (0.5, lambda v: _score_high_good(v, -0.03, 0.03)),
             "risk": (0.5, lambda v: _score_low_good(v, -0.03, 0.05)),
         },
-        "threshold": "inflation: stronger USD favorable; risk: >5% adverse",
+        "threshold": "inflation: stronger broad USD proxy favorable; risk: >5% adverse",
     },
     "vix_index": {
         "unit": "index_point",
@@ -153,6 +153,26 @@ AXIS_LABELS = {
     "inflation": {1: "stable_disinflation", 0: "neutral_mixed", -1: "inflationary"},
     "risk": {1: "risk_on", 0: "neutral", -1: "risk_off"},
 }
+
+METRIC_LABELS_KO = {
+    "policy_rate_pct": "정책금리",
+    "treasury_2y_yield_pct": "미 국채 2년물",
+    "treasury_10y_yield_pct": "미 국채 10년물",
+    "treasury_2s10s_spread_pp": "미 국채 2s10s 스프레드",
+    "unemployment_rate_change_3m_pp": "실업률 3개월 변화",
+    "employment_growth_3m_ratio": "비농업고용 3개월 변화",
+    "cpi_yoy_trend_3m_pp": "CPI 전년비 추세",
+    "pce_yoy_trend_3m_pp": "PCE 물가 전년비 추세",
+    "broad_dollar_return_63d_ratio": "연준 명목 광의 달러지수 63일 변화",
+    "vix_index": "VIX",
+    "hy_oas_pct": "하이일드 OAS",
+    "qqq_trend_63d_ratio": "QQQ 63거래일 추세",
+    "qqq_realized_vol_20d_ratio": "QQQ 20일 실현변동성",
+    "qqq_drawdown_observed_ratio": "QQQ 관측구간 낙폭",
+}
+
+AXIS_LABELS_KO = {"economy": "경기", "inflation": "물가", "risk": "리스크"}
+SCORE_LABELS_KO = {1: "유리", 0: "중립", -1: "불리"}
 
 
 def _parse_datetime(value: Any, label: str) -> datetime:
@@ -346,6 +366,37 @@ def build_market_regime(
         "accepted_observations": list(accepted.values()),
         "excluded_observations": exclusions,
     }
+
+
+def explain_market_regime_ko(regime: dict[str, Any]) -> list[str]:
+    """Explain each accepted rule direction in Korean without adding a forecast."""
+
+    observations = {
+        str(row.get("metric_id")): row
+        for row in regime.get("accepted_observations", [])
+        if isinstance(row, dict)
+    }
+    explanations: list[str] = []
+    for metric_id, row in observations.items():
+        rule = METRIC_RULES.get(metric_id)
+        if rule is None:
+            continue
+        directions: list[str] = []
+        for axis, (weight, scorer) in rule["axes"].items():
+            score = int(scorer(float(row["value"])))
+            directions.append(
+                f"{AXIS_LABELS_KO[axis]} {SCORE_LABELS_KO[score]}(가중치 {weight:g})"
+            )
+        availability = row.get("availability_status")
+        availability_text = (
+            " · 공개시각 대용=수집시각" if availability == "current_snapshot_proxy" else ""
+        )
+        explanations.append(
+            f"{METRIC_LABELS_KO.get(metric_id, metric_id)} {float(row['value']):g} "
+            f"{row['unit']} → {', '.join(directions)} · 기준 {row['as_of']}"
+            f"{availability_text}"
+        )
+    return explanations
 
 
 def load_market_regime_snapshot(path: str | Path, *, analysis_as_of: str) -> dict[str, Any]:
