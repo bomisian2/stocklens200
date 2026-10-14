@@ -11,6 +11,58 @@ from streamlit.testing.v1 import AppTest
 from stocklens.personal.v23_adapter import EXPECTED_HISTORICAL_ROWS
 
 
+def _top10_consensus_fixture() -> dict:
+    shared = {
+        "collectedAt": "2026-10-14T12:52:02.418Z",
+        "revisionsUp4w": 1,
+        "revisionsDown4w": 0,
+        "revisionState": "상향 우세",
+    }
+    return {
+        "generatedAt": "2026-10-14T12:52:02.418Z",
+        "source": "Nasdaq Analyst Research earnings forecast API",
+        "methodology": "fixture annual aggregate",
+        "records": {
+            "AVGO": {
+                **shared, "ticker": "AVGO", "fiscalEnd": "Oct 2026",
+                "consensusEps": 10.37, "lowEps": 10.06, "highEps": 12.38,
+                "analystCount": 13, "nextFiscalEnd": "Oct 2027", "nextConsensusEps": 17.45,
+                "sourceUrl": "https://api.nasdaq.com/api/analyst/AVGO/earnings-forecast",
+            },
+            "NVDA": {
+                **shared, "ticker": "NVDA", "fiscalEnd": "Jan 2027",
+                "consensusEps": 9.25, "lowEps": 9.01, "highEps": 9.71,
+                "analystCount": 17, "nextFiscalEnd": "Jan 2028", "nextConsensusEps": 15.53,
+                "sourceUrl": "https://api.nasdaq.com/api/analyst/NVDA/earnings-forecast",
+            },
+        },
+    }
+
+
+def _top10_macro_fixture() -> dict:
+    values = {
+        "tenYear": (5.22, -0.05, 0.22, 5.17, 4.91, True, True, "%"),
+        "oil": (94.7, 5.88, -10.52, 93.47, 89.67, True, True, "USD"),
+        "vix": (15.27, 1.73, -11.22, 15.46, 15.45, False, False, "pt"),
+        "qqq": (743.57, -2.12, 5.54, 741.34, 726.55, True, True, "USD"),
+        "rsp": (213.3, 0.46, -0.31, 211.37, 216.18, True, False, "USD"),
+        "hyg": (77.09, -0.23, -1.65, 77.65, 78.7, False, False, "USD"),
+    }
+    return {
+        "generatedAt": "2026-10-13T22:35:27.276Z", "state": "중립", "score": 3,
+        "interpretation": "공식 국면을 대체하지 않음", "methodology": "fixture proxy",
+        "indicators": {
+            key: {
+                "label": key, "asOf": "2026-10-13", "value": row[0],
+                "change5": row[1], "change20": row[2], "ma20": row[3], "ma50": row[4],
+                "above20": row[5], "above50": row[6], "unit": row[7],
+                "source": "Yahoo Finance 확정 일봉",
+            }
+            for key, row in values.items()
+        },
+    }
+
+
 def test_personal_app_renders_financials_without_market_signal(tmp_path, monkeypatch) -> None:
     financial_dir = tmp_path / "normalized" / "financials"
     financial_dir.mkdir(parents=True)
@@ -131,6 +183,21 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     v23_path.write_bytes(v23_bytes)
     monkeypatch.setenv("STOCKLENS_V23_LEDGER_PATH", str(v23_path))
     monkeypatch.setenv("STOCKLENS_V23_LEDGER_SHA256", hashlib.sha256(v23_bytes).hexdigest())
+    top10_dir = tmp_path / "top10"
+    top10_dir.mkdir()
+    consensus_bytes = json.dumps(_top10_consensus_fixture(), sort_keys=True).encode("utf-8")
+    consensus_path = top10_dir / "top100-consensus.json"
+    consensus_path.write_bytes(consensus_bytes)
+    monkeypatch.setenv("STOCKLENS_TOP10_CONSENSUS_PATH", str(consensus_path))
+    monkeypatch.setenv(
+        "STOCKLENS_TOP10_CONSENSUS_SHA256",
+        hashlib.sha256(consensus_bytes).hexdigest(),
+    )
+    macro_bytes = json.dumps(_top10_macro_fixture(), sort_keys=True).encode("utf-8")
+    macro_path = top10_dir / "macro-snapshot.json"
+    macro_path.write_bytes(macro_bytes)
+    monkeypatch.setenv("STOCKLENS_TOP10_MACRO_PATH", str(macro_path))
+    monkeypatch.setenv("STOCKLENS_TOP10_MACRO_SHA256", hashlib.sha256(macro_bytes).hexdigest())
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
 
@@ -191,6 +258,10 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert avgo_metrics["물가"] == "중립·혼재"
     assert avgo_metrics["리스크"] == "중립"
     assert avgo_metrics["현재 v23 TTM PER"] == "46.17배"
+    assert avgo_metrics["미래 EPS 저/기준/고"] == "$10.06 / $10.37 / $12.38"
+    assert avgo_metrics["현재가 기준 미래 PER"] != "미확보"
+    assert avgo_metrics["미래 EPS×역사 PER 외곽"] != "미확보"
+    assert avgo_metrics["Top10 프록시 상태"] == "중립"
     assert avgo_metrics["사용 표본"] == "21/21"
     avgo_markdown = " ".join(item.value for item in app.markdown)
     assert "자기 역사 시장 프리미엄" in avgo_markdown
@@ -211,6 +282,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
+    assert nvda_metrics["미래 EPS 저/기준/고"] == "$9.01 / $9.25 / $9.71"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
 

@@ -20,6 +20,14 @@ from stocklens.personal.market_regime import (
     load_market_regime_snapshot,
 )
 from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
+from stocklens.personal.top10_bridge import (
+    APPROVED_CONSENSUS_SHA256,
+    APPROVED_MACRO_SHA256,
+    Top10BridgeError,
+    build_forward_consensus_candidate,
+    load_forward_consensus_snapshot,
+    load_market_environment_proxy,
+)
 from stocklens.personal.v23_adapter import (
     APPROVED_LEDGER_SHA256,
     SUPPORTED_TICKERS as V23_SUPPORTED_TICKERS,
@@ -34,6 +42,22 @@ DATA_DIR = Path(os.environ.get("STOCKLENS_PERSONAL_DATA_DIR", "private_data"))
 V23_LEDGER_PATH = os.environ.get("STOCKLENS_V23_LEDGER_PATH")
 V23_LEDGER_SHA256 = os.environ.get("STOCKLENS_V23_LEDGER_SHA256", APPROVED_LEDGER_SHA256)
 REGIME_SNAPSHOT_PATH = os.environ.get("STOCKLENS_REGIME_SNAPSHOT_PATH")
+TOP10_DATA_DIR = Path(
+    os.environ.get(
+        "STOCKLENS_TOP10_DATA_DIR",
+        str(Path(__file__).resolve().parent.parent / "나스닥 Top10 대시보드" / "data"),
+    )
+)
+TOP10_MACRO_PATH = Path(
+    os.environ.get("STOCKLENS_TOP10_MACRO_PATH", str(TOP10_DATA_DIR / "macro-snapshot.json"))
+)
+TOP10_CONSENSUS_PATH = Path(
+    os.environ.get("STOCKLENS_TOP10_CONSENSUS_PATH", str(TOP10_DATA_DIR / "top100-consensus.json"))
+)
+TOP10_MACRO_SHA256 = os.environ.get("STOCKLENS_TOP10_MACRO_SHA256", APPROVED_MACRO_SHA256)
+TOP10_CONSENSUS_SHA256 = os.environ.get(
+    "STOCKLENS_TOP10_CONSENSUS_SHA256", APPROVED_CONSENSUS_SHA256
+)
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -197,6 +221,22 @@ def _render_v23_comparison(
         self_history,
         market_regime,
     )
+    if TOP10_CONSENSUS_PATH.is_file():
+        try:
+            consensus_snapshot = load_forward_consensus_snapshot(
+                TOP10_CONSENSUS_PATH,
+                expected_sha256=TOP10_CONSENSUS_SHA256,
+            )
+            consensus_record = consensus_snapshot["tickers"].get(ticker)
+            if consensus_record:
+                self_history["forward_consensus_candidate"] = build_forward_consensus_candidate(
+                    consensus_record,
+                    current_price=float(v23["price"]["value"]),
+                    current_price_as_of=str(v23["price"]["as_of"]),
+                    self_history=self_history,
+                )
+        except (OSError, json.JSONDecodeError, Top10BridgeError, KeyError, TypeError, ValueError) as exc:
+            self_history["forward_consensus_error"] = str(exc)
     st.markdown("### 자기 역사 시장 프리미엄")
     st.warning(
         "reconstructed PIT 연구 전용 · operational_eligible=false. "
@@ -396,6 +436,17 @@ try:
 except (OSError, json.JSONDecodeError, MarketRegimeError, ValueError) as exc:
     regime_error = str(exc)
     market_regime = build_market_regime([], analysis_as_of=analysis_as_of)
+
+cross_project_market_proxy: dict[str, Any] | None = None
+cross_project_proxy_error: str | None = None
+if TOP10_MACRO_PATH.is_file():
+    try:
+        cross_project_market_proxy = load_market_environment_proxy(
+            TOP10_MACRO_PATH,
+            expected_sha256=TOP10_MACRO_SHA256,
+        )
+    except (OSError, json.JSONDecodeError, Top10BridgeError, TypeError, ValueError) as exc:
+        cross_project_proxy_error = str(exc)
 comparison_results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 for comparison_ticker in ("AMAT", "AVGO"):
     comparison_financial_path = DATA_DIR / "normalized" / "financials" / f"{comparison_ticker}.json"
@@ -751,6 +802,51 @@ if analysis:
     if regime_error:
         st.warning(f"로컬 국면 입력 검증 실패로 빈 프록시 상태를 사용했습니다: {regime_error}")
 
+    st.markdown("#### 교차 프로젝트 시장환경 프록시 · 공식 국면과 분리")
+    if cross_project_market_proxy:
+        proxy = cross_project_market_proxy
+        proxy_indicators = proxy["indicators"]
+        with st.container(horizontal=True):
+            st.metric("Top10 프록시 상태", proxy["state"], f"점수 {proxy['score']:.0f}", border=True)
+            st.metric(
+                "10년물 프록시",
+                f"{proxy_indicators['tenYear']['value']:.2f}%",
+                f"20일 {proxy_indicators['tenYear']['change20']:+.2f}%p",
+                border=True,
+            )
+            st.metric(
+                "VIX 프록시",
+                f"{proxy_indicators['vix']['value']:.2f}",
+                f"20일 {proxy_indicators['vix']['change20']:+.2f}%",
+                border=True,
+            )
+            st.metric(
+                "QQQ 프록시",
+                f"${proxy_indicators['qqq']['value']:.2f}",
+                f"20일 {proxy_indicators['qqq']['change20']:+.2f}%",
+                border=True,
+            )
+        st.caption(
+            f"cross_project_market_proxy · 기준일 {proxy['as_of']} · 생성 {proxy['available_at']} · "
+            f"SHA-256 {proxy['source_hash'][:12]}… · operational_eligible=false"
+        )
+        st.info(
+            "이 프록시는 공식 경기·물가·정책금리 입력을 대체하지 않으며 PER 밴드를 자동 변경하지 않습니다. "
+            + proxy["interpretation"]
+        )
+        with st.expander("교차 프로젝트 프록시 방향·결측 상세", expanded=False):
+            for trace in proxy["rule_trace"]:
+                st.write(f"- {trace}")
+            st.markdown("**미확보 공식 입력**")
+            for missing in proxy["missing_official_inputs"]:
+                st.write(f"- {missing}")
+            st.write(f"- PER 정책: {proxy['per_band_policy']}")
+            st.write(f"- 원천 해시: `{proxy['source_hash']}`")
+    elif cross_project_proxy_error:
+        st.warning(f"교차 프로젝트 시장환경 스냅샷 검증 실패: {cross_project_proxy_error}")
+    else:
+        st.caption("승인된 로컬 Top10 시장환경 스냅샷이 없어 이 프록시 블록은 비활성입니다.")
+
     adjusted_history = (
         v23_self_history.get("regime_adjusted_candidate", {})
         if v23_self_history else {}
@@ -799,6 +895,76 @@ if analysis:
         )
         st.metric("운영 투자판단", "비활성", border=True)
     st.caption("valuation_evidence operational_eligible=false · 연구 결과는 운영 매수·매도 판단에 연결되지 않습니다.")
+    forward_candidate = (
+        v23_self_history.get("forward_consensus_candidate", {})
+        if v23_self_history else {}
+    )
+    if forward_candidate:
+        st.markdown("#### TTM 후보 옆 미래 EPS 컨센서스 후보 · 별도 축")
+        st.warning(
+            "unverified_street_basis · 연구 전용 · operational_eligible=false. "
+            "GAAP/비GAAP 정의가 검증되지 않았고 TTM EPS·회사 가이던스·자체 추정과 합치지 않습니다."
+        )
+        with st.container(horizontal=True):
+            st.metric(
+                "미래 EPS 저/기준/고",
+                (
+                    f"${forward_candidate['eps']['low']:.2f} / "
+                    f"${forward_candidate['eps']['base']:.2f} / "
+                    f"${forward_candidate['eps']['high']:.2f}"
+                ),
+                f"애널리스트 {forward_candidate['analyst_count']}명 · 분산 {forward_candidate['dispersion']:.1%}",
+                border=True,
+            )
+            st.metric(
+                "현재가 기준 미래 PER",
+                f"{forward_candidate['forward_per']['base']:.2f}배",
+                f"EPS 고~저 기준 {forward_candidate['forward_per']['high']:.2f}~{forward_candidate['forward_per']['low']:.2f}배",
+                border=True,
+            )
+            st.metric(
+                "미래 EPS×역사 PER 외곽",
+                f"${forward_candidate['range_low']:.2f}~${forward_candidate['range_high']:.2f}",
+                "P35~P50 · 정식 적정가 아님",
+                border=True,
+            )
+        matrix_rows = [
+            {
+                "EPS 경우": row["eps_case"],
+                "EPS": row["eps"],
+                "역사 PER": row["per_percentile"],
+                "배수": row["per"],
+                "연구 가격 후보": row["price_candidate"],
+            }
+            for row in forward_candidate["matrix"]
+        ]
+        st.dataframe(
+            pd.DataFrame(matrix_rows),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "EPS": st.column_config.NumberColumn(format="$%.2f"),
+                "배수": st.column_config.NumberColumn(format="%.2f×"),
+                "연구 가격 후보": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
+        st.caption(
+            f"가격 ${forward_candidate['price']:.2f} ({forward_candidate['price_as_of']}) · "
+            f"컨센서스 수집 {forward_candidate['consensus_collected_at']} · 대상 {forward_candidate['fiscal_end']} · "
+            f"다음 연도 EPS ${forward_candidate['next_consensus_eps']:.2f} ({forward_candidate['next_fiscal_end']})"
+        )
+        st.caption(forward_candidate["confidence_explanation"])
+        with st.expander("미래 EPS 후보 출처·제약", expanded=False):
+            st.write(f"- 출처: {forward_candidate['source']}")
+            st.write(f"- 원천 SHA-256: `{forward_candidate['source_hash']}`")
+            st.write(f"- 계산: {forward_candidate['calculation_basis']}")
+            for limitation in forward_candidate["limitations"]:
+                st.write(f"- {limitation}")
+    elif v23_self_history and v23_self_history.get("forward_consensus_error"):
+        st.warning(
+            "미래 EPS 로컬 스냅샷 검증 실패: "
+            f"{v23_self_history['forward_consensus_error']}"
+        )
     if adjusted_history:
         st.info(
             "국면 조정 설명: " + " ".join(adjusted_history.get("rule_trace", []))
