@@ -382,9 +382,59 @@ with st.expander("공식 가이던스와 산식", expanded=True):
     else:
         st.write("공식 가이던스 미확보")
 
-st.subheader("C. 가치평가 참고")
+st.subheader("C. 가치 지도 · 연구 전용")
 if analysis:
     references = analysis["valuation_references"]
+    evidence_contract = analysis.get("valuation_evidence", {})
+    evidence_axes = evidence_contract.get("axes", {})
+    evidence_map = evidence_contract.get("map", {})
+    st.warning(
+        "정상 관심 범위와 정식 적정가는 아직 없습니다. 현재 화면은 시장 기대, DCF 스트레스 참고, "
+        "확보된 품질 근거와 미확보 축을 분리해 보여줍니다."
+    )
+    with st.container(horizontal=True):
+        for axis_id, label in (
+            ("self_history", "자기 역사"),
+            ("peer_relative", "피어 상대가치"),
+            ("intrinsic_reverse", "내재가치·역산 기대"),
+            ("quality_premium", "품질 프리미엄 증거"),
+        ):
+            axis = evidence_axes.get(axis_id, {})
+            st.metric(
+                label,
+                axis.get("status", "unavailable"),
+                border=True,
+                help=axis.get("calculation_basis"),
+            )
+    st.info(evidence_map.get("reason", "가치 지도 근거가 미확보되었습니다."))
+    map_rows = {
+        "정상 관심 범위": evidence_map.get("normal_interest_range"),
+        "높은 기대 구간": evidence_map.get("high_expectation_range"),
+        "검증된 위기 스트레스 범위": evidence_map.get("validated_crisis_stress_range"),
+    }
+    with st.container(horizontal=True):
+        for label, value in map_rows.items():
+            st.metric(label, "미산출" if value is None else str(value), border=True)
+
+    quality_axis = evidence_axes.get("quality_premium", {})
+    quality_rows = quality_axis.get("evidence") or []
+    with st.expander("품질 프리미엄 증거 · 점수로 합산하지 않음", expanded=True):
+        for row in quality_rows:
+            value = row.get("value", row.get("value_usd_millions"))
+            if isinstance(value, float) and row.get("id") in {"revenue_change", "operating_margin", "fcf_margin"}:
+                value_text = _pct(value)
+            elif row.get("id") == "net_cash_or_debt" and value is not None:
+                value_text = _money_millions(float(value))
+            elif value is None:
+                value_text = "미확보"
+            elif isinstance(value, (dict, list)):
+                value_text = "근거 연결됨"
+            else:
+                value_text = str(value)
+            st.write(f"- {row['label']}: **{row.get('status', 'unavailable')}** · {value_text}")
+            if row.get("note"):
+                st.caption(row["note"])
+
     if references.get("status") == "research_only":
         st.warning("연구 참고 전용 · 정식 시가총액/PER/적정가/매수구간이 아닙니다.")
         value_cards = st.columns(3)
@@ -437,11 +487,20 @@ if analysis:
                 st.success("가격일과 주식 수 기준일이 일치하는 검증 참고치입니다.")
         conditional = references.get("conditional_research_valuation", {})
         if conditional.get("status") == "research_only":
-            st.markdown("**조건부 연구 가치평가 · 운영 자격 false**")
+            st.markdown("**현재 시장 기대 · 운영 자격 false**")
+            implied_range = conditional.get("implied_growth_range")
+            if implied_range:
+                st.info(
+                    "현재 가격이 요구하는 5년 CFO-CAPEX 대용 성장률은 연구 할인·터미널 격자에서 "
+                    f"{_pct(implied_range.get('low'))}~{_pct(implied_range.get('high'))}입니다. "
+                    "높은 수치 자체를 비현실적 또는 고평가로 자동 판정하지 않습니다."
+                )
             st.warning(
-                "아래 값은 외부 전망치나 공식 적정가가 아닙니다. TTM CFO-CAPEX와 기준일 발행 "
-                "보통주에 고정 연구 가정 격자를 적용한 민감도이며 목표가격·매수구간으로 사용하지 않습니다."
+                "아래 값은 DCF 스트레스 참고이며 외부 전망치나 정상 적정가가 아닙니다. "
+                "목표가격·매수구간으로 사용하지 않으며 "
+                "어느 행도 공식 base case로 선택하지 않습니다."
             )
+            st.markdown(f"**{conditional.get('range_label', 'DCF 스트레스 참고 범위')}**")
             scenario_rows = conditional.get("scenario_values", [])
             with st.container(horizontal=True):
                 for scenario in scenario_rows:
@@ -456,9 +515,9 @@ if analysis:
                     )
             outer = conditional.get("research_per_share_outer_range", {})
             st.caption(
-                f"연구 격자 외곽 범위 ${outer.get('low', 0):,.2f}~${outer.get('high', 0):,.2f} · "
+                f"DCF 스트레스 격자 외곽 참고 ${outer.get('low', 0):,.2f}~${outer.get('high', 0):,.2f} · "
                 f"현재가 ${conditional['price']:,.2f} ({conditional.get('price_as_of', '미확보')}) · "
-                "공식 중간 적정가 없음"
+                "정상 관심 범위·공식 중간 적정가 없음"
             )
             implied_rows = conditional.get("implied_growth_sensitivity", [])
             if implied_rows:
@@ -482,7 +541,11 @@ if analysis:
                         "터미널가치 비중": st.column_config.NumberColumn(format="percent"),
                     },
                 )
-                st.caption("현재가 내재 성장률은 선택한 연구 할인율·터미널 성장률에 종속되며 미래 전망이 아닙니다.")
+                st.caption(
+                    "현재가 내재 성장률은 선택한 연구 할인율·터미널 성장률에 종속되며 미래 전망이 아닙니다. "
+                    f"가격일 {conditional.get('price_as_of', '미확보')} · 주식 수 기준일 "
+                    f"{conditional.get('shares_as_of', '미확보')} · 차이 {conditional.get('date_gap_days', '미확보')}일"
+                )
             drivers = conditional.get("driver_sensitivity", [])
             if drivers:
                 st.write("가치 결과 영향도 순위")

@@ -503,7 +503,10 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert conditional["operational_eligible"] is False
     assert conditional["is_fair_value"] is False
     assert conditional["selected_base_value"] is None
-    assert conditional["model_version"] == "levered_proxy_grid_v1"
+    assert conditional["model_version"] == "levered_proxy_stress_grid_v2"
+    assert conditional["range_label"] == "DCF 스트레스 참고 범위"
+    assert conditional["is_normal_interest_range"] is False
+    assert conditional["is_validated_crisis_range"] is False
     assert [row["growth_rate"] for row in conditional["scenario_values"]] == [0.0, 0.10, 0.20]
     assert conditional["scenario_values"][0]["research_per_issued_share"] < conditional["scenario_values"][1]["research_per_issued_share"]
     assert conditional["scenario_values"][1]["research_per_issued_share"] < conditional["scenario_values"][2]["research_per_issued_share"]
@@ -516,6 +519,20 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert [row["fcf_cagr"] for row in sensitivity["rows"]] == [0.0, 0.10, 0.15, 0.20, 0.25]
     assert sensitivity["rows"][0]["year5_fcf_usd_millions"] == 12.0
     assert sensitivity["operational_eligible"] is False
+    contract = result["valuation_evidence"]
+    assert contract["model_version"] == "valuation_evidence_contract_v1"
+    assert contract["operational_eligible"] is False
+    assert set(contract["axes"]) == {
+        "self_history", "peer_relative", "intrinsic_reverse", "quality_premium"
+    }
+    for axis in contract["axes"].values():
+        assert {
+            "source", "source_hash", "as_of", "available_at", "unit", "calculation_basis",
+            "status", "operational_eligible", "model_version",
+        }.issubset(axis)
+        assert axis["operational_eligible"] is False
+    assert contract["map"]["normal_interest_range"] is None
+    assert contract["map"]["validated_crisis_stress_range"] is None
     questions = result["investment_questions"]
     assert questions["growth_expectation"]["status"] == "research_only"
     assert "5년간 연 15%" in questions["growth_expectation"]["answer"]
@@ -571,6 +588,90 @@ def test_avgo_official_cover_shares_are_distinct_from_weighted_average_proxy() -
     assert conditional["operational_eligible"] is False
     assert conditional["date_gap_days"] == 45
     assert conditional["selected_base_value"] is None
+    assert result["valuation_evidence"]["axes"]["self_history"]["status"] == "unavailable"
+    assert result["valuation_evidence"]["axes"]["peer_relative"]["status"] == "unavailable"
+    assert result["valuation_evidence"]["axes"]["intrinsic_reverse"]["status"] == "research_only"
+
+
+def test_missing_valuation_inputs_do_not_become_zero_or_a_lower_value() -> None:
+    dates = pd.bdate_range("2026-05-20", periods=100).strftime("%Y-%m-%d")
+    closes = pd.Series([100.0 + index for index in range(100)], dtype=float)
+    market = pd.DataFrame({
+        "date": dates, "open": closes, "high": closes + 1,
+        "low": closes - 1, "close": closes, "volume": [1_000_000] * 100,
+    })
+    financial = {
+        "ticker": "QCOM", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "diluted_eps": 5.0, "fcf": 10.0}},
+            {"kind": "quarter", "label": "Q3 FY2026", "metrics": {"diluted_shares": 1.0}},
+            {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+        ],
+        "balance_sheet": {}, "guidance": {}, "documents": [],
+    }
+
+    result = compute_personal_analysis(
+        financial, market, pd.DataFrame(),
+        {"freshness_status": "verified", "market_date": "2026-10-12"},
+    )
+
+    conditional = result["valuation_references"]["conditional_research_valuation"]
+    assert conditional == {
+        "status": "unavailable",
+        "reason": "official point-in-time common shares outstanding are required",
+        "operational_eligible": False,
+    }
+    intrinsic = result["valuation_evidence"]["axes"]["intrinsic_reverse"]
+    assert intrinsic["status"] == "unavailable"
+    assert intrinsic["evidence"]["dcf_stress_reference"] is None
+    assert result["valuation_evidence"]["map"]["dcf_stress_candidate"] is None
+    assert result["valuation_evidence"]["map"]["normal_interest_range"] is None
+
+
+def test_quality_premium_keeps_missing_factors_unavailable_without_score() -> None:
+    financial = {
+        "ticker": "AMAT", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 100.0, "operating_income": 20.0, "fcf": 10.0}},
+            {"kind": "quarter", "label": "Q3 FY2026", "metrics": {"diluted_shares": 800.0}},
+            {"kind": "ttm", "period_end": "2026-07-26", "metrics": {"revenue": 120.0, "operating_income": 30.0, "fcf": 12.0}},
+        ],
+        "balance_sheet": {}, "guidance": {}, "documents": [],
+    }
+
+    result = compute_personal_analysis(financial)
+    quality = result["valuation_evidence"]["axes"]["quality_premium"]
+    evidence = {row["id"]: row for row in quality["evidence"]}
+    assert "score" not in quality
+    assert evidence["roic"]["value"] is None
+    assert evidence["roic"]["status"] == "unavailable"
+    assert evidence["multi_year_revision"]["status"] == "unavailable"
+    assert evidence["recurring_revenue"]["status"] == "unavailable"
+    assert quality["operational_eligible"] is False
+
+
+def test_nvda_missing_q2_fcf_remains_null_and_blocks_intrinsic_axis() -> None:
+    financial = {
+        "ticker": "NVDA", "status": "partial",
+        "periods": [
+            {
+                "kind": "quarter", "label": "Q2 FY2027", "period_end": "2026-07-26",
+                "metrics": {"revenue": 96221.0, "operating_income": 63734.0, "fcf": None},
+            },
+            {
+                "kind": "year_to_date", "label": "6M FY2027", "period_end": "2026-07-26",
+                "metrics": {"revenue": 177837.0, "fcf": 69987.0},
+            },
+        ],
+        "balance_sheet": {}, "guidance": {}, "documents": [],
+    }
+
+    result = compute_personal_analysis(financial)
+    assert financial["periods"][0]["metrics"]["fcf"] is None
+    assert result["fundamental"]["status"] == "unavailable"
+    assert result["valuation_references"]["status"] == "unavailable"
+    assert result["valuation_evidence"]["axes"]["intrinsic_reverse"]["status"] == "unavailable"
+    assert result["valuation_evidence"]["operational_eligible"] is False
 
 
 def test_fundamental_trend_metrics_compare_ttm_with_fiscal_year_without_claiming_yoy() -> None:

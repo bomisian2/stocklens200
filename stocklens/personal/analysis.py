@@ -541,7 +541,7 @@ def _conditional_research_valuation(
     ttm_metrics: dict[str, Any],
     share_evidence: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Run a deterministic, non-operational equity cash-flow research grid.
+    """Run a deterministic, non-operational equity cash-flow stress grid.
 
     The grid reuses PR #2's audited arithmetic but does not claim that any of its
     growth, discount, or terminal assumptions are forecasts. Issued common shares
@@ -575,21 +575,21 @@ def _conditional_research_valuation(
     scenario_specs = [
         {
             "id": "low_growth_high_discount",
-            "label": "저성장·고할인 연구 조건",
+            "label": "저성장·고할인 스트레스 조건",
             "growth_rate": 0.00,
             "discount_rate": 0.13,
             "terminal_growth": 0.02,
         },
         {
             "id": "middle_grid_not_base_case",
-            "label": "중간 연구 격자(공식 기본값 아님)",
+            "label": "중간 스트레스 격자(공식 기본값 아님)",
             "growth_rate": 0.10,
             "discount_rate": 0.11,
             "terminal_growth": 0.025,
         },
         {
             "id": "high_growth_low_discount",
-            "label": "고성장·저할인 연구 조건",
+            "label": "고성장·저할인 스트레스 조건",
             "growth_rate": 0.20,
             "discount_rate": 0.09,
             "terminal_growth": 0.03,
@@ -687,13 +687,16 @@ def _conditional_research_valuation(
 
     return {
         "status": "research_only",
-        "grade": "conditional_research",
+        "grade": "dcf_stress_reference",
         "operational_eligible": False,
         "is_fair_value": False,
         "is_target_price": False,
         "is_buy_range": False,
+        "is_normal_interest_range": False,
+        "is_validated_crisis_range": False,
+        "range_label": "DCF 스트레스 참고 범위",
         "ticker": financial.get("ticker"),
-        "model_version": "levered_proxy_grid_v1",
+        "model_version": "levered_proxy_stress_grid_v2",
         "reused_engine": "PR #2 stocklens.dcf equity_fcf_schedule / solve_implied_fcf_growth",
         "cash_flow_definition": "reported TTM CFO minus reported CAPEX",
         "cash_flow_classification": "levered_equity_cash_flow_proxy_not_canonical_fcfe",
@@ -717,7 +720,7 @@ def _conditional_research_valuation(
             "discount_rates": [0.09, 0.11, 0.13],
             "terminal_growth_rates": [0.02, 0.025, 0.03],
             "selection_rule": (
-                "fixed deterministic stress grid; middle row is not a forecast, consensus, or official base case"
+                "fixed deterministic stress grid; no row is a forecast, consensus, normal fair value, or official base case"
             ),
             "source_status": "explicit_research_assumptions_not_external_forecasts",
         },
@@ -727,7 +730,224 @@ def _conditional_research_valuation(
             "할인율·성장률·터미널 성장률은 외부 전망이 아닌 연구 스트레스 격자",
             "순현금·부채·비영업자산을 더하거나 빼는 EV-to-equity 브리지를 적용하지 않음",
             "결과는 목표가격·매수구간·수익률 예측이 아님",
+            "역사적 도달 빈도를 검증하지 않아 위기 스트레스 범위로도 확정하지 않음",
         ],
+    }
+
+
+def _evidence_axis(
+    *,
+    source: Any,
+    source_hash: Any,
+    as_of: Any,
+    available_at: Any,
+    unit: Any,
+    calculation_basis: str,
+    status: str,
+    model_version: str,
+    evidence: Any = None,
+    missing: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return the common non-operational contract for one valuation axis."""
+
+    return {
+        "source": source,
+        "source_hash": source_hash,
+        "as_of": as_of,
+        "available_at": available_at,
+        "unit": unit,
+        "calculation_basis": calculation_basis,
+        "status": status,
+        "operational_eligible": False,
+        "model_version": model_version,
+        "evidence": evidence,
+        "missing": missing or [],
+    }
+
+
+def _valuation_evidence_contract(
+    *,
+    financial: dict[str, Any],
+    market_manifest: dict[str, Any],
+    fundamental: dict[str, Any],
+    valuation: dict[str, Any],
+) -> dict[str, Any]:
+    """Build four independent valuation-evidence axes without filling gaps.
+
+    The contract deliberately keeps unavailable history and peer axes empty. It
+    never turns missing evidence into a lower multiple, higher discount rate, or
+    zero-valued input.
+    """
+
+    ticker = financial.get("ticker")
+    latest_document = _latest_document(financial)
+    ttm = _period(financial, "ttm") or {}
+    metrics = fundamental.get("metrics", {})
+    guidance = fundamental.get("guidance_analysis", {})
+    share_evidence = PERSONAL_PILOT_UNIVERSE.get(str(ticker), {}).get("share_count_evidence")
+    conditional = valuation.get("conditional_research_valuation", {})
+
+    self_history = _evidence_axis(
+        source=None,
+        source_hash=None,
+        as_of=None,
+        available_at=None,
+        unit="valuation multiple and percentile",
+        calculation_basis=(
+            "point-in-time price divided by EPS or cash flow available at that timestamp; "
+            "corporate actions and acceptance time required"
+        ),
+        status="unavailable",
+        model_version="self_history_contract_v1",
+        missing=[
+            "rights-cleared point-in-time price ledger",
+            "acceptance-timestamped EPS/FCF ledger",
+            "validated 5-year and 10-year distributions",
+        ],
+    )
+    peer_relative = _evidence_axis(
+        source=None,
+        source_hash=None,
+        as_of=None,
+        available_at=None,
+        unit="relative valuation multiple",
+        calculation_basis=(
+            "peer median adjusted only by validated growth, margin, capital-efficiency, cash-flow conversion, "
+            "leverage, dilution, and cyclicality evidence"
+        ),
+        status="unavailable",
+        model_version="peer_relative_contract_v1",
+        missing=[
+            "same-date peer price and financial snapshots",
+            "validated peer membership",
+            "out-of-sample premium/discount coefficients",
+        ],
+    )
+
+    intrinsic_status = "research_only" if conditional.get("status") == "research_only" else "unavailable"
+    intrinsic_reverse = _evidence_axis(
+        source={
+            "financial": latest_document.get("url"),
+            "market": market_manifest.get("provider"),
+            "shares": (share_evidence or {}).get("source_url"),
+        },
+        source_hash={
+            "financial": latest_document.get("sha256"),
+            "market": market_manifest.get("sha256"),
+            "shares": None,
+        },
+        as_of={
+            "financial": ttm.get("period_end"),
+            "price": market_manifest.get("market_date"),
+            "shares": (share_evidence or {}).get("as_of"),
+        },
+        available_at={
+            "financial": latest_document.get("published_at"),
+            "price_collected_at": market_manifest.get("collected_at_utc"),
+            "shares": (share_evidence or {}).get("published_at"),
+        },
+        unit={"price": "USD/share", "cash_flow": "USD millions", "shares": "million shares"},
+        calculation_basis=(
+            "current-price reverse growth and a fixed DCF stress grid using reported TTM CFO minus CAPEX; "
+            "not canonical FCFF or complete FCFE"
+        ),
+        status=intrinsic_status,
+        model_version=str(conditional.get("model_version") or "intrinsic_reverse_contract_v1"),
+        evidence={
+            "current_market_expectation": conditional.get("implied_growth_sensitivity"),
+            "dcf_stress_reference": conditional.get("scenario_values"),
+            "terminal_value_share": [
+                row.get("terminal_value_share") for row in conditional.get("scenario_values", [])
+            ],
+            "date_gap_days": conditional.get("date_gap_days"),
+            "selected_base_value": None,
+            "normal_interest_range": None,
+            "validated_crisis_range": None,
+        },
+        missing=list(conditional.get("limitations", [])),
+    )
+
+    net_cash = metrics.get("known_net_cash", {})
+    quality_rows = [
+        {
+            "id": "revenue_change",
+            "label": "TTM 매출 변화",
+            "value": metrics.get("ttm_revenue_change_vs_fy2025", {}).get("value"),
+            "status": metrics.get("ttm_revenue_change_vs_fy2025", {}).get("status", "unavailable"),
+            "note": "FY 대비 rolling TTM 변화이며 장기 성장률이나 YoY가 아님",
+        },
+        {
+            "id": "operating_margin",
+            "label": "TTM 영업마진",
+            "value": metrics.get("ttm_operating_margin", {}).get("value"),
+            "status": metrics.get("ttm_operating_margin", {}).get("status", "unavailable"),
+        },
+        {
+            "id": "fcf_margin",
+            "label": "TTM FCF 마진",
+            "value": metrics.get("ttm_fcf_margin", {}).get("value"),
+            "status": metrics.get("ttm_fcf_margin", {}).get("status", "unavailable"),
+        },
+        {
+            "id": "net_cash_or_debt",
+            "label": "확인 범위 순현금·순부채",
+            "value_usd_millions": net_cash.get("value_usd_millions"),
+            "status": net_cash.get("status", "unavailable"),
+            "note": net_cash.get("note"),
+        },
+        {
+            "id": "issuer_guidance",
+            "label": "회사 공식 가이던스",
+            "value": guidance.get("rows") or None,
+            "status": guidance.get("status", "unavailable"),
+        },
+        {
+            "id": "share_evidence",
+            "label": "발행주식·희석 근거",
+            "value": share_evidence,
+            "status": "partial" if share_evidence else "unavailable",
+            "note": "기준일 발행주식 수이며 완전희석 주식 수가 아님" if share_evidence else None,
+        },
+        {"id": "roic", "label": "다년 ROIC", "value": None, "status": "unavailable"},
+        {"id": "multi_year_revision", "label": "다년 전망 revision", "value": None, "status": "unavailable"},
+        {"id": "recurring_revenue", "label": "반복매출·전환비용", "value": None, "status": "unavailable"},
+    ]
+    quality_premium = _evidence_axis(
+        source={"financial": latest_document.get("url"), "shares": (share_evidence or {}).get("source_url")},
+        source_hash={"financial": latest_document.get("sha256"), "shares": None},
+        as_of={"financial": ttm.get("period_end"), "shares": (share_evidence or {}).get("as_of")},
+        available_at={
+            "financial": latest_document.get("published_at"),
+            "shares": (share_evidence or {}).get("published_at"),
+        },
+        unit="mixed evidence; no aggregate premium score",
+        calculation_basis="display verified quality drivers independently; do not aggregate into an AI premium",
+        status="partial" if fundamental.get("status") in {"verified", "partial"} else "unavailable",
+        model_version="quality_premium_evidence_v1",
+        evidence=quality_rows,
+        missing=[row["label"] for row in quality_rows if row.get("status") == "unavailable"],
+    )
+
+    return {
+        "model_version": "valuation_evidence_contract_v1",
+        "operational_eligible": False,
+        "axes": {
+            "self_history": self_history,
+            "peer_relative": peer_relative,
+            "intrinsic_reverse": intrinsic_reverse,
+            "quality_premium": quality_premium,
+        },
+        "map": {
+            "normal_interest_range": None,
+            "high_expectation_range": None,
+            "validated_crisis_stress_range": None,
+            "dcf_stress_candidate": conditional.get("research_per_share_outer_range"),
+            "status": "research_only" if intrinsic_status == "research_only" else "unavailable",
+            "reason": (
+                "자기 역사와 피어 상대가치가 미확보되어 정상 관심 범위를 산출하지 않았습니다. "
+                "DCF 격자는 역사적 도달 빈도 검증 전 스트레스 후보일 뿐입니다."
+            ),
+        },
     }
 def _investment_questions(
     financial: dict[str, Any],
@@ -989,6 +1209,12 @@ def compute_personal_analysis(
         candidate = pd.to_numeric(market_frame["close"], errors="coerce").dropna()
         latest_price = float(candidate.iloc[-1]) if not candidate.empty else None
     valuation_references = _research_valuation_references(financial, latest_price, manifest.get("market_date"))
+    valuation_evidence = _valuation_evidence_contract(
+        financial=financial,
+        market_manifest=manifest,
+        fundamental=fundamental,
+        valuation=valuation_references,
+    )
     future_estimates = _future_estimate_references(estimates, latest_price, manifest.get("market_date"))
     technical_interpretation = _technical_interpretation(technical, relative)
     performance_label = "판단 부족"
@@ -1023,6 +1249,7 @@ def compute_personal_analysis(
         "technical": technical,
         "relative_strength": relative,
         "valuation_references": valuation_references,
+        "valuation_evidence": valuation_evidence,
         "future_estimates": future_estimates,
         "security_structure": {
             "point_in_time_share_evidence": PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("share_count_evidence"),
