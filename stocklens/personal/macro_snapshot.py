@@ -13,11 +13,12 @@ import io
 import json
 import math
 import re
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import requests
 
@@ -29,7 +30,7 @@ from .market_regime import (
 from .storage import atomic_write_bytes, atomic_write_json
 
 
-MACRO_COLLECTOR_VERSION = "official-macro-snapshot-v2"
+MACRO_COLLECTOR_VERSION = "official-macro-snapshot-v3"
 FRED_SERIES = (
     "DFF",
     "DGS2",
@@ -45,12 +46,18 @@ FRED_DOWNLOAD_URL = (
     "https://fred.stlouisfed.org/graph/fredgraph.csv?"
     "cosd=2024-01-01&id=" + ",".join(FRED_SERIES)
 )
+FRED_GRAPH_BASE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+FRED_MONTHLY_SERIES = {"CPIAUCSL", "PCEPI", "UNRATE", "PAYEMS"}
+FRED_DAILY_SERIES = set(FRED_SERIES) - FRED_MONTHLY_SERIES
 CBOE_VIX_DOWNLOAD_URL = (
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 )
 FRED_TERMS_URL = "https://fred.stlouisfed.org/docs/api/terms_of_use.html"
 CBOE_VIX_SOURCE_PAGE = "https://www.cboe.com/tradable-products/vix/vix-historical-data"
 USER_AGENT = "StockLens200-personal-research/1.0 (local-only; no redistribution)"
+CONNECT_TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 90
+STREAM_CHUNK_BYTES = 64 * 1024
 
 
 class OfficialMacroSnapshotError(RuntimeError):
@@ -105,6 +112,37 @@ def _attempt_id(collected: datetime) -> str:
     return value
 
 
+def _shift_months(value: date, months: int) -> date:
+    index = value.year * 12 + value.month - 1 + months
+    year, month_index = divmod(index, 12)
+    return date(year, month_index + 1, 1)
+
+
+def fred_series_window(series: str, analysis_as_of: date) -> tuple[date, date]:
+    """Return the deterministic minimum history window required by v3."""
+
+    if series not in FRED_SERIES:
+        raise OfficialMacroSnapshotError(f"Unsupported FRED series: {series}")
+    if series in FRED_MONTHLY_SERIES:
+        start = _shift_months(analysis_as_of, -24)
+    else:
+        # 180 calendar days provides margin for at least 120 daily/trading observations.
+        start = date.fromordinal(analysis_as_of.toordinal() - 180)
+    return start, analysis_as_of
+
+
+def fred_series_url(series: str, analysis_as_of: date) -> str:
+    start, end = fred_series_window(series, analysis_as_of)
+    query = urlencode(
+        {
+            "cosd": start.isoformat(),
+            "coed": end.isoformat(),
+            "id": series,
+        }
+    )
+    return f"{FRED_GRAPH_BASE_URL}?{query}"
+
+
 def _attempt_manifest_path(root: Path, attempt_id: str) -> Path:
     return root / "macro" / "attempts" / attempt_id / "attempt.json"
 
@@ -119,6 +157,7 @@ def _write_attempt_manifest(
     http_results: dict[str, dict[str, Any]],
     diagnostic_code: str | None = None,
     message: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     manifest: dict[str, Any] = {
         "schema_version": 1,
@@ -134,6 +173,8 @@ def _write_attempt_manifest(
         manifest["diagnostic_code"] = diagnostic_code
     if message:
         manifest["message"] = message
+    if extra:
+        manifest.update(extra)
     atomic_write_json(_attempt_manifest_path(root, attempt_id), manifest)
 
 
@@ -202,6 +243,48 @@ def parse_fred_csv(payload: bytes) -> dict[str, list[tuple[date, float]]]:
         if not values:
             raise OfficialMacroSnapshotError(f"FRED series has no observations: {series}")
     return result
+
+
+def parse_fred_series_csv(payload: bytes, series: str) -> list[tuple[date, float]]:
+    """Parse one official fredgraph.csv series without filling missing values."""
+
+    if series not in FRED_SERIES:
+        raise OfficialMacroSnapshotError(f"Unsupported FRED series: {series}")
+    try:
+        encoding = "utf-16" if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        text = payload.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise OfficialMacroSnapshotError(
+            f"FRED {series} response has unsupported encoding or invalid CSV bytes"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise OfficialMacroSnapshotError(f"FRED {series} CSV has no header")
+    date_field = next(
+        (field for field in ("observation_date", "DATE", "date") if field in reader.fieldnames),
+        None,
+    )
+    if date_field is None or series not in reader.fieldnames:
+        raise OfficialMacroSnapshotError(
+            f"FRED {series} CSV is missing observation_date or series column"
+        )
+    values: list[tuple[date, float]] = []
+    seen: set[date] = set()
+    for row in reader:
+        observed_on = _parse_iso_or_us_date(str(row.get(date_field, "")))
+        value = _finite_float(str(row.get(series, "")))
+        if value is None:
+            continue
+        if observed_on in seen:
+            raise OfficialMacroSnapshotError(
+                f"Duplicate FRED observation: {series} {observed_on.isoformat()}"
+            )
+        seen.add(observed_on)
+        values.append((observed_on, value))
+    values.sort(key=lambda item: item[0])
+    if not values:
+        raise OfficialMacroSnapshotError(f"FRED series has no observations: {series}")
+    return values
 
 
 def parse_cboe_vix_csv(payload: bytes) -> tuple[date, float]:
@@ -366,6 +449,239 @@ def normalize_official_macro_responses(
     ]
 
 
+def normalize_partial_macro_series(
+    series: dict[str, list[tuple[date, float]]],
+    source_hashes: dict[str, str],
+    *,
+    collected_at: str,
+    vix_observation: tuple[date, float] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Normalize only available series and retain per-input failures as missing."""
+
+    collected = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+    if collected.tzinfo is None:
+        raise OfficialMacroSnapshotError("collected_at must include a timezone")
+    available_at = collected.astimezone(timezone.utc).isoformat()
+    observations: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    fred_source = "FRED official graph CSV"
+
+    def add_latest(series_id: str, metric_id: str, unit: str, basis: str) -> None:
+        values = series.get(series_id)
+        if not values:
+            errors[series_id] = "missing_or_blocked"
+            return
+        observed_on, value = values[-1]
+        observations.append(
+            _observation(
+                metric_id,
+                value,
+                unit,
+                f"{fred_source}:{series_id}",
+                source_hashes[series_id],
+                observed_on,
+                available_at,
+                "daily",
+                basis,
+            )
+        )
+
+    add_latest("DFF", "policy_rate_pct", "percent", "latest DFF observation")
+    add_latest("DGS2", "treasury_2y_yield_pct", "percent", "latest DGS2 observation")
+    add_latest("DGS10", "treasury_10y_yield_pct", "percent", "latest DGS10 observation")
+
+    if series.get("DGS2") and series.get("DGS10"):
+        try:
+            spread_date, common_2y, common_10y = _latest_common(series["DGS2"], series["DGS10"])
+            observations.append(
+                _observation(
+                    "treasury_2s10s_spread_pp",
+                    common_10y - common_2y,
+                    "percentage_point",
+                    f"{fred_source}:DGS10-DGS2",
+                    _sha256(
+                        f"{source_hashes['DGS10']}:{source_hashes['DGS2']}".encode("ascii")
+                    ),
+                    spread_date,
+                    available_at,
+                    "daily",
+                    "same-date DGS10 minus DGS2",
+                )
+            )
+        except OfficialMacroSnapshotError as exc:
+            errors["DGS2_DGS10_SPREAD"] = str(exc)
+    else:
+        errors["DGS2_DGS10_SPREAD"] = "missing_or_blocked_component"
+
+    for series_id, metric_id, ratio, unit, basis in (
+        ("UNRATE", "unemployment_rate_change_3m_pp", False, "percentage_point", "latest minus three calendar months earlier"),
+        ("PAYEMS", "employment_growth_3m_ratio", True, "ratio", "latest / three calendar months earlier - 1"),
+    ):
+        values = series.get(series_id)
+        if not values:
+            errors[series_id] = "missing_or_blocked"
+            continue
+        try:
+            observed_on, value = _monthly_change_3m(values, ratio=ratio)
+            observations.append(
+                _observation(metric_id, value, unit, f"{fred_source}:{series_id}", source_hashes[series_id], observed_on, available_at, "monthly", basis)
+            )
+        except OfficialMacroSnapshotError as exc:
+            errors[series_id] = str(exc)
+
+    for series_id, metric_id in (
+        ("CPIAUCSL", "cpi_yoy_trend_3m_pp"),
+        ("PCEPI", "pce_yoy_trend_3m_pp"),
+    ):
+        values = series.get(series_id)
+        if not values:
+            errors[series_id] = "missing_or_blocked"
+            continue
+        try:
+            observed_on, value = _yoy_trend_3m(values)
+            observations.append(
+                _observation(metric_id, value, "percentage_point", f"{fred_source}:{series_id}", source_hashes[series_id], observed_on, available_at, "monthly", "latest YoY percent minus YoY percent three months earlier")
+            )
+        except OfficialMacroSnapshotError as exc:
+            errors[series_id] = str(exc)
+
+    dollar_values = series.get("DTWEXBGS")
+    if dollar_values:
+        if len(dollar_values) >= 64 and dollar_values[-64][1] != 0:
+            observed_on, latest = dollar_values[-1]
+            observations.append(
+                _observation("broad_dollar_return_63d_ratio", latest / dollar_values[-64][1] - 1, "ratio", f"{fred_source}:DTWEXBGS", source_hashes["DTWEXBGS"], observed_on, available_at, "daily", "latest / 63 observations earlier - 1; not DXY")
+            )
+        else:
+            errors["DTWEXBGS"] = "requires_64_nonzero_observations"
+    else:
+        errors["DTWEXBGS"] = "missing_or_blocked"
+
+    add_latest("BAMLH0A0HYM2", "hy_oas_pct", "percent", "latest ICE BofA US High Yield OAS")
+    if vix_observation is not None and "cboe_vix" in source_hashes:
+        vix_date, vix_close = vix_observation
+        observations.append(
+            _observation("vix_index", vix_close, "index_point", "Cboe official VIX historical daily CSV", source_hashes["cboe_vix"], vix_date, available_at, "daily", "latest official VIX daily close")
+        )
+    else:
+        errors["cboe_vix"] = "missing_or_blocked"
+    return observations, errors
+
+
+def _stream_official_response(
+    client: requests.Session,
+    *,
+    source_id: str,
+    url: str,
+    attempt_dir: Path,
+    collected_at: str,
+    headers: dict[str, str],
+) -> tuple[bytes | None, dict[str, Any]]:
+    """Perform one non-retrying request and preserve complete or partial bytes."""
+
+    base_result: dict[str, Any] = {
+        "source_id": source_id,
+        "requested_url": url,
+        "collected_at": collected_at,
+        "status": "blocked",
+    }
+    try:
+        response = client.get(
+            url,
+            headers=headers,
+            timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+            stream=True,
+        )
+    except requests.RequestException as exc:
+        base_result.update(
+            {
+                "diagnostic_code": type(exc).__name__,
+                "message": f"request failed before response headers ({type(exc).__name__})",
+                "incomplete": True,
+                "actual_bytes": 0,
+            }
+        )
+        return None, base_result
+
+    final_url = str(response.url)
+    try:
+        _validate_final_url("cboe_vix" if source_id == "cboe_vix" else "fred", final_url)
+    except OfficialMacroSnapshotError as exc:
+        base_result.update(
+            {
+                "diagnostic_code": type(exc).__name__,
+                "message": str(exc),
+                "incomplete": True,
+                "actual_bytes": 0,
+            }
+        )
+        return None, base_result
+
+    result = {
+        **base_result,
+        "final_url": final_url,
+        "http_status": int(response.status_code),
+        "content_type": str(response.headers.get("Content-Type") or ""),
+        "content_encoding": str(response.headers.get("Content-Encoding") or ""),
+        "declared_content_length": str(response.headers.get("Content-Length") or ""),
+    }
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    partial_path = attempt_dir / f"{source_id}.streaming.partial"
+    digest = hashlib.sha256()
+    actual_bytes = 0
+    try:
+        with partial_path.open("wb") as stream:
+            for chunk in response.iter_content(chunk_size=STREAM_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                stream.write(chunk)
+                stream.flush()
+                digest.update(chunk)
+                actual_bytes += len(chunk)
+            os.fsync(stream.fileno())
+    except requests.RequestException as exc:
+        partial_hash = digest.hexdigest()
+        preserved = attempt_dir / f"{source_id}.partial.{partial_hash}.bin"
+        os.replace(partial_path, preserved)
+        result.update(
+            {
+                "status": "blocked",
+                "diagnostic_code": type(exc).__name__,
+                "message": f"stream interrupted ({type(exc).__name__})",
+                "incomplete": True,
+                "actual_bytes": actual_bytes,
+                "sha256": partial_hash,
+                "attempt_raw_path": preserved.name,
+            }
+        )
+        return None, result
+
+    payload_hash = digest.hexdigest()
+    preserved = attempt_dir / f"{source_id}.{payload_hash}.bin"
+    os.replace(partial_path, preserved)
+    result.update(
+        {
+            "actual_bytes": actual_bytes,
+            "sha256": payload_hash,
+            "attempt_raw_path": preserved.name,
+            "incomplete": False,
+        }
+    )
+    try:
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        result.update(
+            {
+                "status": "blocked",
+                "diagnostic_code": type(exc).__name__,
+                "message": f"HTTP response rejected ({type(exc).__name__})",
+            }
+        )
+        return None, result
+    result["status"] = "received"
+    return preserved.read_bytes(), result
+
+
 def collect_official_macro_snapshot(
     data_dir: str | Path,
     *,
@@ -374,21 +690,59 @@ def collect_official_macro_snapshot(
     qqq_csv_path: str | Path | None = None,
     qqq_manifest_path: str | Path | None = None,
     minimum_coverage: float = REGIME_MINIMUM_COVERAGE,
+    minimum_axis_coverage: float = REGIME_MINIMUM_COVERAGE,
+    canary_only: bool = False,
+    fail_fast_canary: bool = True,
 ) -> OfficialMacroCollectionResult:
-    """Fetch once from FRED and Cboe and atomically publish a local snapshot."""
+    """Collect split official series with a DFF canary and partial-success gate."""
 
     client = session or requests.Session()
     collected = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     root = Path(data_dir)
     attempt_id = _attempt_id(collected)
     attempt_dir = root / "macro" / "attempts" / attempt_id
+    analysis_date = collected.date()
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/csv,*/*;q=0.5",
         "Accept-Encoding": "identity",
     }
-    payloads: dict[str, bytes] = {}
+    plan = [
+        {
+            "source_id": f"fred_{series}",
+            "series": series,
+            "url": fred_series_url(series, analysis_date),
+            "window": [
+                item.isoformat() for item in fred_series_window(series, analysis_date)
+            ],
+        }
+        for series in FRED_SERIES
+    ]
     http_results: dict[str, dict[str, Any]] = {}
+    valid_payloads: dict[str, bytes] = {}
+    parsed_series: dict[str, list[tuple[date, float]]] = {}
+    source_hashes: dict[str, str] = {}
+    normalization_errors: dict[str, str] = {}
+    requests_made = 0
+    plan_metadata = {
+        "request_plan": [
+            {
+                "source_id": item["source_id"],
+                "series": item["series"],
+                "window": item["window"],
+            }
+            for item in plan
+        ],
+        "canary": "fred_DFF",
+        "canary_only": canary_only,
+        "fail_fast_canary": fail_fast_canary,
+        "automatic_retry": False,
+        "max_concurrency": 1,
+        "timeout_seconds": {
+            "connect": CONNECT_TIMEOUT_SECONDS,
+            "read": READ_TIMEOUT_SECONDS,
+        },
+    }
     _write_attempt_manifest(
         root,
         attempt_id,
@@ -396,90 +750,62 @@ def collect_official_macro_snapshot(
         status="collecting",
         requests_made=0,
         http_results=http_results,
+        extra=plan_metadata,
     )
-    for name, url in (("fred", FRED_DOWNLOAD_URL), ("cboe_vix", CBOE_VIX_DOWNLOAD_URL)):
-        _validate_final_url(name, url)
-        try:
-            response = client.get(url, headers=headers, timeout=30)
-        except requests.RequestException as exc:
-            error = OfficialMacroSnapshotError(
-                f"{name} collection failed ({type(exc).__name__}); last-good snapshot preserved",
-                details={
-                    "attempt_id": attempt_id,
-                    "requests_made": len(http_results) + 1,
-                    "http_results": http_results,
-                },
+
+    for index, item in enumerate(plan):
+        source_id = str(item["source_id"])
+        series_id = str(item["series"])
+        url = str(item["url"])
+        _validate_final_url("fred", url)
+        requests_made += 1
+        payload, result = _stream_official_response(
+            client,
+            source_id=source_id,
+            url=url,
+            attempt_dir=attempt_dir,
+            collected_at=collected.isoformat(),
+            headers=headers,
+        )
+        http_results[source_id] = result
+        if payload is not None:
+            try:
+                parsed_series[series_id] = parse_fred_series_csv(payload, series_id)
+                valid_payloads[series_id] = payload
+                source_hashes[series_id] = str(result["sha256"])
+                result["status"] = "validated"
+            except OfficialMacroSnapshotError as exc:
+                result.update(
+                    {
+                        "status": "blocked_parse",
+                        "diagnostic_code": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+                normalization_errors[series_id] = str(exc)
+        else:
+            normalization_errors[series_id] = str(
+                result.get("diagnostic_code") or "transport_blocked"
             )
-            _write_attempt_manifest(
-                root,
-                attempt_id,
-                collected_at=collected.isoformat(),
-                status="blocked",
-                requests_made=len(http_results) + 1,
-                http_results=http_results,
-                diagnostic_code=type(error).__name__,
-                message=str(error),
-            )
-            raise error from exc
-        final_url = str(response.url)
-        try:
-            _validate_final_url(name, final_url)
-        except OfficialMacroSnapshotError as exc:
-            error = OfficialMacroSnapshotError(
-                f"{exc}; last-good snapshot preserved",
-                details={
-                    "attempt_id": attempt_id,
-                    "requests_made": len(http_results) + 1,
-                    "http_results": http_results,
-                },
-            )
-            _write_attempt_manifest(
-                root,
-                attempt_id,
-                collected_at=collected.isoformat(),
-                status="blocked",
-                requests_made=len(http_results) + 1,
-                http_results=http_results,
-                diagnostic_code=type(error).__name__,
-                message=str(error),
-            )
-            raise error from exc
-        payload = bytes(response.content)
-        payload_hash = _sha256(payload)
-        attempt_raw_path = attempt_dir / f"{name}.{payload_hash}.bin"
-        atomic_write_bytes(attempt_raw_path, payload)
-        result = {
-            "source_id": name,
-            "requested_url": url,
-            "final_url": final_url,
-            "http_status": int(response.status_code),
-            "content_type": str(response.headers.get("Content-Type") or ""),
-            "content_encoding": str(response.headers.get("Content-Encoding") or ""),
-            "declared_content_length": str(response.headers.get("Content-Length") or ""),
-            "actual_bytes": len(payload),
-            "sha256": payload_hash,
-            "attempt_raw_path": f"{name}.{payload_hash}.bin",
-            "collected_at": collected.isoformat(),
-        }
-        http_results[name] = result
-        payloads[name] = payload
         _write_attempt_manifest(
             root,
             attempt_id,
             collected_at=collected.isoformat(),
             status="collecting",
-            requests_made=len(http_results),
+            requests_made=requests_made,
             http_results=http_results,
+            extra={**plan_metadata, "normalization_errors": normalization_errors},
         )
-        try:
-            response.raise_for_status()
-        except requests.RequestException as exc:
+
+        if index == 0 and series_id not in parsed_series and fail_fast_canary:
             error = OfficialMacroSnapshotError(
-                f"{name} collection failed ({type(exc).__name__}); last-good snapshot preserved",
+                "DFF canary failed; remaining official requests were not attempted; "
+                "last-good snapshot preserved",
                 details={
                     "attempt_id": attempt_id,
-                    "requests_made": len(http_results),
+                    "requests_made": requests_made,
                     "http_results": http_results,
+                    "normalization_errors": normalization_errors,
                 },
             )
             _write_attempt_manifest(
@@ -487,53 +813,106 @@ def collect_official_macro_snapshot(
                 attempt_id,
                 collected_at=collected.isoformat(),
                 status="blocked",
-                requests_made=len(http_results),
+                requests_made=requests_made,
                 http_results=http_results,
                 diagnostic_code=type(error).__name__,
                 message=str(error),
+                extra={**plan_metadata, "normalization_errors": normalization_errors},
             )
-            raise error from exc
+            raise error
+        if index == 0 and canary_only:
+            _write_attempt_manifest(
+                root,
+                attempt_id,
+                collected_at=collected.isoformat(),
+                status="canary_verified",
+                requests_made=requests_made,
+                http_results=http_results,
+                extra={**plan_metadata, "normalization_errors": normalization_errors},
+            )
+            return OfficialMacroCollectionResult(
+                status="canary_verified",
+                snapshot_path="",
+                observation_count=0,
+                overall_coverage=0.0,
+                collected_at=collected.isoformat(),
+                source_hashes=source_hashes,
+                requests_made=requests_made,
+                http_results=http_results,
+                attempt_id=attempt_id,
+            )
 
-    source_hashes = {name: _sha256(payload) for name, payload in payloads.items()}
-    try:
-        observations = normalize_official_macro_responses(
-            payloads["fred"],
-            payloads["cboe_vix"],
-            collected_at=collected.isoformat(),
+    requests_made += 1
+    vix_payload, vix_result = _stream_official_response(
+        client,
+        source_id="cboe_vix",
+        url=CBOE_VIX_DOWNLOAD_URL,
+        attempt_dir=attempt_dir,
+        collected_at=collected.isoformat(),
+        headers=headers,
+    )
+    http_results["cboe_vix"] = vix_result
+    vix_observation: tuple[date, float] | None = None
+    if vix_payload is not None:
+        try:
+            vix_observation = parse_cboe_vix_csv(vix_payload)
+            valid_payloads["cboe_vix"] = vix_payload
+            source_hashes["cboe_vix"] = str(vix_result["sha256"])
+            vix_result["status"] = "validated"
+        except OfficialMacroSnapshotError as exc:
+            vix_result.update(
+                {
+                    "status": "blocked_parse",
+                    "diagnostic_code": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+            normalization_errors["cboe_vix"] = str(exc)
+    else:
+        normalization_errors["cboe_vix"] = str(
+            vix_result.get("diagnostic_code") or "transport_blocked"
         )
-    except OfficialMacroSnapshotError as exc:
-        error = OfficialMacroSnapshotError(
-            f"{exc}; last-good snapshot preserved",
-            details={
-                "attempt_id": attempt_id,
-                "requests_made": 2,
-                "http_results": http_results,
-                "source_hashes": source_hashes,
-            },
-        )
-        _write_attempt_manifest(
-            root,
-            attempt_id,
-            collected_at=collected.isoformat(),
-            status="blocked",
-            requests_made=2,
-            http_results=http_results,
-            diagnostic_code=type(error).__name__,
-            message=str(error),
-        )
-        raise error from exc
+
+    observations, derived_errors = normalize_partial_macro_series(
+        parsed_series,
+        source_hashes,
+        collected_at=collected.isoformat(),
+        vix_observation=vix_observation,
+    )
+    for source_id, reason in derived_errors.items():
+        normalization_errors.setdefault(source_id, reason)
     if qqq_csv_path and qqq_manifest_path:
-        observations.extend(build_qqq_proxy_observations(qqq_csv_path, qqq_manifest_path))
-    regime = build_market_regime(observations, analysis_as_of=collected.isoformat())
-    if regime["overall_coverage"] < minimum_coverage:
+        try:
+            observations.extend(
+                build_qqq_proxy_observations(qqq_csv_path, qqq_manifest_path)
+            )
+        except (OSError, ValueError) as exc:
+            normalization_errors["qqq_proxy"] = f"{type(exc).__name__}: {exc}"
+
+    regime = build_market_regime(
+        observations,
+        analysis_as_of=collected.isoformat(),
+    )
+    axis_coverages = {
+        axis: float(regime[f"{axis}_regime"]["coverage"])
+        for axis in ("economy", "inflation", "risk")
+    }
+    coverage_eligible = (
+        float(regime["overall_coverage"]) >= minimum_coverage
+        and all(value >= minimum_axis_coverage for value in axis_coverages.values())
+    )
+    if not coverage_eligible:
         error = OfficialMacroSnapshotError(
-            f"coverage {regime['overall_coverage']:.1%} is below {minimum_coverage:.0%}; "
+            "overall or axis coverage is below the activation gate; "
             "last-good snapshot preserved",
             details={
                 "attempt_id": attempt_id,
-                "requests_made": 2,
+                "requests_made": requests_made,
                 "http_results": http_results,
                 "source_hashes": source_hashes,
+                "normalization_errors": normalization_errors,
+                "overall_coverage": regime["overall_coverage"],
+                "axis_coverages": axis_coverages,
             },
         )
         _write_attempt_manifest(
@@ -541,17 +920,30 @@ def collect_official_macro_snapshot(
             attempt_id,
             collected_at=collected.isoformat(),
             status="blocked",
-            requests_made=2,
+            requests_made=requests_made,
             http_results=http_results,
             diagnostic_code=type(error).__name__,
             message=str(error),
+            extra={
+                **plan_metadata,
+                "normalization_errors": normalization_errors,
+                "overall_coverage": regime["overall_coverage"],
+                "axis_coverages": axis_coverages,
+            },
         )
         raise error
 
     raw_dir = root / "macro" / "raw"
     snapshot_path = root / "macro" / "market_regime_snapshot.json"
-    fred_hash = _sha256(payloads["fred"])
-    vix_hash = _sha256(payloads["cboe_vix"])
+    promoted_paths: dict[str, str] = {}
+    for source_id, payload in valid_payloads.items():
+        payload_hash = source_hashes[source_id]
+        filename = f"{source_id}.{payload_hash}.csv"
+        atomic_write_bytes(raw_dir / filename, payload)
+        promoted_paths[source_id] = f"raw/{filename}"
+    partial_collection = any(
+        result.get("status") != "validated" for result in http_results.values()
+    )
     snapshot = {
         "schema_version": 1,
         "collector_version": MACRO_COLLECTOR_VERSION,
@@ -559,25 +951,37 @@ def collect_official_macro_snapshot(
         "availability_status": "current_snapshot_proxy",
         "point_in_time_history": False,
         "operational_eligible": False,
+        "collection_status": "partial" if partial_collection else "complete",
+        "normalization_errors": normalization_errors,
         "observations": observations,
         "regime": regime,
+        "coverage_gate": {
+            "minimum_overall": minimum_coverage,
+            "minimum_each_axis": minimum_axis_coverage,
+            "overall": regime["overall_coverage"],
+            "axes": axis_coverages,
+        },
         "sources": [
-            {"name": "FRED", **http_results["fred"], "series_ids": list(FRED_SERIES), "sha256": fred_hash, "raw_path": f"raw/fred_macro.{fred_hash}.csv", "terms_url": FRED_TERMS_URL},
-            {"name": "Cboe VIX", **http_results["cboe_vix"], "sha256": vix_hash, "raw_path": f"raw/cboe_vix.{vix_hash}.csv", "source_page": CBOE_VIX_SOURCE_PAGE},
+            {**result, "promoted_raw_path": promoted_paths.get(source_id)}
+            for source_id, result in http_results.items()
         ],
+        "terms": {"fred": FRED_TERMS_URL, "cboe_source_page": CBOE_VIX_SOURCE_PAGE},
     }
-    # Hash-addressed raw files keep an earlier snapshot's evidence intact even
-    # if a later multi-file publish is interrupted before the snapshot swap.
-    atomic_write_bytes(raw_dir / f"fred_macro.{fred_hash}.csv", payloads["fred"])
-    atomic_write_bytes(raw_dir / f"cboe_vix.{vix_hash}.csv", payloads["cboe_vix"])
     atomic_write_json(snapshot_path, snapshot)
     _write_attempt_manifest(
         root,
         attempt_id,
         collected_at=collected.isoformat(),
         status="promoted",
-        requests_made=2,
+        requests_made=requests_made,
         http_results=http_results,
+        extra={
+            **plan_metadata,
+            "normalization_errors": normalization_errors,
+            "overall_coverage": regime["overall_coverage"],
+            "axis_coverages": axis_coverages,
+            "collection_status": snapshot["collection_status"],
+        },
     )
     return OfficialMacroCollectionResult(
         status=regime["status"],
@@ -585,8 +989,8 @@ def collect_official_macro_snapshot(
         observation_count=len(observations),
         overall_coverage=float(regime["overall_coverage"]),
         collected_at=collected.isoformat(),
-        source_hashes={"fred": fred_hash, "cboe_vix": vix_hash},
-        requests_made=2,
+        source_hashes=source_hashes,
+        requests_made=requests_made,
         http_results=http_results,
         attempt_id=attempt_id,
     )

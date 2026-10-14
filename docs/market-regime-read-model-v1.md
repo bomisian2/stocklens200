@@ -32,19 +32,21 @@
 
 이는 경기·물가 전체를 대표하지 않는다. 전체 커버리지가 60% 미만이면 상태는 `proxy_low_confidence`이며 국면 조정 PER 밴드는 P35~P50을 그대로 유지한다.
 
-## Official Macro Snapshot Collector v1
+## Official Macro Snapshot Collector v3
 
-`python scripts/collect_official_macro.py`는 인증정보 없이 다음 읽기 전용 원천을 한 번씩 요청한다.
+`python scripts/collect_official_macro.py`는 인증정보 없이 다음 읽기 전용 원천을 계열별로 요청한다. 자동 재시도는 없다.
 
-- FRED graph CSV: DFF, DGS2, DGS10, CPIAUCSL, PCEPI, UNRATE, PAYEMS, BAMLH0A0HYM2, DTWEXBGS
-- Cboe 공식 VIX daily history CSV
+- FRED graph CSV 9회 이하: DFF canary가 성공한 경우에만 DGS2, DGS10, CPIAUCSL, PCEPI, UNRATE, PAYEMS, BAMLH0A0HYM2, DTWEXBGS를 각각 요청
+- Cboe 공식 VIX daily history CSV 1회 이하
 - 기존 로컬 QQQ 원시·비조정 캐시는 해시가 일치할 때만 결합
+
+월간 계열(CPI/PCE/실업률/고용)은 분석일 기준 최근 24개월, 일간 계열은 63관측과 휴일 여유를 위해 최근 180일만 요청한다. 연결/읽기 제한시간은 각각 10초/90초이며 `stream=True`로 받은 chunk를 attempt 임시파일에 즉시 기록한다. DFF canary가 실패하면 나머지 FRED와 Cboe를 호출하지 않는다. `--canary-only`는 DFF 한 번만 검사하고 활성 스냅샷을 만들지 않는다.
 
 FRED/Cboe의 실제 release timestamp를 원문에서 확보할 수 없으므로 현재 스냅샷의 `available_at`은 `collected_at`을 사용하고 `availability_status=current_snapshot_proxy`로 표시한다. 이는 현재 화면용 스냅샷이며 과거 백테스트용 진짜 vintage/PIT 자료가 아니다. DXY 대신 연준 명목 광의 달러지수를 쓰며 DXY로 표기하지 않는다.
 
 각 HTTP 응답은 공식 최종 URL을 확인한 직후, 디코딩·CSV 파싱 전에 Git에서 제외된 `private_data/macro/attempts/{attempt_id}/`에 SHA-256 파일명으로 보존한다. 같은 폴더의 `attempt.json`에는 요청 대상, HTTP 상태, 최종 공식 URL, Content-Type/Encoding/Length, 실제 byte 수, SHA-256, 수집 시각과 성공·차단 상태를 기록한다. 파싱, 두 번째 소스, 커버리지 검증 중 실패해도 attempt 증거는 남는다.
 
-두 공식 응답의 파싱·단위·중복·시점·커버리지 검증이 모두 성공한 경우에만 검증된 원문을 `private_data/macro/raw/`로 승격하고 `market_regime_snapshot.json`을 원자적으로 교체한다. 실패하면 이전 스냅샷과 검증된 원문을 보존하며, 이후 로드 시 지표별 freshness 규칙을 넘으면 `stale`로 제외한다. 결측값은 0으로 채우지 않는다.
+성공한 계열만 정규화하며 결측·실패 계열은 0으로 채우지 않는다. DGS2/DGS10 스프레드는 같은 날짜의 두 관측이 있을 때만 계산한다. 전체 coverage와 경기·물가·리스크 각 축 coverage가 모두 60% 이상일 때만 성공 계열의 검증 원문을 `private_data/macro/raw/`로 승격하고 `market_regime_snapshot.json`을 원자적으로 교체한다. 따라서 Cboe 또는 일부 FRED 계열이 실패해도 FRED+QQQ 등 나머지 검증 입력으로 모든 게이트를 만족하면 `collection_status=partial` 스냅샷을 만들 수 있다. 게이트 미달이면 이전 스냅샷과 검증된 원문을 보존한다.
 
 FRED 이용 고지: "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis." Cboe VIX 및 FRED가 호스팅하는 제3자 계열은 개인 로컬 연구 범위에서만 사용하며 공개 저장소에 원문을 재배포하지 않는다.
 
