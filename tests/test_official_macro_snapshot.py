@@ -26,11 +26,17 @@ VIX = (FIXTURES / "official_macro_vix.csv").read_bytes()
 
 
 class FakeResponse:
-    def __init__(self, content: bytes, status_code: int = 200, url: str = "") -> None:
+    def __init__(
+        self,
+        content: bytes,
+        status_code: int = 200,
+        url: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.content = content
         self.status_code = status_code
         self.url = url
-        self.headers = {"Content-Type": "text/csv"}
+        self.headers = headers or {"Content-Type": "text/csv"}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -80,6 +86,16 @@ def test_official_csv_parsers_and_normalization_are_reproducible() -> None:
     )
 
 
+def test_fred_parser_accepts_real_utf16_bom_bytes_fixture() -> None:
+    utf16_bytes_fixture = FRED.decode("utf-8").encode("utf-16")
+
+    assert utf16_bytes_fixture.startswith((b"\xff\xfe", b"\xfe\xff"))
+    parsed = parse_fred_csv(utf16_bytes_fixture)
+
+    assert len(parsed["DTWEXBGS"]) == 70
+    assert parsed["DFF"][-1][1] == parse_fred_csv(FRED)["DFF"][-1][1]
+
+
 def test_collector_writes_raw_hashes_and_coverage_above_gate(tmp_path: Path) -> None:
     session = FakeSession(
         {
@@ -109,6 +125,11 @@ def test_collector_writes_raw_hashes_and_coverage_above_gate(tmp_path: Path) -> 
         "fred": hashlib.sha256(FRED).hexdigest(),
         "cboe_vix": hashlib.sha256(VIX).hexdigest(),
     }
+    attempt_path = tmp_path / "macro" / "attempts" / result.attempt_id
+    attempt = json.loads((attempt_path / "attempt.json").read_text(encoding="utf-8"))
+    assert attempt["status"] == "promoted"
+    assert attempt["responses"]["fred"]["actual_bytes"] == len(FRED)
+    assert (attempt_path / attempt["responses"]["fred"]["attempt_raw_path"]).read_bytes() == FRED
 
 
 def test_failed_collection_preserves_last_good_snapshot(tmp_path: Path) -> None:
@@ -131,6 +152,77 @@ def test_failed_collection_preserves_last_good_snapshot(tmp_path: Path) -> None:
         )
     assert snapshot_path.read_bytes() == last_good
     assert not (tmp_path / "macro" / "raw").exists()
+    attempt_path = tmp_path / "macro" / "attempts" / "20260909T000000000000Z"
+    attempt = json.loads((attempt_path / "attempt.json").read_text(encoding="utf-8"))
+    assert attempt["status"] == "blocked"
+    assert attempt["responses"]["fred"]["sha256"] == hashlib.sha256(FRED).hexdigest()
+    assert (attempt_path / attempt["responses"]["fred"]["attempt_raw_path"]).read_bytes() == FRED
+    assert attempt["responses"]["cboe_vix"]["http_status"] == 503
+
+
+def test_invalid_csv_keeps_raw_bytes_and_transport_metadata(tmp_path: Path) -> None:
+    invalid_fred = b"\x80\x81not-a-csv"
+    snapshot_path = tmp_path / "macro" / "market_regime_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b'{"status":"last-good"}')
+    session = FakeSession(
+        {
+            FRED_DOWNLOAD_URL: FakeResponse(
+                invalid_fred,
+                url=FRED_DOWNLOAD_URL,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Encoding": "identity",
+                    "Content-Length": str(len(invalid_fred)),
+                },
+            ),
+            CBOE_VIX_DOWNLOAD_URL: FakeResponse(VIX, url=CBOE_VIX_DOWNLOAD_URL),
+        }
+    )
+
+    with pytest.raises(OfficialMacroSnapshotError, match="unsupported encoding or invalid CSV"):
+        collect_official_macro_snapshot(
+            tmp_path,
+            session=session,  # type: ignore[arg-type]
+            now=datetime(2026, 9, 9, tzinfo=timezone.utc),
+        )
+
+    attempt_path = tmp_path / "macro" / "attempts" / "20260909T000000000000Z"
+    attempt = json.loads((attempt_path / "attempt.json").read_text(encoding="utf-8"))
+    fred_result = attempt["responses"]["fred"]
+    assert attempt["status"] == "blocked"
+    assert fred_result["content_type"] == "application/octet-stream"
+    assert fred_result["content_encoding"] == "identity"
+    assert fred_result["declared_content_length"] == str(len(invalid_fred))
+    assert fred_result["actual_bytes"] == len(invalid_fred)
+    assert fred_result["sha256"] == hashlib.sha256(invalid_fred).hexdigest()
+    assert (attempt_path / fred_result["attempt_raw_path"]).read_bytes() == invalid_fred
+    assert not (tmp_path / "macro" / "raw").exists()
+    assert snapshot_path.read_bytes() == b'{"status":"last-good"}'
+
+
+def test_coverage_failure_keeps_attempt_evidence_without_promotion(tmp_path: Path) -> None:
+    session = FakeSession(
+        {
+            FRED_DOWNLOAD_URL: FakeResponse(FRED, url=FRED_DOWNLOAD_URL),
+            CBOE_VIX_DOWNLOAD_URL: FakeResponse(VIX, url=CBOE_VIX_DOWNLOAD_URL),
+        }
+    )
+
+    with pytest.raises(OfficialMacroSnapshotError, match="coverage"):
+        collect_official_macro_snapshot(
+            tmp_path,
+            session=session,  # type: ignore[arg-type]
+            now=datetime(2026, 9, 9, tzinfo=timezone.utc),
+            minimum_coverage=1.01,
+        )
+
+    attempt_path = tmp_path / "macro" / "attempts" / "20260909T000000000000Z"
+    attempt = json.loads((attempt_path / "attempt.json").read_text(encoding="utf-8"))
+    assert attempt["status"] == "blocked"
+    assert len(attempt["responses"]) == 2
+    assert not (tmp_path / "macro" / "raw").exists()
+    assert not (tmp_path / "macro" / "market_regime_snapshot.json").exists()
 
 
 def test_duplicate_fred_observation_is_rejected() -> None:

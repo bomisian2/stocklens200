@@ -42,7 +42,9 @@
 
 FRED/Cboe의 실제 release timestamp를 원문에서 확보할 수 없으므로 현재 스냅샷의 `available_at`은 `collected_at`을 사용하고 `availability_status=current_snapshot_proxy`로 표시한다. 이는 현재 화면용 스냅샷이며 과거 백테스트용 진짜 vintage/PIT 자료가 아니다. DXY 대신 연준 명목 광의 달러지수를 쓰며 DXY로 표기하지 않는다.
 
-원문 CSV, SHA-256, 정규화 스냅샷은 Git에서 제외된 `private_data/macro/`에 저장한다. 원문은 SHA-256 기반 불변 파일명으로 저장하고, 두 공식 응답의 파싱·단위·중복·시점·커버리지 검증이 모두 끝난 뒤에만 스냅샷을 원자적으로 교체한다. 실패하면 이전 스냅샷과 그 원문을 보존하며, 이후 로드 시 지표별 freshness 규칙을 넘으면 `stale`로 제외한다. 결측값은 0으로 채우지 않는다.
+각 HTTP 응답은 공식 최종 URL을 확인한 직후, 디코딩·CSV 파싱 전에 Git에서 제외된 `private_data/macro/attempts/{attempt_id}/`에 SHA-256 파일명으로 보존한다. 같은 폴더의 `attempt.json`에는 요청 대상, HTTP 상태, 최종 공식 URL, Content-Type/Encoding/Length, 실제 byte 수, SHA-256, 수집 시각과 성공·차단 상태를 기록한다. 파싱, 두 번째 소스, 커버리지 검증 중 실패해도 attempt 증거는 남는다.
+
+두 공식 응답의 파싱·단위·중복·시점·커버리지 검증이 모두 성공한 경우에만 검증된 원문을 `private_data/macro/raw/`로 승격하고 `market_regime_snapshot.json`을 원자적으로 교체한다. 실패하면 이전 스냅샷과 검증된 원문을 보존하며, 이후 로드 시 지표별 freshness 규칙을 넘으면 `stale`로 제외한다. 결측값은 0으로 채우지 않는다.
 
 FRED 이용 고지: "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis." Cboe VIX 및 FRED가 호스팅하는 제3자 계열은 개인 로컬 연구 범위에서만 사용하며 공개 저장소에 원문을 재배포하지 않는다.
 

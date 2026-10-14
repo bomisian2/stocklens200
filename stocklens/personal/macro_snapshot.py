@@ -12,11 +12,12 @@ import hashlib
 import io
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import requests
 
@@ -28,7 +29,7 @@ from .market_regime import (
 from .storage import atomic_write_bytes, atomic_write_json
 
 
-MACRO_COLLECTOR_VERSION = "official-macro-snapshot-v1"
+MACRO_COLLECTOR_VERSION = "official-macro-snapshot-v2"
 FRED_SERIES = (
     "DFF",
     "DGS2",
@@ -70,6 +71,7 @@ class OfficialMacroCollectionResult:
     source_hashes: dict[str, str]
     requests_made: int
     http_results: dict[str, dict[str, Any]]
+    attempt_id: str
 
 
 def _sha256(payload: bytes) -> str:
@@ -77,7 +79,12 @@ def _sha256(payload: bytes) -> str:
 
 
 def _validate_final_url(name: str, final_url: str) -> None:
-    host = (urlparse(final_url).hostname or "").lower()
+    parsed = urlparse(final_url)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise OfficialMacroSnapshotError(
+            f"{name} returned an unsafe final URL"
+        )
+    host = (parsed.hostname or "").lower()
     allowed = {
         "fred": {"fred.stlouisfed.org"},
         "cboe_vix": {"cdn.cboe.com", "cdn-api.cboe.com"},
@@ -86,6 +93,48 @@ def _validate_final_url(name: str, final_url: str) -> None:
         raise OfficialMacroSnapshotError(
             f"{name} redirected outside the approved official domains: {host or 'missing-host'}"
         )
+    sensitive_names = {"apikey", "api_key", "token", "access_token", "secret", "key"}
+    if any(key.lower() in sensitive_names for key, _ in parse_qsl(parsed.query)):
+        raise OfficialMacroSnapshotError(f"{name} returned a URL containing a secret-like query")
+
+
+def _attempt_id(collected: datetime) -> str:
+    value = collected.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    if not re.fullmatch(r"[0-9TZ]+", value):
+        raise OfficialMacroSnapshotError("Could not create a safe attempt identifier")
+    return value
+
+
+def _attempt_manifest_path(root: Path, attempt_id: str) -> Path:
+    return root / "macro" / "attempts" / attempt_id / "attempt.json"
+
+
+def _write_attempt_manifest(
+    root: Path,
+    attempt_id: str,
+    *,
+    collected_at: str,
+    status: str,
+    requests_made: int,
+    http_results: dict[str, dict[str, Any]],
+    diagnostic_code: str | None = None,
+    message: str | None = None,
+) -> None:
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "collector_version": MACRO_COLLECTOR_VERSION,
+        "attempt_id": attempt_id,
+        "collected_at": collected_at,
+        "status": status,
+        "requests_made": requests_made,
+        "responses": http_results,
+        "last_good_preserved": status != "promoted",
+    }
+    if diagnostic_code:
+        manifest["diagnostic_code"] = diagnostic_code
+    if message:
+        manifest["message"] = message
+    atomic_write_json(_attempt_manifest_path(root, attempt_id), manifest)
 
 
 def _parse_iso_or_us_date(value: str) -> date:
@@ -118,7 +167,9 @@ def parse_fred_csv(payload: bytes) -> dict[str, list[tuple[date, float]]]:
         encoding = "utf-16" if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
         text = payload.decode(encoding)
     except UnicodeDecodeError as exc:
-        raise OfficialMacroSnapshotError("FRED response is not UTF-8 CSV") from exc
+        raise OfficialMacroSnapshotError(
+            "FRED response has unsupported encoding or invalid CSV bytes"
+        ) from exc
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise OfficialMacroSnapshotError("FRED CSV has no header")
@@ -159,7 +210,9 @@ def parse_cboe_vix_csv(payload: bytes) -> tuple[date, float]:
     try:
         text = payload.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise OfficialMacroSnapshotError("Cboe VIX response is not UTF-8 CSV") from exc
+        raise OfficialMacroSnapshotError(
+            "Cboe VIX response has unsupported encoding or invalid CSV bytes"
+        ) from exc
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise OfficialMacroSnapshotError("Cboe VIX CSV has no header")
@@ -326,6 +379,9 @@ def collect_official_macro_snapshot(
 
     client = session or requests.Session()
     collected = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    root = Path(data_dir)
+    attempt_id = _attempt_id(collected)
+    attempt_dir = root / "macro" / "attempts" / attempt_id
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/csv,*/*;q=0.5",
@@ -333,25 +389,110 @@ def collect_official_macro_snapshot(
     }
     payloads: dict[str, bytes] = {}
     http_results: dict[str, dict[str, Any]] = {}
+    _write_attempt_manifest(
+        root,
+        attempt_id,
+        collected_at=collected.isoformat(),
+        status="collecting",
+        requests_made=0,
+        http_results=http_results,
+    )
     for name, url in (("fred", FRED_DOWNLOAD_URL), ("cboe_vix", CBOE_VIX_DOWNLOAD_URL)):
+        _validate_final_url(name, url)
         try:
             response = client.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
         except requests.RequestException as exc:
-            raise OfficialMacroSnapshotError(
+            error = OfficialMacroSnapshotError(
                 f"{name} collection failed ({type(exc).__name__}); last-good snapshot preserved",
-                details={"requests_made": len(http_results) + 1, "http_results": http_results},
-            ) from exc
+                details={
+                    "attempt_id": attempt_id,
+                    "requests_made": len(http_results) + 1,
+                    "http_results": http_results,
+                },
+            )
+            _write_attempt_manifest(
+                root,
+                attempt_id,
+                collected_at=collected.isoformat(),
+                status="blocked",
+                requests_made=len(http_results) + 1,
+                http_results=http_results,
+                diagnostic_code=type(error).__name__,
+                message=str(error),
+            )
+            raise error from exc
         final_url = str(response.url)
-        _validate_final_url(name, final_url)
-        payloads[name] = bytes(response.content)
-        http_results[name] = {
+        try:
+            _validate_final_url(name, final_url)
+        except OfficialMacroSnapshotError as exc:
+            error = OfficialMacroSnapshotError(
+                f"{exc}; last-good snapshot preserved",
+                details={
+                    "attempt_id": attempt_id,
+                    "requests_made": len(http_results) + 1,
+                    "http_results": http_results,
+                },
+            )
+            _write_attempt_manifest(
+                root,
+                attempt_id,
+                collected_at=collected.isoformat(),
+                status="blocked",
+                requests_made=len(http_results) + 1,
+                http_results=http_results,
+                diagnostic_code=type(error).__name__,
+                message=str(error),
+            )
+            raise error from exc
+        payload = bytes(response.content)
+        payload_hash = _sha256(payload)
+        attempt_raw_path = attempt_dir / f"{name}.{payload_hash}.bin"
+        atomic_write_bytes(attempt_raw_path, payload)
+        result = {
+            "source_id": name,
             "requested_url": url,
             "final_url": final_url,
             "http_status": int(response.status_code),
             "content_type": str(response.headers.get("Content-Type") or ""),
-            "content_length": len(response.content),
+            "content_encoding": str(response.headers.get("Content-Encoding") or ""),
+            "declared_content_length": str(response.headers.get("Content-Length") or ""),
+            "actual_bytes": len(payload),
+            "sha256": payload_hash,
+            "attempt_raw_path": f"{name}.{payload_hash}.bin",
+            "collected_at": collected.isoformat(),
         }
+        http_results[name] = result
+        payloads[name] = payload
+        _write_attempt_manifest(
+            root,
+            attempt_id,
+            collected_at=collected.isoformat(),
+            status="collecting",
+            requests_made=len(http_results),
+            http_results=http_results,
+        )
+        try:
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            error = OfficialMacroSnapshotError(
+                f"{name} collection failed ({type(exc).__name__}); last-good snapshot preserved",
+                details={
+                    "attempt_id": attempt_id,
+                    "requests_made": len(http_results),
+                    "http_results": http_results,
+                },
+            )
+            _write_attempt_manifest(
+                root,
+                attempt_id,
+                collected_at=collected.isoformat(),
+                status="blocked",
+                requests_made=len(http_results),
+                http_results=http_results,
+                diagnostic_code=type(error).__name__,
+                message=str(error),
+            )
+            raise error from exc
 
     source_hashes = {name: _sha256(payload) for name, payload in payloads.items()}
     try:
@@ -361,24 +502,52 @@ def collect_official_macro_snapshot(
             collected_at=collected.isoformat(),
         )
     except OfficialMacroSnapshotError as exc:
-        raise OfficialMacroSnapshotError(
+        error = OfficialMacroSnapshotError(
             f"{exc}; last-good snapshot preserved",
             details={
+                "attempt_id": attempt_id,
                 "requests_made": 2,
                 "http_results": http_results,
                 "source_hashes": source_hashes,
             },
-        ) from exc
+        )
+        _write_attempt_manifest(
+            root,
+            attempt_id,
+            collected_at=collected.isoformat(),
+            status="blocked",
+            requests_made=2,
+            http_results=http_results,
+            diagnostic_code=type(error).__name__,
+            message=str(error),
+        )
+        raise error from exc
     if qqq_csv_path and qqq_manifest_path:
         observations.extend(build_qqq_proxy_observations(qqq_csv_path, qqq_manifest_path))
     regime = build_market_regime(observations, analysis_as_of=collected.isoformat())
     if regime["overall_coverage"] < minimum_coverage:
-        raise OfficialMacroSnapshotError(
+        error = OfficialMacroSnapshotError(
             f"coverage {regime['overall_coverage']:.1%} is below {minimum_coverage:.0%}; "
-            "last-good snapshot preserved"
+            "last-good snapshot preserved",
+            details={
+                "attempt_id": attempt_id,
+                "requests_made": 2,
+                "http_results": http_results,
+                "source_hashes": source_hashes,
+            },
         )
+        _write_attempt_manifest(
+            root,
+            attempt_id,
+            collected_at=collected.isoformat(),
+            status="blocked",
+            requests_made=2,
+            http_results=http_results,
+            diagnostic_code=type(error).__name__,
+            message=str(error),
+        )
+        raise error
 
-    root = Path(data_dir)
     raw_dir = root / "macro" / "raw"
     snapshot_path = root / "macro" / "market_regime_snapshot.json"
     fred_hash = _sha256(payloads["fred"])
@@ -402,6 +571,14 @@ def collect_official_macro_snapshot(
     atomic_write_bytes(raw_dir / f"fred_macro.{fred_hash}.csv", payloads["fred"])
     atomic_write_bytes(raw_dir / f"cboe_vix.{vix_hash}.csv", payloads["cboe_vix"])
     atomic_write_json(snapshot_path, snapshot)
+    _write_attempt_manifest(
+        root,
+        attempt_id,
+        collected_at=collected.isoformat(),
+        status="promoted",
+        requests_made=2,
+        http_results=http_results,
+    )
     return OfficialMacroCollectionResult(
         status=regime["status"],
         snapshot_path=str(snapshot_path),
@@ -411,6 +588,7 @@ def collect_official_macro_snapshot(
         source_hashes={"fred": fred_hash, "cboe_vix": vix_hash},
         requests_made=2,
         http_results=http_results,
+        attempt_id=attempt_id,
     )
 
 
