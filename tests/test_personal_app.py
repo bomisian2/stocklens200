@@ -186,6 +186,10 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert avgo_metrics["TTM PER"] == "46.17배"
     assert avgo_metrics["정상 관심 후보 · 연구 전용"] != "미산출"
     assert avgo_metrics["자기 역사 정상 관심 후보"] != "미산출"
+    assert avgo_metrics["국면 조정 후보 · 연구 전용"] == avgo_metrics["자기 역사 정상 관심 후보"]
+    assert avgo_metrics["경기"] == "중립·혼재"
+    assert avgo_metrics["물가"] == "중립·혼재"
+    assert avgo_metrics["리스크"] == "중립"
     assert avgo_metrics["현재 v23 TTM PER"] == "46.17배"
     assert avgo_metrics["사용 표본"] == "21/21"
     avgo_markdown = " ".join(item.value for item in app.markdown)
@@ -205,6 +209,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "NVDA Q2 FCF: null 유지" in nvda_captions
     assert nvda_metrics["정상 관심 후보 · 연구 전용"] != "미산출"
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
+    assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 

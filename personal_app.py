@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,13 @@ import streamlit as st
 
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
 from stocklens.personal.market_data import compute_technical_snapshot
+from stocklens.personal.market_regime import (
+    MarketRegimeError,
+    build_market_regime,
+    build_qqq_proxy_observations,
+    build_regime_adjusted_candidate,
+    load_market_regime_snapshot,
+)
 from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
 from stocklens.personal.v23_adapter import (
     APPROVED_LEDGER_SHA256,
@@ -24,6 +32,7 @@ from stocklens.personal.v23_adapter import (
 DATA_DIR = Path(os.environ.get("STOCKLENS_PERSONAL_DATA_DIR", "private_data"))
 V23_LEDGER_PATH = os.environ.get("STOCKLENS_V23_LEDGER_PATH")
 V23_LEDGER_SHA256 = os.environ.get("STOCKLENS_V23_LEDGER_SHA256", APPROVED_LEDGER_SHA256)
+REGIME_SNAPSHOT_PATH = os.environ.get("STOCKLENS_REGIME_SNAPSHOT_PATH")
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -86,6 +95,7 @@ def _render_v23_comparison(
     market_path: Path,
     manifest_path: Path,
     financial_path: Path,
+    market_regime: dict[str, Any],
 ) -> dict[str, Any] | None:
     if ticker not in V23_SUPPORTED_TICKERS:
         return
@@ -182,6 +192,10 @@ def _render_v23_comparison(
         st.info("StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다. 날짜 정렬이나 비교값은 만들지 않습니다.")
 
     self_history = build_self_history_market_premium(v23_ticker)
+    self_history["regime_adjusted_candidate"] = build_regime_adjusted_candidate(
+        self_history,
+        market_regime,
+    )
     st.markdown("### 자기 역사 시장 프리미엄")
     st.warning(
         "reconstructed PIT 연구 전용 · operational_eligible=false. "
@@ -359,6 +373,24 @@ st.info(
 
 qqq_path = DATA_DIR / "market" / "QQQ.csv"
 comparison_qqq = load_market(str(qqq_path), _mtime(qqq_path))
+qqq_manifest_path = DATA_DIR / "market" / "QQQ.manifest.json"
+analysis_as_of = datetime.now(timezone.utc).isoformat()
+regime_error: str | None = None
+try:
+    if REGIME_SNAPSHOT_PATH:
+        market_regime = load_market_regime_snapshot(
+            REGIME_SNAPSHOT_PATH,
+            analysis_as_of=analysis_as_of,
+        )
+    else:
+        qqq_proxy_observations = build_qqq_proxy_observations(qqq_path, qqq_manifest_path)
+        market_regime = build_market_regime(
+            qqq_proxy_observations,
+            analysis_as_of=analysis_as_of,
+        )
+except (OSError, json.JSONDecodeError, MarketRegimeError, ValueError) as exc:
+    regime_error = str(exc)
+    market_regime = build_market_regime([], analysis_as_of=analysis_as_of)
 comparison_results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 for comparison_ticker in ("AMAT", "AVGO"):
     comparison_financial_path = DATA_DIR / "normalized" / "financials" / f"{comparison_ticker}.json"
@@ -555,6 +587,7 @@ v23_self_history = _render_v23_comparison(
     market_path=market_path,
     manifest_path=manifest_path,
     financial_path=financial_path,
+    market_regime=market_regime,
 )
 if ticker in COMPANY_PROFILES:
     st.subheader("A. 현재 상황")
@@ -664,6 +697,16 @@ with st.expander("공식 가이던스와 산식", expanded=True):
         st.write("공식 가이던스 미확보")
 
 st.subheader("C. 가치 지도 · 연구 전용")
+regime_labels = {
+    "expansion": "확장",
+    "slowdown": "둔화",
+    "neutral_mixed": "중립·혼재",
+    "stable_disinflation": "물가 안정·둔화",
+    "inflationary": "인플레이션",
+    "risk_on": "리스크온",
+    "risk_off": "리스크오프",
+    "neutral": "중립",
+}
 if analysis:
     references = analysis["valuation_references"]
     evidence_contract = analysis.get("valuation_evidence", {})
@@ -682,6 +725,31 @@ if analysis:
             "현재 시장 기대와 확보·미확보 근거를 먼저 보여줍니다."
         )
 
+    st.markdown("#### 현재 시장 국면 · 읽기 전용")
+    with st.container(horizontal=True):
+        for axis_key, label in (
+            ("economy_regime", "경기"),
+            ("inflation_regime", "물가"),
+            ("risk_regime", "리스크"),
+        ):
+            axis = market_regime[axis_key]
+            st.metric(
+                label,
+                regime_labels.get(axis["regime"], axis["regime"]),
+                f"신뢰 {axis['confidence']} · 커버리지 {axis['coverage']:.0%}",
+                border=True,
+            )
+    st.caption(
+        f"국면 기준일 {market_regime.get('as_of') or '미확보'} · 상태 {market_regime['status']} · "
+        f"전체 커버리지 {market_regime['overall_coverage']:.0%} · operational_eligible=false"
+    )
+    if regime_error:
+        st.warning(f"로컬 국면 입력 검증 실패로 빈 프록시 상태를 사용했습니다: {regime_error}")
+
+    adjusted_history = (
+        v23_self_history.get("regime_adjusted_candidate", {})
+        if v23_self_history else {}
+    )
     with st.container(horizontal=True):
         normal_history = (
             v23_self_history.get("normal_interest_candidate", {})
@@ -697,6 +765,18 @@ if analysis:
             normal_history_value,
             border=True,
             help="v23 현재 TTM EPS × 정제 역사 PER P35~P50. 정식 적정가나 운영 매수구간이 아닙니다.",
+        )
+        adjusted_history_value = (
+            f"${adjusted_history['low']:,.2f}~${adjusted_history['high']:,.2f}"
+            if adjusted_history.get("low") is not None and adjusted_history.get("high") is not None
+            else "미산출"
+        )
+        st.metric(
+            "국면 조정 후보 · 연구 전용",
+            adjusted_history_value,
+            "~".join(adjusted_history.get("basis_percentiles", [])) or "근거 미확보",
+            border=True,
+            help="현재 국면이 선택한 자기 역사 PER 분위수. 정식 적정가·매수구간·신호가 아닙니다.",
         )
         st.metric(
             "현재 시장 요구 성장",
@@ -714,6 +794,33 @@ if analysis:
         )
         st.metric("운영 투자판단", "비활성", border=True)
     st.caption("valuation_evidence operational_eligible=false · 연구 결과는 운영 매수·매도 판단에 연결되지 않습니다.")
+    if adjusted_history:
+        st.info(
+            "국면 조정 설명: " + " ".join(adjusted_history.get("rule_trace", []))
+            + ". 외부 거시 스냅샷이 없으면 QQQ 로컬 프록시만 사용하며 P35~P50을 유지합니다."
+        )
+    with st.expander("시장 국면 입력·프록시·규칙 상세", expanded=False):
+        st.write(f"- 모델: {market_regime['model_version']}")
+        st.write(f"- 분석 시각: {market_regime['analysis_as_of']}")
+        st.write(f"- 원천 해시: `{market_regime['source_hash']}`")
+        if market_regime["accepted_observations"]:
+            for observation in market_regime["accepted_observations"]:
+                st.write(
+                    f"- {observation['metric_id']}: {observation['value']:.4g} {observation['unit']} · "
+                    f"{observation['status']} · 기준 {observation['as_of']} · 공개 {observation['available_at']}"
+                )
+                if observation.get("calculation_basis"):
+                    st.caption(observation["calculation_basis"])
+        else:
+            st.write("- 사용 가능한 시점 입력 없음")
+        for axis_key, label in (
+            ("economy_regime", "경기"),
+            ("inflation_regime", "물가"),
+            ("risk_regime", "리스크"),
+        ):
+            st.markdown(f"**{label} 규칙 추적**")
+            for trace in market_regime[axis_key]["rule_trace"]:
+                st.write(f"- {trace}")
 
     if implied_range:
         st.info(
@@ -997,7 +1104,56 @@ if analysis:
             "종목별 실제 응답·이용 범위·재현성을 검증하지 않아 미래 PER을 계산하지 않음"
         )
 else:
-    st.info("가치 참고 지표 계약을 적용할 수 없습니다.")
+    st.markdown("#### 현재 시장 국면 · 읽기 전용")
+    with st.container(horizontal=True):
+        for axis_key, label in (
+            ("economy_regime", "경기"),
+            ("inflation_regime", "물가"),
+            ("risk_regime", "리스크"),
+        ):
+            axis = market_regime[axis_key]
+            st.metric(
+                label,
+                regime_labels.get(axis["regime"], axis["regime"]),
+                f"신뢰 {axis['confidence']} · 커버리지 {axis['coverage']:.0%}",
+                border=True,
+            )
+    st.caption(
+        f"국면 기준일 {market_regime.get('as_of') or '미확보'} · 상태 {market_regime['status']} · "
+        f"전체 커버리지 {market_regime['overall_coverage']:.0%} · operational_eligible=false"
+    )
+    normal_history = v23_self_history.get("normal_interest_candidate", {}) if v23_self_history else {}
+    adjusted_history = v23_self_history.get("regime_adjusted_candidate", {}) if v23_self_history else {}
+    with st.container(horizontal=True):
+        st.metric(
+            "자기 역사 정상 관심 후보",
+            (
+                f"${normal_history['low']:,.2f}~${normal_history['high']:,.2f}"
+                if normal_history.get("low") is not None else "미산출"
+            ),
+            border=True,
+        )
+        st.metric(
+            "국면 조정 후보 · 연구 전용",
+            (
+                f"${adjusted_history['low']:,.2f}~${adjusted_history['high']:,.2f}"
+                if adjusted_history.get("low") is not None else "미산출"
+            ),
+            "~".join(adjusted_history.get("basis_percentiles", [])) or "근거 미확보",
+            border=True,
+        )
+        st.metric("운영 투자판단", "비활성", border=True)
+    if adjusted_history:
+        st.info("국면 조정 설명: " + " ".join(adjusted_history.get("rule_trace", [])))
+    st.info("기타 가치 참고 지표 계약은 적용할 수 없습니다. 자기 역사·국면 후보와 운영 판단은 분리됩니다.")
+    with st.expander("시장 국면 입력·프록시·규칙 상세", expanded=False):
+        st.write(f"- 모델: {market_regime['model_version']}")
+        st.write(f"- 원천 해시: `{market_regime['source_hash']}`")
+        for observation in market_regime["accepted_observations"]:
+            st.write(
+                f"- {observation['metric_id']}: {observation['value']:.4g} {observation['unit']} · "
+                f"{observation['status']} · 기준 {observation['as_of']}"
+            )
 
 st.subheader("D. 기술적 분석")
 if not analysis or analysis["technical"].get("status") == "unavailable":

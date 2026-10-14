@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from stocklens.personal.market_regime import build_market_regime, build_regime_adjusted_candidate
 from stocklens.personal.v23_adapter import (
     APPROVED_LEDGER_SHA256,
     EXPECTED_HISTORICAL_ROWS,
@@ -239,6 +240,21 @@ def test_actual_avgo_and_nvda_self_history_percentiles_are_fixed() -> None:
             "high_expectation_candidate",
         ):
             assert result[key]["operational_eligible"] is False
+
+
+def test_regime_overlay_preserves_actual_avgo_nvda_self_history_and_source_hash() -> None:
+    regime = build_market_regime([], analysis_as_of="2026-10-14T00:00:00+00:00")
+    for ticker in ("AVGO", "NVDA"):
+        baseline = build_self_history_market_premium(_approved_series_record(ticker))
+        before = copy.deepcopy(baseline)
+        adjusted = build_regime_adjusted_candidate(baseline, regime)
+
+        assert baseline == before
+        assert baseline["source_hash"] == "a" * 64
+        assert adjusted["basis_percentiles"] == ["P35", "P50"]
+        assert adjusted["status"] == "proxy_low_confidence"
+        assert adjusted["low"] == pytest.approx(baseline["normal_interest_candidate"]["low"])
+        assert adjusted["high"] == pytest.approx(baseline["normal_interest_candidate"]["high"])
 
 
 def test_self_history_prevents_future_rows_and_ignores_dcf_fields() -> None:
