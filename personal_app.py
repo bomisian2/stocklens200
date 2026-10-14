@@ -413,6 +413,11 @@ if analysis:
                 f"종류: {point_shares['kind']} · 공시: {point_shares['published_at']} · "
                 f"출처: {point_shares['source_label']}"
             )
+            st.caption(
+                f"접수번호: {point_shares.get('accession_number', '미확보')} · "
+                f"공시일: {point_shares.get('filing_date', '미확보')} · "
+                f"클래스: {point_shares.get('classes', '미확보')}"
+            )
             if point_reference and point_reference.get("status") == "time_mismatched_research_only":
                 point_cards = st.columns(2)
                 point_cards[0].metric(
@@ -462,6 +467,15 @@ if analysis:
                     st.write(f"- {assumption}")
                 st.warning("시나리오 성장률은 전망치가 아니라 민감도 격자입니다. 가격·주식 수·자본구조가 고정된다는 강한 가정 때문에 정식 가치평가에 사용할 수 없습니다.")
         st.write(f"현재 가격의 내재 기대: {references['interpretation']}")
+        reverse_dcf = references.get("reverse_dcf", {})
+        with st.expander("현재 가격 성장 기대 역산 준비 상태"):
+            st.warning("역산 DCF 입력 미충족 · 성장률·할인율·터미널가치를 임의 생성하지 않습니다.")
+            st.write(f"재사용 계약: `{reverse_dcf.get('reused_contract', '미확보')}`")
+            for item in reverse_dcf.get("inputs", []):
+                value = item.get("value")
+                value_text = "미확보" if value is None else f"{value:,.6g}"
+                st.write(f"- {item['label']}: {item['status']} · {value_text}")
+            st.caption(reverse_dcf.get("reason", "역산 가치평가 입력 상태를 확인할 수 없습니다."))
     else:
         st.info(references.get("reason", "연구 참고 지표를 계산할 수 없습니다."))
         if references.get("diluted_share_proxy_millions") is not None:

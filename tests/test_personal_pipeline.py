@@ -492,6 +492,13 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert point_reference["equity_value_usd_millions"] == 499.0 * 793.597443
     assert point_reference["date_gap_days"] > 0
     assert references["reverse_dcf"]["status"] == "underdetermined"
+    assert references["reverse_dcf"]["numeric_result"] is None
+    assert references["reverse_dcf"]["reuse_assessment"] == "arithmetic_reusable_inputs_not_operationally_complete"
+    assert references["reverse_dcf"]["missing_or_partial_inputs"] == [
+        "share_denominator", "discount_rate", "terminal_growth"
+    ]
+    assert references["reverse_dcf"]["formal_fcff_input_map"]["normalized_operating_tax_rate"] == "missing"
+    assert references["share_source_url"].startswith("https://ir.appliedmaterials.com/")
     assert references["proxy_p_fcf"] == references["proxy_equity_value_usd_millions"] / 12.0
     sensitivity = references["fcf_growth_sensitivity"]
     assert sensitivity["status"] == "research_only"
@@ -508,6 +515,45 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
         "is_buy_signal": False,
         "reason": "Technical indicators are descriptive; fair value and independently validated signals are unavailable",
     }
+
+
+def test_avgo_official_cover_shares_are_distinct_from_weighted_average_proxy() -> None:
+    dates = pd.bdate_range("2026-05-20", periods=100).strftime("%Y-%m-%d")
+    closes = pd.Series([255.73 + index for index in range(100)], dtype=float)
+    market = pd.DataFrame({
+        "date": dates, "open": closes - 1, "high": closes + 2,
+        "low": closes - 2, "close": closes, "volume": [2_000_000 + index for index in range(100)],
+    })
+    financial = {
+        "ticker": "AVGO", "status": "verified",
+        "periods": [
+            {"kind": "fiscal_year", "label": "FY2025", "metrics": {"revenue": 63887.0, "diluted_eps": 4.77}},
+            {"kind": "quarter", "label": "Q3 FY2026", "period_end": "2026-08-02", "metrics": {"diluted_shares": 4887.0}},
+            {"kind": "ttm", "period_end": "2026-08-02", "metrics": {"revenue": 89104.0, "operating_income": 42814.0, "capex": 1250.0, "fcf": 39403.0}},
+        ],
+        "balance_sheet": {"cash_and_equivalents": 23975.0, "short_term_debt": 2252.0, "long_term_debt": 57167.0},
+        "guidance": {},
+        "documents": [],
+    }
+
+    result = compute_personal_analysis(
+        financial, market, pd.DataFrame(),
+        {"freshness_status": "verified", "market_date": "2026-10-12", "price_policy": "raw_as_traded_unadjusted"},
+    )
+
+    references = result["valuation_references"]
+    shares = references["point_in_time_share_evidence"]
+    point_reference = references["point_in_time_equity_reference"]
+    assert shares["value_millions"] == 4773.629865
+    assert shares["as_of"] == "2026-08-28"
+    assert shares["accession_number"] == "0001730168-26-000080"
+    assert references["diluted_share_proxy_millions"] == 4887.0
+    assert point_reference["date_gap_days"] == 45
+    assert point_reference["status"] == "time_mismatched_research_only"
+    assert point_reference["formal_market_cap_eligible"] is False
+    assert references["formal_market_cap"] is None
+    assert references["fair_value"] is None
+    assert references["reverse_dcf"]["numeric_result"] is None
 
 
 def test_fundamental_trend_metrics_compare_ttm_with_fiscal_year_without_claiming_yoy() -> None:

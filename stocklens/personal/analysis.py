@@ -303,19 +303,31 @@ def _research_valuation_references(
         }
     latest_document = _latest_document(financial)
     share_evidence = PERSONAL_PILOT_UNIVERSE.get(financial["ticker"], {}).get("share_count_evidence")
+    reverse_dcf_readiness = _reverse_dcf_input_readiness(
+        financial=financial,
+        latest_price=latest_price,
+        price_as_of=price_as_of,
+        ttm_metrics=ttm_metrics,
+        share_evidence=share_evidence,
+    )
     common = {
         "operational_eligible": False,
         "share_basis": "latest-quarter diluted weighted-average shares; not point-in-time shares outstanding",
         "share_basis_period": quarter.get("label"),
         "share_basis_as_of": quarter.get("period_end"),
-        "share_source_url": latest_document.get("url"),
-        "share_source_published_at": latest_document.get("published_at"),
+        "share_source_url": (
+            share_evidence.get("source_url") if share_evidence else latest_document.get("url")
+        ),
+        "share_source_published_at": (
+            share_evidence.get("published_at") if share_evidence else latest_document.get("published_at")
+        ),
         "diluted_share_proxy_millions": float(diluted_share_proxy),
         "formal_market_cap": None,
         "formal_per": None,
         "fair_value": None,
         "point_in_time_share_evidence": share_evidence,
         "point_in_time_equity_reference": None,
+        "reverse_dcf": reverse_dcf_readiness,
     }
     if latest_price is None or latest_price <= 0:
         return {
@@ -380,13 +392,6 @@ def _research_valuation_references(
             "proxy_fcf_yield": "TTM (CFO - CAPEX) / proxy equity value",
             "fy_eps_reference_multiple": "verified EOD close / FY reported GAAP diluted EPS",
         },
-        "reverse_dcf": {
-            "status": "underdetermined",
-            "reason": (
-                "Verified forecast cash flows, WACC, terminal assumptions, and point-in-time "
-                "diluted shares are unavailable; no implied growth rate is solved"
-            ),
-        },
         "fcf_growth_sensitivity": {
             "status": "research_only",
             "horizon_years": 5,
@@ -405,6 +410,114 @@ def _research_valuation_references(
             + (f"FY GAAP EPS 참고 배수 {latest_price / float(fy_eps):.1f}배는 " if fy_eps else "")
             + "높은 성장과 수익성 지속 기대를 시사합니다. 다만 확정 시가총액·미래 전망·할인율이 "
             "없어 고평가·저평가 또는 적정가를 뜻하지 않습니다."
+        ),
+    }
+
+
+def _reverse_dcf_input_readiness(
+    *,
+    financial: dict[str, Any],
+    latest_price: float | None,
+    price_as_of: str | None,
+    ttm_metrics: dict[str, Any],
+    share_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Map verified personal inputs onto PR #2's reverse-DCF contract.
+
+    This adapter deliberately does not select a discount rate or terminal growth
+    rate.  PR #2's arithmetic is reusable, but a result is blocked until those
+    economic assumptions and a point-in-time fully diluted denominator are
+    independently evidenced.
+    """
+
+    price_ready = latest_price is not None and latest_price > 0 and bool(price_as_of)
+    fcf = ttm_metrics.get("fcf")
+    fcf_ready = fcf is not None and float(fcf) > 0
+    share_ready = bool(share_evidence and share_evidence.get("value_millions"))
+    share_date_gap = None
+    if share_ready and price_as_of:
+        try:
+            share_date_gap = abs(
+                (date.fromisoformat(str(price_as_of)) - date.fromisoformat(str(share_evidence["as_of"]))).days
+            )
+        except (KeyError, TypeError, ValueError):
+            share_date_gap = None
+
+    inputs = [
+        {
+            "id": "target_price",
+            "label": "검증 EOD 종가",
+            "status": "verified" if price_ready else "missing",
+            "value": latest_price if price_ready else None,
+            "as_of": price_as_of,
+            "reason": None if price_ready else "verified local EOD close is unavailable",
+        },
+        {
+            "id": "starting_cash_flow",
+            "label": "TTM CFO-CAPEX 현금흐름 대용치",
+            "status": "verified_proxy" if fcf_ready else "missing",
+            "value": float(fcf) if fcf_ready else None,
+            "unit": "USD millions",
+            "reason": (
+                "reported CFO minus reported CAPEX; levered proxy, not canonical FCFF or complete FCFE"
+                if fcf_ready
+                else "verified TTM CFO-minus-CAPEX is unavailable"
+            ),
+        },
+        {
+            "id": "share_denominator",
+            "label": "기준일 보통주 수",
+            "status": "partial" if share_ready else "missing",
+            "value": float(share_evidence["value_millions"]) if share_ready else None,
+            "unit": "million shares",
+            "as_of": share_evidence.get("as_of") if share_evidence else None,
+            "date_gap_days": share_date_gap,
+            "reason": (
+                "official issued common shares are observed, but treasury-stock dilution and later share changes are not resolved"
+                if share_ready
+                else "official point-in-time common shares are unavailable"
+            ),
+        },
+        {
+            "id": "discount_rate",
+            "label": "현금흐름 정의와 일치하는 할인율",
+            "status": "missing",
+            "value": None,
+            "reason": "no verified point-in-time cost of equity or WACC evidence is connected",
+        },
+        {
+            "id": "terminal_growth",
+            "label": "터미널 성장률",
+            "status": "missing",
+            "value": None,
+            "reason": "no validated long-run growth evidence is connected",
+        },
+    ]
+    formal_fcff = {
+        "ttm_operating_income": "available" if ttm_metrics.get("operating_income") is not None else "missing",
+        "normalized_operating_tax_rate": "missing",
+        "depreciation_and_amortization": "missing",
+        "operating_working_capital_change": "missing",
+        "capex": "available" if ttm_metrics.get("capex") is not None else "missing",
+        "wacc": "missing",
+        "non_operating_assets_and_claims_policy": "missing",
+        "point_in_time_fully_diluted_shares": "missing",
+    }
+    missing_ids = [row["id"] for row in inputs if row["status"] in {"missing", "partial"}]
+    return {
+        "status": "underdetermined",
+        "numeric_result": None,
+        "operational_eligible": False,
+        "reused_contract": "PR #2 stocklens.dcf.solve_implied_fcf_growth / equity_fcf_schedule",
+        "reuse_assessment": "arithmetic_reusable_inputs_not_operationally_complete",
+        "cash_flow_classification": "levered_equity_cash_flow_proxy_not_canonical_fcfe",
+        "inputs": inputs,
+        "missing_or_partial_inputs": missing_ids,
+        "formal_fcff_input_map": formal_fcff,
+        "reason": (
+            "No implied growth rate is solved: discount rate, terminal growth, and a point-in-time fully diluted "
+            "share denominator are not verified. Formal FCFF additionally lacks tax, D&A, working-capital, "
+            "WACC, and EV-to-common-equity bridge evidence."
         ),
     }
 

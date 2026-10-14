@@ -135,6 +135,15 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "운영 판단: hold" in errors
     assert "정식 적정가" in errors
 
+    app.selectbox[0].set_value("AVGO").run(timeout=20)
+    assert not app.exception
+    avgo_metrics = {item.label: item.value for item in app.metric}
+    assert avgo_metrics["발행 보통주"] == "4,773.630M"
+    assert avgo_metrics["시점 불일치 주식가치 참고"] != "미확보"
+    avgo_rendered = " ".join(item.value for item in [*app.caption, *app.warning, *app.error])
+    assert "0001730168-26-000080" in avgo_rendered
+    assert "정식 적정가" in avgo_rendered
+
 
 def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:
     financial_dir = tmp_path / "normalized" / "financials"
