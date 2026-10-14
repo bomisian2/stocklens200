@@ -388,27 +388,43 @@ if analysis:
     evidence_contract = analysis.get("valuation_evidence", {})
     evidence_axes = evidence_contract.get("axes", {})
     evidence_map = evidence_contract.get("map", {})
+    conditional = references.get("conditional_research_valuation", {})
+    implied_range = conditional.get("implied_growth_range")
     st.warning(
-        "정상 관심 범위와 정식 적정가는 아직 없습니다. 현재 화면은 시장 기대, DCF 스트레스 참고, "
-        "확보된 품질 근거와 미확보 축을 분리해 보여줍니다."
+        "정상 관심 범위와 정식 적정가는 아직 없습니다. 정확성 부족을 더 낮은 가치로 바꾸지 않으며, "
+        "현재 시장 기대와 확보·미확보 근거를 먼저 보여줍니다."
     )
+
     with st.container(horizontal=True):
-        for axis_id, label in (
-            ("self_history", "자기 역사"),
-            ("peer_relative", "피어 상대가치"),
-            ("intrinsic_reverse", "내재가치·역산 기대"),
-            ("quality_premium", "품질 프리미엄 증거"),
-        ):
-            axis = evidence_axes.get(axis_id, {})
-            st.metric(
-                label,
-                axis.get("status", "unavailable"),
-                border=True,
-                help=axis.get("calculation_basis"),
-            )
+        st.metric("정상 관심 범위", "미산출", border=True)
+        st.metric(
+            "현재 시장 요구 성장",
+            (
+                f"{_pct(implied_range.get('low'))}~{_pct(implied_range.get('high'))}"
+                if implied_range else "미산출"
+            ),
+            border=True,
+            help="연구 할인·터미널 격자별 현재가 역산값이며 전망치나 적정가가 아닙니다.",
+        )
+        st.metric(
+            "품질 근거 상태",
+            evidence_axes.get("quality_premium", {}).get("status", "unavailable"),
+            border=True,
+        )
+        st.metric("운영 투자판단", "비활성", border=True)
+    st.caption("valuation_evidence operational_eligible=false · 연구 결과는 운영 매수·매도 판단에 연결되지 않습니다.")
+
+    if implied_range:
+        st.info(
+            "현재 가격이 요구하는 5년 CFO-CAPEX 대용 성장률은 연구 할인·터미널 격자에서 "
+            f"{_pct(implied_range.get('low'))}~{_pct(implied_range.get('high'))}입니다. "
+            "높은 수치 자체를 비현실적·고평가로 자동 판정하지 않습니다."
+        )
+    else:
+        st.info("현재가 역산에 필요한 검증 입력이 부족하여 시장 요구 성장도 미산출입니다.")
+
     st.info(evidence_map.get("reason", "가치 지도 근거가 미확보되었습니다."))
     map_rows = {
-        "정상 관심 범위": evidence_map.get("normal_interest_range"),
         "높은 기대 구간": evidence_map.get("high_expectation_range"),
         "검증된 위기 스트레스 범위": evidence_map.get("validated_crisis_stress_range"),
     }
@@ -421,7 +437,9 @@ if analysis:
     with st.expander("품질 프리미엄 증거 · 점수로 합산하지 않음", expanded=True):
         for row in quality_rows:
             value = row.get("value", row.get("value_usd_millions"))
-            if isinstance(value, float) and row.get("id") in {"revenue_change", "operating_margin", "fcf_margin"}:
+            if isinstance(value, float) and row.get("id") in {
+                "revenue_change", "operating_margin", "fcf_margin", "fcf_conversion",
+            }:
                 value_text = _pct(value)
             elif row.get("id") == "net_cash_or_debt" and value is not None:
                 value_text = _money_millions(float(value))
@@ -435,126 +453,146 @@ if analysis:
             if row.get("note"):
                 st.caption(row["note"])
 
+    with st.expander("평가 축 산출 자격과 결측 정책", expanded=False):
+        for axis_id, label in (
+            ("self_history", "자기 역사"),
+            ("peer_relative", "피어 상대가치"),
+            ("intrinsic_reverse", "내재가치·역산 기대"),
+            ("quality_premium", "품질 프리미엄 증거"),
+        ):
+            axis = evidence_axes.get(axis_id, {})
+            policy = axis.get("eligibility_policy", {})
+            st.markdown(f"**{label}: {axis.get('status', 'unavailable')}**")
+            st.caption(axis.get("calculation_basis", "산출 근거 미확보"))
+            st.write(f"- 결측 시: {policy.get('missing_behavior', 'null/unavailable 유지')}")
+            st.write(f"- 하한 근거: {policy.get('lower_bound_basis', '미정')}")
+            st.write(f"- 상한 근거: {policy.get('upper_bound_basis', '미정')}")
+            for condition in policy.get("calculation_conditions", []):
+                st.write(f"- 산출 조건: {condition}")
+            for criterion in policy.get("backtest_criteria", []):
+                st.write(f"- 검증 기준: {criterion}")
+
     if references.get("status") == "research_only":
         st.warning("연구 참고 전용 · 정식 시가총액/PER/적정가/매수구간이 아닙니다.")
-        value_cards = st.columns(3)
-        value_cards[0].metric("주식수 대용치", f"{references['diluted_share_proxy_millions']:,.0f}M")
-        value_cards[1].metric("대용 시가가치", _money_millions(references["proxy_equity_value_usd_millions"]))
-        value_cards[2].metric("대용 TTM FCF yield", _pct(references["proxy_ttm_fcf_yield"]))
-        st.metric(
-            f"{references['fy_gaap_eps_period']} GAAP EPS 참고 배수",
-            f"{references['fy_gaap_eps_reference_multiple']:.1f}배",
-        )
-        st.caption(
-            f"주식수 기준: {references['share_basis_period']} ({references['share_basis_as_of']}) · "
-            "해당 분기 희석 가중평균 주식수(기준일 현재 실제 발행주식 수 아님)"
-        )
-        st.metric("대용 P/FCF", _number(references.get("proxy_p_fcf"), suffix="배", decimals=1))
-        st.error("대용 시가가치는 실제 기준일 발행주식 수로 계산한 확정 시가총액이 아닙니다.")
         point_shares = references.get("point_in_time_share_evidence")
         point_reference = references.get("point_in_time_equity_reference")
-        if point_shares:
-            st.markdown("**공식 기준일 발행주식 수 증거**")
-            share_cards = st.columns(3)
-            share_cards[0].metric("발행 보통주", f"{point_shares['value_millions']:,.3f}M")
-            share_cards[1].metric("주식 수 기준일", point_shares["as_of"])
-            share_cards[2].metric("증거 상태", point_shares["source_integrity"])
-            st.caption(
-                f"종류: {point_shares['kind']} · 공시: {point_shares['published_at']} · "
-                f"출처: {point_shares['source_label']}"
-            )
-            st.caption(
-                f"접수번호: {point_shares.get('accession_number', '미확보')} · "
-                f"공시일: {point_shares.get('filing_date', '미확보')} · "
-                f"클래스: {point_shares.get('classes', '미확보')}"
-            )
-            if point_reference and point_reference.get("status") == "time_mismatched_research_only":
-                point_cards = st.columns(2)
-                point_cards[0].metric(
-                    "시점 불일치 주식가치 참고",
-                    _money_millions(point_reference.get("equity_value_usd_millions")),
-                )
-                point_cards[1].metric(
-                    "시점 불일치 TTM FCF yield",
-                    _pct(point_reference.get("ttm_fcf_yield")),
-                )
-                st.warning(
-                    f"가격일 {point_reference['price_as_of']}과 주식 수 기준일 "
-                    f"{point_reference['shares_as_of']}이 {point_reference['date_gap_days']}일 차이입니다. "
-                    "따라서 확정 시가총액·정식 FCF yield로 사용하지 않습니다."
-                )
-            elif point_reference and point_reference.get("formal_market_cap_eligible"):
-                st.success("가격일과 주식 수 기준일이 일치하는 검증 참고치입니다.")
-        conditional = references.get("conditional_research_valuation", {})
-        if conditional.get("status") == "research_only":
-            st.markdown("**현재 시장 기대 · 운영 자격 false**")
-            implied_range = conditional.get("implied_growth_range")
-            if implied_range:
-                st.info(
-                    "현재 가격이 요구하는 5년 CFO-CAPEX 대용 성장률은 연구 할인·터미널 격자에서 "
-                    f"{_pct(implied_range.get('low'))}~{_pct(implied_range.get('high'))}입니다. "
-                    "높은 수치 자체를 비현실적 또는 고평가로 자동 판정하지 않습니다."
-                )
+        if point_reference and point_reference.get("status") == "time_mismatched_research_only":
             st.warning(
-                "아래 값은 DCF 스트레스 참고이며 외부 전망치나 정상 적정가가 아닙니다. "
-                "목표가격·매수구간으로 사용하지 않으며 "
-                "어느 행도 공식 base case로 선택하지 않습니다."
+                f"가격일 {point_reference['price_as_of']}과 주식 수 기준일 "
+                f"{point_reference['shares_as_of']}이 {point_reference['date_gap_days']}일 차이입니다. "
+                "따라서 확정 시가총액·정식 FCF yield로 사용하지 않습니다."
             )
-            st.markdown(f"**{conditional.get('range_label', 'DCF 스트레스 참고 범위')}**")
-            scenario_rows = conditional.get("scenario_values", [])
+
+        with st.expander("평가 입력과 기준일 상세", expanded=False):
             with st.container(horizontal=True):
-                for scenario in scenario_rows:
-                    st.metric(
-                        scenario["label"],
-                        f"${scenario['research_per_issued_share']:,.2f}",
-                        border=True,
-                        help=(
-                            f"5년 FCF CAGR {scenario['growth_rate']:.1%} · 할인율 "
-                            f"{scenario['discount_rate']:.1%} · 터미널 성장률 {scenario['terminal_growth']:.1%}"
-                        ),
-                    )
-            outer = conditional.get("research_per_share_outer_range", {})
-            st.caption(
-                f"DCF 스트레스 격자 외곽 참고 ${outer.get('low', 0):,.2f}~${outer.get('high', 0):,.2f} · "
-                f"현재가 ${conditional['price']:,.2f} ({conditional.get('price_as_of', '미확보')}) · "
-                "정상 관심 범위·공식 중간 적정가 없음"
-            )
-            implied_rows = conditional.get("implied_growth_sensitivity", [])
-            if implied_rows:
-                implied_frame = pd.DataFrame(
-                    {
-                        "조건": [row["label"] for row in implied_rows],
-                        "할인율": [row["discount_rate"] for row in implied_rows],
-                        "터미널 성장률": [row["terminal_growth"] for row in implied_rows],
-                        "현재가 내재 5년 FCF CAGR": [row.get("implied_fcf_growth") for row in implied_rows],
-                        "터미널가치 비중": [row.get("terminal_value_share") for row in implied_rows],
-                    }
+                st.metric("주식수 대용치", f"{references['diluted_share_proxy_millions']:,.0f}M", border=True)
+                st.metric(
+                    "대용 시가가치",
+                    _money_millions(references["proxy_equity_value_usd_millions"]),
+                    border=True,
                 )
-                st.dataframe(
-                    implied_frame,
-                    hide_index=True,
-                    width="stretch",
-                    column_config={
-                        "할인율": st.column_config.NumberColumn(format="percent"),
-                        "터미널 성장률": st.column_config.NumberColumn(format="percent"),
-                        "현재가 내재 5년 FCF CAGR": st.column_config.NumberColumn(format="percent"),
-                        "터미널가치 비중": st.column_config.NumberColumn(format="percent"),
-                    },
+                st.metric("대용 TTM FCF yield", _pct(references["proxy_ttm_fcf_yield"]), border=True)
+            st.metric(
+                f"{references['fy_gaap_eps_period']} GAAP EPS 참고 배수",
+                f"{references['fy_gaap_eps_reference_multiple']:.1f}배",
+            )
+            st.caption(
+                f"주식수 기준: {references['share_basis_period']} ({references['share_basis_as_of']}) · "
+                "해당 분기 희석 가중평균 주식수(기준일 현재 실제 발행주식 수 아님)"
+            )
+            st.metric("대용 P/FCF", _number(references.get("proxy_p_fcf"), suffix="배", decimals=1))
+            st.error("대용 시가가치는 실제 기준일 발행주식 수로 계산한 확정 시가총액이 아닙니다.")
+            if point_shares:
+                st.markdown("**공식 기준일 발행주식 수 증거**")
+                with st.container(horizontal=True):
+                    st.metric("발행 보통주", f"{point_shares['value_millions']:,.3f}M", border=True)
+                    st.metric("주식 수 기준일", point_shares["as_of"], border=True)
+                    st.metric("증거 상태", point_shares["source_integrity"], border=True)
+                st.caption(
+                    f"종류: {point_shares['kind']} · 공시: {point_shares['published_at']} · "
+                    f"출처: {point_shares['source_label']}"
                 )
                 st.caption(
-                    "현재가 내재 성장률은 선택한 연구 할인율·터미널 성장률에 종속되며 미래 전망이 아닙니다. "
-                    f"가격일 {conditional.get('price_as_of', '미확보')} · 주식 수 기준일 "
-                    f"{conditional.get('shares_as_of', '미확보')} · 차이 {conditional.get('date_gap_days', '미확보')}일"
+                    f"접수번호: {point_shares.get('accession_number', '미확보')} · "
+                    f"공시일: {point_shares.get('filing_date', '미확보')} · "
+                    f"클래스: {point_shares.get('classes', '미확보')}"
                 )
-            drivers = conditional.get("driver_sensitivity", [])
-            if drivers:
-                st.write("가치 결과 영향도 순위")
-                for index, driver in enumerate(drivers, start=1):
-                    st.write(
-                        f"{index}. {driver['driver']} · 연구 격자 내 주당 영향 "
-                        f"${abs(driver['per_share_impact']):,.2f}"
+            if point_reference and point_reference.get("status") == "time_mismatched_research_only":
+                with st.container(horizontal=True):
+                    st.metric(
+                        "시점 불일치 주식가치 참고",
+                        _money_millions(point_reference.get("equity_value_usd_millions")),
+                        border=True,
                     )
-            with st.expander("조건부 연구 평가의 가정·한계"):
+                    st.metric(
+                        "시점 불일치 TTM FCF yield",
+                        _pct(point_reference.get("ttm_fcf_yield")),
+                        border=True,
+                    )
+            elif point_reference and point_reference.get("formal_market_cap_eligible"):
+                st.success("가격일과 주식 수 기준일이 일치하는 검증 참고치입니다.")
+
+        if conditional.get("status") == "research_only":
+            with st.expander("2차 상세 · DCF 스트레스 참고 범위", expanded=False):
+                st.warning(
+                    "외부 전망치·정상 적정가·목표가격·매수구간이 아닙니다. "
+                    "어느 행도 공식 base case로 선택하지 않습니다."
+                )
+                scenario_rows = conditional.get("scenario_values", [])
+                with st.container(horizontal=True):
+                    for scenario in scenario_rows:
+                        st.metric(
+                            scenario["label"],
+                            f"${scenario['research_per_issued_share']:,.2f}",
+                            border=True,
+                            help=(
+                                f"5년 FCF CAGR {scenario['growth_rate']:.1%} · 할인율 "
+                                f"{scenario['discount_rate']:.1%} · 터미널 성장률 {scenario['terminal_growth']:.1%}"
+                            ),
+                        )
+                outer = conditional.get("research_per_share_outer_range", {})
+                st.caption(
+                    f"격자 외곽 참고 ${outer.get('low', 0):,.2f}~${outer.get('high', 0):,.2f} · "
+                    f"현재가 ${conditional['price']:,.2f} ({conditional.get('price_as_of', '미확보')}) · "
+                    "정상 관심 범위·공식 중간 적정가 없음"
+                )
+                implied_rows = conditional.get("implied_growth_sensitivity", [])
+                if implied_rows:
+                    implied_frame = pd.DataFrame(
+                        {
+                            "조건": [row["label"] for row in implied_rows],
+                            "할인율": [row["discount_rate"] for row in implied_rows],
+                            "터미널 성장률": [row["terminal_growth"] for row in implied_rows],
+                            "현재가 내재 5년 FCF CAGR": [row.get("implied_fcf_growth") for row in implied_rows],
+                            "터미널가치 비중": [row.get("terminal_value_share") for row in implied_rows],
+                        }
+                    )
+                    st.dataframe(
+                        implied_frame,
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "할인율": st.column_config.NumberColumn(format="percent"),
+                            "터미널 성장률": st.column_config.NumberColumn(format="percent"),
+                            "현재가 내재 5년 FCF CAGR": st.column_config.NumberColumn(format="percent"),
+                            "터미널가치 비중": st.column_config.NumberColumn(format="percent"),
+                        },
+                    )
+                    st.caption(
+                        "현재가 내재 성장률은 연구 할인율·터미널 성장률에 종속되며 미래 전망이 아닙니다. "
+                        f"가격일 {conditional.get('price_as_of', '미확보')} · 주식 수 기준일 "
+                        f"{conditional.get('shares_as_of', '미확보')} · 차이 "
+                        f"{conditional.get('date_gap_days', '미확보')}일"
+                    )
+                drivers = conditional.get("driver_sensitivity", [])
+                if drivers:
+                    st.write("가치 결과 영향도 순위")
+                    for index, driver in enumerate(drivers, start=1):
+                        st.write(
+                            f"{index}. {driver['driver']} · 연구 격자 내 주당 영향 "
+                            f"${abs(driver['per_share_impact']):,.2f}"
+                        )
+                st.markdown("**가정과 한계**")
                 policy = conditional["assumption_policy"]
                 st.write(f"- 모델: `{conditional['model_version']}`")
                 st.write(f"- 재사용 엔진: `{conditional['reused_engine']}`")

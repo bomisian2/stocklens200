@@ -520,7 +520,7 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     assert sensitivity["rows"][0]["year5_fcf_usd_millions"] == 12.0
     assert sensitivity["operational_eligible"] is False
     contract = result["valuation_evidence"]
-    assert contract["model_version"] == "valuation_evidence_contract_v1"
+    assert contract["model_version"] == "valuation_evidence_contract_v2"
     assert contract["operational_eligible"] is False
     assert set(contract["axes"]) == {
         "self_history", "peer_relative", "intrinsic_reverse", "quality_premium"
@@ -528,11 +528,23 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
     for axis in contract["axes"].values():
         assert {
             "source", "source_hash", "as_of", "available_at", "unit", "calculation_basis",
-            "status", "operational_eligible", "model_version",
+            "status", "operational_eligible", "model_version", "eligibility_policy",
         }.issubset(axis)
         assert axis["operational_eligible"] is False
+        policy = axis["eligibility_policy"]
+        assert policy["calculation_conditions"]
+        assert policy["missing_behavior"]
+        assert policy["lower_bound_basis"]
+        assert policy["upper_bound_basis"]
+        assert policy["backtest_criteria"]
     assert contract["map"]["normal_interest_range"] is None
     assert contract["map"]["validated_crisis_stress_range"] is None
+    normal_policy = contract["normal_interest_policy"]
+    assert set(normal_policy["required_axes"]) == set(contract["axes"])
+    assert all(status == "verified" for status in normal_policy["required_axes"].values())
+    assert "simple mean" in normal_policy["combination_rule"]
+    assert "lowest value" in normal_policy["combination_rule"]
+    assert "remains null" in normal_policy["missing_behavior"]
     questions = result["investment_questions"]
     assert questions["growth_expectation"]["status"] == "research_only"
     assert "5년간 연 15%" in questions["growth_expectation"]["answer"]
@@ -645,9 +657,11 @@ def test_quality_premium_keeps_missing_factors_unavailable_without_score() -> No
     assert "score" not in quality
     assert evidence["roic"]["value"] is None
     assert evidence["roic"]["status"] == "unavailable"
+    assert evidence["dilution_trend"]["status"] == "unavailable"
     assert evidence["multi_year_revision"]["status"] == "unavailable"
     assert evidence["recurring_revenue"]["status"] == "unavailable"
     assert quality["operational_eligible"] is False
+    assert "never becomes a discount" in quality["eligibility_policy"]["missing_behavior"]
 
 
 def test_nvda_missing_q2_fcf_remains_null_and_blocks_intrinsic_axis() -> None:

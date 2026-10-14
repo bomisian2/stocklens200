@@ -131,12 +131,17 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "저성장·고할인 스트레스 조건" in metrics
     assert "중간 스트레스 격자(공식 기본값 아님)" in metrics
     assert "고성장·저할인 스트레스 조건" in metrics
-    assert "자기 역사" in metrics
-    assert "피어 상대가치" in metrics
-    assert "내재가치·역산 기대" in metrics
-    assert "품질 프리미엄 증거" in metrics
     assert "정상 관심 범위" in metrics
+    assert metrics["정상 관심 범위"] == "미산출"
+    assert "현재 시장 요구 성장" in metrics
+    assert "품질 근거 상태" in metrics
+    assert metrics["운영 투자판단"] == "비활성"
     assert "검증된 위기 스트레스 범위" in metrics
+    expander_states = {item.label: item.proto.expanded for item in app.expander}
+    assert expander_states["품질 프리미엄 증거 · 점수로 합산하지 않음"] is True
+    assert expander_states["평가 축 산출 자격과 결측 정책"] is False
+    assert expander_states["평가 입력과 기준일 상세"] is False
+    assert expander_states["2차 상세 · DCF 스트레스 참고 범위"] is False
     warnings = " ".join(item.value for item in app.warning)
     errors = " ".join(item.value for item in app.error)
     assert "연구 참고 전용" in warnings
@@ -144,7 +149,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "운영 판단: hold" in errors
     assert "정식 적정가" in errors
     assert "목표가격·매수구간" in warnings
-    assert "DCF 스트레스 참고" in warnings
+    assert "정확성 부족을 더 낮은 가치로 바꾸지 않으며" in warnings
 
     app.selectbox[0].set_value("AVGO").run(timeout=20)
     assert not app.exception
@@ -154,7 +159,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     avgo_rendered = " ".join(item.value for item in [*app.caption, *app.warning, *app.error])
     assert "0001730168-26-000080" in avgo_rendered
     assert "정식 적정가" in avgo_rendered
-    assert "운영 자격 false" in " ".join(item.value for item in app.markdown)
+    assert "operational_eligible=false" in " ".join(item.value for item in app.caption)
 
 
 def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:

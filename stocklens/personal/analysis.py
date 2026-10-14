@@ -745,6 +745,11 @@ def _evidence_axis(
     calculation_basis: str,
     status: str,
     model_version: str,
+    calculation_conditions: list[str],
+    missing_behavior: str,
+    lower_bound_basis: str,
+    upper_bound_basis: str,
+    backtest_criteria: list[str],
     evidence: Any = None,
     missing: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -760,6 +765,13 @@ def _evidence_axis(
         "status": status,
         "operational_eligible": False,
         "model_version": model_version,
+        "eligibility_policy": {
+            "calculation_conditions": calculation_conditions,
+            "missing_behavior": missing_behavior,
+            "lower_bound_basis": lower_bound_basis,
+            "upper_bound_basis": upper_bound_basis,
+            "backtest_criteria": backtest_criteria,
+        },
         "evidence": evidence,
         "missing": missing or [],
     }
@@ -798,7 +810,27 @@ def _valuation_evidence_contract(
             "corporate actions and acceptance time required"
         ),
         status="unavailable",
-        model_version="self_history_contract_v1",
+        model_version="self_history_contract_v2",
+        calculation_conditions=[
+            "rights-cleared point-in-time price observations spanning at least five fiscal years",
+            "each observation joined only to EPS or cash flow available by its acceptance timestamp",
+            "split, dividend, restatement, and one-time-item policies fixed before percentile calculation",
+            "at least 20 non-duplicated fiscal-event or quarter-end observations after exclusions",
+        ],
+        missing_behavior=(
+            "return null/unavailable; do not lower a multiple, raise a discount rate, repeat values, or interpolate gaps"
+        ),
+        lower_bound_basis=(
+            "out-of-sample calibrated lower percentile of the eligible point-in-time distribution; not its minimum"
+        ),
+        upper_bound_basis=(
+            "out-of-sample calibrated upper percentile of the eligible point-in-time distribution; not its maximum"
+        ),
+        backtest_criteria=[
+            "walk-forward vintages with filing availability and corporate actions frozen at each observation date",
+            "selection and final holdout periods separated",
+            "coverage, calibration error, and later returns reported without treating later return as fair-value truth",
+        ],
         missing=[
             "rights-cleared point-in-time price ledger",
             "acceptance-timestamped EPS/FCF ledger",
@@ -816,7 +848,27 @@ def _valuation_evidence_contract(
             "leverage, dilution, and cyclicality evidence"
         ),
         status="unavailable",
-        model_version="peer_relative_contract_v1",
+        model_version="peer_relative_contract_v2",
+        calculation_conditions=[
+            "peer set fixed by documented business and accounting criteria before seeing valuation outcomes",
+            "at least five eligible peers with same-date price and point-in-time financial snapshots",
+            "accounting basis, fiscal period, currency, share class, and cyclicality normalized or explicitly excluded",
+            "premium or discount coefficients validated outside their estimation sample",
+        ],
+        missing_behavior=(
+            "return null/unavailable; do not substitute a broad-sector multiple or apply an unsupported discount"
+        ),
+        lower_bound_basis=(
+            "validated peer-distribution interval after predeclared comparability adjustments; never the cheapest peer"
+        ),
+        upper_bound_basis=(
+            "validated peer-distribution interval after predeclared comparability adjustments; never the richest peer"
+        ),
+        backtest_criteria=[
+            "peer membership and coefficients selected without final-period outcomes",
+            "walk-forward comparison against later realized fundamentals and returns",
+            "industry and market-regime stability reported separately from headline accuracy",
+        ],
         missing=[
             "same-date peer price and financial snapshots",
             "validated peer membership",
@@ -852,7 +904,27 @@ def _valuation_evidence_contract(
             "not canonical FCFF or complete FCFE"
         ),
         status=intrinsic_status,
-        model_version=str(conditional.get("model_version") or "intrinsic_reverse_contract_v1"),
+        model_version=str(conditional.get("model_version") or "intrinsic_reverse_contract_v2"),
+        calculation_conditions=[
+            "verified cash-flow definition consistent with its discount rate and equity or enterprise-value bridge",
+            "same-vintage price, share denominator, capital structure, and non-operating assets or explicit uncertainty",
+            "growth, reinvestment, margin, discount-rate, and terminal assumptions sourced or labeled research-only",
+            "normal range requires calibrated forecast uncertainty; a fixed stress grid cannot qualify",
+        ],
+        missing_behavior=(
+            "retain reverse-expectation evidence when solvable, but keep normal value null; no uncertainty penalty is embedded"
+        ),
+        lower_bound_basis=(
+            "forecast-error-calibrated downside case with a complete cash-flow bridge; current stress-grid low is excluded"
+        ),
+        upper_bound_basis=(
+            "forecast-error-calibrated upside case with a complete cash-flow bridge; current stress-grid high is excluded"
+        ),
+        backtest_criteria=[
+            "rolling-origin forecasts use only inputs available at each valuation date",
+            "forecast cash flows and margins compared with subsequent reported results before price outcomes",
+            "interval coverage, terminal-value dependence, and sensitivity stability pass a separate holdout",
+        ],
         evidence={
             "current_market_expectation": conditional.get("implied_growth_sensitivity"),
             "dcf_stress_reference": conditional.get("scenario_values"),
@@ -868,6 +940,14 @@ def _valuation_evidence_contract(
     )
 
     net_cash = metrics.get("known_net_cash", {})
+    ttm_metrics = ttm.get("metrics", {})
+    ttm_cfo = ttm_metrics.get("cfo")
+    ttm_fcf = ttm_metrics.get("fcf")
+    fcf_conversion = (
+        float(ttm_fcf) / float(ttm_cfo)
+        if ttm_fcf is not None and ttm_cfo not in {None, 0}
+        else None
+    )
     quality_rows = [
         {
             "id": "revenue_change",
@@ -887,6 +967,13 @@ def _valuation_evidence_contract(
             "label": "TTM FCF 마진",
             "value": metrics.get("ttm_fcf_margin", {}).get("value"),
             "status": metrics.get("ttm_fcf_margin", {}).get("status", "unavailable"),
+        },
+        {
+            "id": "fcf_conversion",
+            "label": "TTM FCF/CFO 전환",
+            "value": fcf_conversion,
+            "status": "verified" if fcf_conversion is not None else "unavailable",
+            "note": "공시 CFO와 CFO-CAPEX 대용 FCF의 비율이며 정식 FCFF 전환율이 아님",
         },
         {
             "id": "net_cash_or_debt",
@@ -909,6 +996,7 @@ def _valuation_evidence_contract(
             "note": "기준일 발행주식 수이며 완전희석 주식 수가 아님" if share_evidence else None,
         },
         {"id": "roic", "label": "다년 ROIC", "value": None, "status": "unavailable"},
+        {"id": "dilution_trend", "label": "다년 희석·자사주 추세", "value": None, "status": "unavailable"},
         {"id": "multi_year_revision", "label": "다년 전망 revision", "value": None, "status": "unavailable"},
         {"id": "recurring_revenue", "label": "반복매출·전환비용", "value": None, "status": "unavailable"},
     ]
@@ -923,13 +1011,33 @@ def _valuation_evidence_contract(
         unit="mixed evidence; no aggregate premium score",
         calculation_basis="display verified quality drivers independently; do not aggregate into an AI premium",
         status="partial" if fundamental.get("status") in {"verified", "partial"} else "unavailable",
-        model_version="quality_premium_evidence_v1",
+        model_version="quality_premium_evidence_v2",
+        calculation_conditions=[
+            "at least six of eight quality dimensions observed with source and availability timestamps",
+            "ROIC, FCF conversion, balance-sheet resilience, and dilution evidence are mandatory",
+            "revenue growth, margins, recurring revenue or switching costs, and revisions cover comparable periods",
+            "any premium mapping is estimated and validated outside the current company sample",
+        ],
+        missing_behavior=(
+            "show each observed driver and leave the premium null; missing quality evidence never becomes a discount"
+        ),
+        lower_bound_basis=(
+            "no lower premium bound until out-of-sample evidence maps quality drivers to valuation dispersion"
+        ),
+        upper_bound_basis=(
+            "no upper premium bound until out-of-sample evidence maps quality drivers to valuation dispersion"
+        ),
+        backtest_criteria=[
+            "quality observations frozen at each filing date and tested on later fundamentals and valuation dispersion",
+            "coefficients estimated on a training universe and assessed on company and time holdouts",
+            "calibration and stability reported without creating an opaque aggregate AI score",
+        ],
         evidence=quality_rows,
         missing=[row["label"] for row in quality_rows if row.get("status") == "unavailable"],
     )
 
     return {
-        "model_version": "valuation_evidence_contract_v1",
+        "model_version": "valuation_evidence_contract_v2",
         "operational_eligible": False,
         "axes": {
             "self_history": self_history,
@@ -947,6 +1055,30 @@ def _valuation_evidence_contract(
                 "자기 역사와 피어 상대가치가 미확보되어 정상 관심 범위를 산출하지 않았습니다. "
                 "DCF 격자는 역사적 도달 빈도 검증 전 스트레스 후보일 뿐입니다."
             ),
+        },
+        "normal_interest_policy": {
+            "required_axes": {
+                "self_history": "verified",
+                "peer_relative": "verified",
+                "intrinsic_reverse": "verified",
+                "quality_premium": "verified",
+            },
+            "combination_rule": (
+                "use only an out-of-sample calibrated interval method fixed before the final holdout; "
+                "simple mean, lowest value, and unsupported confidence weighting are prohibited"
+            ),
+            "missing_behavior": (
+                "normal_interest_range remains null; current market expectation and observed quality evidence remain visible"
+            ),
+            "range_separation": (
+                "normal interest, high-expectation, and validated crisis-stress ranges are distinct outputs and cannot substitute"
+            ),
+            "backtest_gate": [
+                "point-in-time inputs with no future revisions",
+                "walk-forward model selection and untouched final holdout",
+                "interval coverage and regime stability reported",
+                "no operational eligibility until data rights and reproducibility gates pass",
+            ],
         },
     }
 def _investment_questions(
