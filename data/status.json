@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "generated_at_utc": "2026-10-13T03:33:19+00:00",
-  "data_generated_at_utc": "2026-10-13T03:33:19+00:00",
-  "market_session_date": "2026-10-12",
-  "market_data_as_of_utc": "2026-10-12T20:00:02+00:00",
-  "market_time_min_utc": "2026-10-12T20:00:00+00:00",
-  "market_time_max_utc": "2026-10-12T20:04:13+00:00",
-  "collected_at_min_utc": "2026-10-13T03:33:20+00:00",
-  "collected_at_max_utc": "2026-10-13T03:33:20+00:00",
+  "generated_at_utc": "2026-10-14T01:54:38+00:00",
+  "data_generated_at_utc": "2026-10-14T01:54:38+00:00",
+  "market_session_date": "2026-10-13",
+  "market_data_as_of_utc": "2026-10-13T20:00:02+00:00",
+  "market_time_min_utc": "2026-10-13T20:00:00+00:00",
+  "market_time_max_utc": "2026-10-13T20:04:40+00:00",
+  "collected_at_min_utc": "2026-10-14T01:54:40+00:00",
+  "collected_at_max_utc": "2026-10-14T01:54:40+00:00",
   "source": "yahoo_screener",
   "data_source": "yahoo_screener",
   "verification_source": "nasdaq_screener",
   "verification_source_freshness_state": "unverified",
-  "candidate_count": 7443,
+  "candidate_count": 7421,
   "company_count": 200,
   "used_cache": false,
   "data_state": "healthy",
@@ -22,16 +22,16 @@
   "provider_errors": [],
   "freshness": {
     "state": "verified",
-    "expected_session_date": "2026-10-12",
+    "expected_session_date": "2026-10-13",
     "observed_session_dates": [
-      "2026-10-12"
+      "2026-10-13"
     ],
     "valid_time_count": 200,
     "missing_time_count": 0,
     "invalid_time_count": 0,
-    "market_time_min_utc": "2026-10-12T20:00:00+00:00",
-    "market_time_median_utc": "2026-10-12T20:00:02+00:00",
-    "market_time_max_utc": "2026-10-12T20:04:13+00:00",
+    "market_time_min_utc": "2026-10-13T20:00:00+00:00",
+    "market_time_median_utc": "2026-10-13T20:00:02+00:00",
+    "market_time_max_utc": "2026-10-13T20:04:40+00:00",
     "reason": "all market timestamps match the latest completed XNYS session"
   },
   "cross_validation": {
@@ -41,8 +41,8 @@
     "overlapping_tickers": 194,
     "overlap_ratio": 0.97,
     "comparable_market_caps": 194,
-    "market_caps_within_35_percent": 193,
-    "market_cap_agreement_ratio": 0.9948,
+    "market_caps_within_35_percent": 194,
+    "market_cap_agreement_ratio": 1.0,
     "reason": "independent Top-200 membership and market-cap checks passed"
   },
   "quality": {
