@@ -1,0 +1,109 @@
+{
+  "version": "V23.5.2",
+  "generatedAt": "2026-09-14T08:55:12.543Z",
+  "workerRunId": "fixture-only",
+  "businessQuantCalls": 0,
+  "d1Writes": 0,
+  "tickers": {
+    "AVGO": {
+      "ticker": "AVGO",
+      "scope": "HISTORICAL_PER_ONLY",
+      "price": {
+        "current": {"confirmedClose": 361.989990234375, "tradingDate": "2026-09-11"}
+      },
+      "actuals": {
+        "quarters": [
+          {"periodEnd": "2026-08-02", "filingDate": "2026-09-10", "dilutedEps": 2.68, "fcf": 100.0, "canonicalUrl": "https://www.sec.gov/avgo-q3"},
+          {"periodEnd": "2026-05-03", "filingDate": "2026-06-09", "dilutedEps": 1.91, "fcf": 90.0, "canonicalUrl": "https://www.sec.gov/avgo-q2"},
+          {"periodEnd": "2026-02-01", "filingDate": "2026-03-11", "dilutedEps": 1.50, "fcf": 80.0, "canonicalUrl": "https://www.sec.gov/avgo-q1"},
+          {"periodEnd": "2025-11-02", "filingDate": "2025-12-18", "dilutedEps": 1.75, "fcf": 70.0, "canonicalUrl": "https://www.sec.gov/avgo-fy"}
+        ]
+      },
+      "valuation": {
+        "priceAsOf": "2026-09-11",
+        "epsAsOf": "2026-09-11",
+        "epsPeriodEnd": "2026-08-02",
+        "fcfAsOf": "2026-08-02",
+        "ttmPe": 46.1721926319356,
+        "fcfYield": null
+      },
+      "historicalPer": [
+        {
+          "asOfDate": "2026-09-10",
+          "filingDate": "2026-09-10",
+          "fiscalPeriodEnd": "2026-08-02",
+          "priceDate": "2026-09-10",
+          "basisPrice": 360.8299865722656,
+          "ttmEps": 7.84,
+          "ttmPe": 46.02423298115633,
+          "splitBasisFactor": 1,
+          "accession": "0001730168-26-000080",
+          "canonicalUrl": "https://www.sec.gov/Archives/avgo.htm",
+          "rawPayloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "secRawPayloadHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "priceRawPayloadHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "validationStatus": "VERIFIED",
+          "historyPercentile": 61.9
+        }
+      ],
+      "sourceLedger": {
+        "secCompanyFactsUrl": "https://data.sec.gov/api/xbrl/companyfacts/AVGO.json",
+        "secCompanyFactsHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "secSubmissionsUrl": "https://data.sec.gov/submissions/AVGO.json",
+        "secSubmissionsHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "priceUrl": "https://query1.finance.yahoo.com/v8/finance/chart/AVGO",
+        "priceHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    "NVDA": {
+      "ticker": "NVDA",
+      "scope": "HISTORICAL_PER_ONLY",
+      "price": {
+        "current": {"confirmedClose": 218.289993286133, "tradingDate": "2026-09-11"}
+      },
+      "actuals": {
+        "quarters": [
+          {"periodEnd": "2026-07-26", "filingDate": "2026-08-26", "dilutedEps": 2.46, "fcf": null, "canonicalUrl": "https://www.sec.gov/nvda-q2"},
+          {"periodEnd": "2026-04-26", "filingDate": "2026-05-20", "dilutedEps": 2.39, "fcf": 60.0, "canonicalUrl": "https://www.sec.gov/nvda-q1"},
+          {"periodEnd": "2026-01-25", "filingDate": "2026-02-25", "dilutedEps": 1.76, "fcf": 50.0, "canonicalUrl": "https://www.sec.gov/nvda-fy"},
+          {"periodEnd": "2025-10-26", "filingDate": "2025-11-19", "dilutedEps": 1.30, "fcf": 40.0, "canonicalUrl": "https://www.sec.gov/nvda-q3"}
+        ]
+      },
+      "valuation": {
+        "priceAsOf": "2026-09-11",
+        "epsAsOf": "2026-09-11",
+        "epsPeriodEnd": "2026-07-26",
+        "fcfAsOf": "2026-07-26",
+        "ttmPe": 27.5967121727096,
+        "fcfYield": null
+      },
+      "historicalPer": [
+        {
+          "asOfDate": "2026-08-26",
+          "filingDate": "2026-08-26",
+          "fiscalPeriodEnd": "2026-07-26",
+          "priceDate": "2026-08-26",
+          "basisPrice": 209.66000366210938,
+          "ttmEps": 7.91,
+          "ttmPe": 26.505689464236326,
+          "splitBasisFactor": 1,
+          "accession": "0001045810-26-000075",
+          "canonicalUrl": "https://www.sec.gov/Archives/nvda.htm",
+          "rawPayloadHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "secRawPayloadHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "priceRawPayloadHash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "validationStatus": "VERIFIED",
+          "historyPercentile": 11.4
+        }
+      ],
+      "sourceLedger": {
+        "secCompanyFactsUrl": "https://data.sec.gov/api/xbrl/companyfacts/NVDA.json",
+        "secCompanyFactsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "secSubmissionsUrl": "https://data.sec.gov/submissions/NVDA.json",
+        "secSubmissionsHash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "priceUrl": "https://query1.finance.yahoo.com/v8/finance/chart/NVDA",
+        "priceHash": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  }
+}

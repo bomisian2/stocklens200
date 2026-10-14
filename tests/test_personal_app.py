@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pandas as pd
 from streamlit.testing.v1 import AppTest
+
+from stocklens.personal.v23_adapter import EXPECTED_HISTORICAL_ROWS
 
 
 def test_personal_app_renders_financials_without_market_signal(tmp_path, monkeypatch) -> None:
@@ -88,6 +91,11 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         "non_gaap_operating_margin_percent": 66.0,
     }
     (financial_dir / "AVGO.json").write_text(json.dumps(avgo_financial), encoding="utf-8")
+    nvda_financial = json.loads(json.dumps(financial))
+    nvda_financial["company"] = "NVIDIA Corporation"
+    nvda_financial["ticker"] = "NVDA"
+    nvda_financial["guidance"] = {"status": "unavailable"}
+    (financial_dir / "NVDA.json").write_text(json.dumps(nvda_financial), encoding="utf-8")
     dates = pd.bdate_range("2026-05-20", periods=100).strftime("%Y-%m-%d")
     prices = pd.Series([400 + index for index in range(100)], dtype=float)
     frame = pd.DataFrame({"date": dates, "open": prices - 1, "high": prices + 2, "low": prices - 2, "close": prices, "volume": 1_000_000})
@@ -113,6 +121,16 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         ]},
     }), encoding="utf-8")
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
+    v23_fixture_path = Path(__file__).parent / "fixtures" / "v23_public_ledger_minimal.json"
+    v23_payload = json.loads(v23_fixture_path.read_text(encoding="utf-8"))
+    for v23_ticker, count in EXPECTED_HISTORICAL_ROWS.items():
+        seed = v23_payload["tickers"][v23_ticker]["historicalPer"][0]
+        v23_payload["tickers"][v23_ticker]["historicalPer"] = [dict(seed) for _ in range(count)]
+    v23_path = tmp_path / "v23-public-ledger.json"
+    v23_bytes = json.dumps(v23_payload, sort_keys=True).encode("utf-8")
+    v23_path.write_bytes(v23_bytes)
+    monkeypatch.setenv("STOCKLENS_V23_LEDGER_PATH", str(v23_path))
+    monkeypatch.setenv("STOCKLENS_V23_LEDGER_SHA256", hashlib.sha256(v23_bytes).hexdigest())
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
 
@@ -160,6 +178,20 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "0001730168-26-000080" in avgo_rendered
     assert "정식 적정가" in avgo_rendered
     assert "operational_eligible=false" in " ".join(item.value for item in app.caption)
+    assert any("v23 reconstructed PIT 비교" in item.value for item in app.subheader)
+    avgo_success = " ".join(item.value for item in app.success)
+    assert "동일 가격일 2026-09-11 교차검증" in avgo_success
+    assert "EPS·PER 정의는 합치거나 덮어쓰지 않았습니다" in avgo_success
+    assert avgo_metrics["TTM 희석 EPS"] == "$7.84"
+    assert avgo_metrics["TTM PER"] == "46.17배"
+
+    app.selectbox[0].set_value("NVDA").run(timeout=20)
+    assert not app.exception
+    nvda_info = " ".join(item.value for item in app.info)
+    nvda_captions = " ".join(item.value for item in app.caption)
+    assert "StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다" in nvda_info
+    assert "NVDA Q2 FCF: null 유지" in nvda_captions
+    assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
 
 def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:

@@ -11,9 +11,18 @@ import streamlit as st
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
 from stocklens.personal.market_data import compute_technical_snapshot
 from stocklens.personal.universe import PERSONAL_PILOT_UNIVERSE, pilot_tickers
+from stocklens.personal.v23_adapter import (
+    APPROVED_LEDGER_SHA256,
+    SUPPORTED_TICKERS as V23_SUPPORTED_TICKERS,
+    V23LedgerError,
+    compare_v23_with_stocklens,
+    load_v23_public_ledger,
+)
 
 
 DATA_DIR = Path(os.environ.get("STOCKLENS_PERSONAL_DATA_DIR", "private_data"))
+V23_LEDGER_PATH = os.environ.get("STOCKLENS_V23_LEDGER_PATH")
+V23_LEDGER_SHA256 = os.environ.get("STOCKLENS_V23_LEDGER_SHA256", APPROVED_LEDGER_SHA256)
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -35,6 +44,11 @@ def load_market(path_text: str, modified_ns: int) -> pd.DataFrame:
     del modified_ns
     path = Path(path_text)
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def load_v23_ledger(path_text: str, modified_ns: int, expected_sha256: str) -> dict[str, Any]:
+    del modified_ns
+    return load_v23_public_ledger(path_text, expected_sha256=expected_sha256)
 
 
 def _mtime(path: Path) -> int:
@@ -63,6 +77,147 @@ def _metric_value(metrics: dict[str, Any], key: str) -> Any:
 
 def _number(value: float | None, *, prefix: str = "", suffix: str = "", decimals: int = 2) -> str:
     return "미확보" if value is None else f"{prefix}{value:,.{decimals}f}{suffix}"
+
+
+def _render_v23_comparison(
+    ticker: str,
+    *,
+    market_path: Path,
+    manifest_path: Path,
+    financial_path: Path,
+) -> None:
+    if ticker not in V23_SUPPORTED_TICKERS:
+        return
+    st.subheader("v23 reconstructed PIT 비교 · 읽기 전용")
+    if not V23_LEDGER_PATH:
+        st.info("외부 v23 원장 경로가 설정되지 않아 비교 화면을 열지 않았습니다.")
+        st.caption("원본을 저장소에 복사하지 않으며 `STOCKLENS_V23_LEDGER_PATH`로만 읽습니다.")
+        return
+
+    ledger_path = Path(V23_LEDGER_PATH)
+    try:
+        ledger = load_v23_ledger(str(ledger_path), _mtime(ledger_path), V23_LEDGER_SHA256)
+        v23_ticker = ledger["tickers"][ticker]
+        comparison = compare_v23_with_stocklens(
+            v23_ticker,
+            market_path=market_path,
+            manifest_path=manifest_path,
+            financial_path=financial_path,
+        )
+    except (OSError, json.JSONDecodeError, V23LedgerError, KeyError, TypeError, ValueError) as exc:
+        st.error(f"v23 원장 검증 실패: {exc}")
+        return
+
+    st.warning(
+        "복원형 시점 데이터(reconstructed PIT) · 연구 전용 · operational_eligible=false. "
+        "SEC acceptance timestamp가 없어 filingDate를 날짜 프록시로 사용하며 같은 날 종가에는 장중 누출 위험이 있습니다."
+    )
+    period = v23_ticker["historical_period"]
+    st.caption(
+        f"v23 {ledger['version']} · 생성 {ledger['generated_at']} · SHA-256 {ledger['ledger_sha256'][:12]}… · "
+        f"PER 원장 {v23_ticker['historical_row_count']}건 ({period['start']}~{period['end']})"
+    )
+
+    stocklens = comparison["stocklens"]
+    v23 = comparison["v23"]
+    source_columns = st.columns(2, gap="medium")
+    with source_columns[0]:
+        with st.container(border=True):
+            st.markdown("#### StockLens")
+            st.metric(
+                "가격",
+                _number(stocklens["price"]["value"], prefix="$", decimals=2),
+                help=f"기준일 {stocklens['price']['as_of']} · {stocklens['price']['calculation_basis']}",
+            )
+            st.metric(
+                "TTM 희석 EPS",
+                _number(stocklens["ttm_eps"]["value"], prefix="$", decimals=2),
+                help=stocklens["ttm_eps"]["calculation_basis"],
+            )
+            st.metric(
+                "TTM PER",
+                _number(stocklens["ttm_per"]["value"], suffix="배", decimals=2),
+                help=stocklens["ttm_per"]["calculation_basis"],
+            )
+            st.caption(
+                f"가격일 {stocklens['price']['as_of'] or '미확보'} · "
+                f"EPS 기준일 {stocklens['ttm_eps']['as_of'] or '미확보'}"
+            )
+    with source_columns[1]:
+        with st.container(border=True):
+            st.markdown("#### v23 복원 원장")
+            st.metric(
+                "가격",
+                _number(v23["price"]["value"], prefix="$", decimals=2),
+                help=f"기준일 {v23['price']['as_of']} · {v23['price']['calculation_basis']}",
+            )
+            st.metric(
+                "TTM 희석 EPS",
+                _number(v23["ttm_eps"]["value"], prefix="$", decimals=2),
+                help=v23["ttm_eps"]["calculation_basis"],
+            )
+            st.metric(
+                "TTM PER",
+                _number(v23["ttm_per"]["value"], suffix="배", decimals=2),
+                help=v23["ttm_per"]["calculation_basis"],
+            )
+            st.caption(
+                f"가격일 {v23['price']['as_of']} · EPS 기간말 {v23['ttm_eps']['as_of']} · "
+                f"EPS 공개일 프록시 {v23['ttm_eps']['available_at']}"
+            )
+
+    if comparison["comparison_status"] == "exact_date_match":
+        difference = comparison["exact_date_price_difference"]["value"]
+        st.success(
+            f"동일 가격일 {v23['price']['as_of']} 교차검증: StockLens와 v23 종가 차이 "
+            f"${difference:+.6f}. EPS·PER 정의는 합치거나 덮어쓰지 않았습니다."
+        )
+    elif comparison["comparison_status"] == "date_mismatch":
+        st.warning(
+            f"가격 기준일이 {comparison['date_gap_days']}일 다릅니다. 양쪽 값을 분리 표시하며 "
+            "가격 차이·정상 관심 범위·운영 판단을 계산하지 않습니다."
+        )
+    else:
+        st.info("StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다. 날짜 정렬이나 비교값은 만들지 않습니다.")
+
+    latest_fcf = v23_ticker["current"]["latest_reported_fcf"]
+    fcf_yield = v23_ticker["current"]["fcf_yield"]
+    if fcf_yield["value"] is None:
+        st.caption("v23 FCF yield: null 유지 · 다른 값으로 대체하지 않음")
+    if ticker == "NVDA" and latest_fcf["value"] is None:
+        st.caption("NVDA Q2 FCF: null 유지 · 누계 차감 공식 미검증 상태")
+
+    with st.expander("PER 원장·출처·계산 근거", expanded=False):
+        history_rows = []
+        for row in v23_ticker["historical_per"]:
+            history_rows.append({
+                "공시일 프록시": row["filing_date"],
+                "가격일": row["price"]["as_of"],
+                "회계기간말": row["fiscal_period_end"],
+                "가격": row["price"]["value"],
+                "TTM EPS": row["ttm_eps"]["value"],
+                "TTM PER": row["ttm_per"]["value"],
+                "당시까지 백분위": row["history_percentile"]["value"],
+            })
+        history_frame = pd.DataFrame(history_rows)
+        if not history_frame.empty:
+            st.line_chart(history_frame.set_index("공시일 프록시")["TTM PER"], height=220)
+            st.dataframe(history_frame.tail(10), hide_index=True, width="stretch")
+        st.markdown("**정의와 계보**")
+        for label, field in (
+            ("v23 가격", v23["price"]),
+            ("v23 TTM EPS", v23["ttm_eps"]),
+            ("v23 TTM PER", v23["ttm_per"]),
+            ("StockLens 가격", stocklens["price"]),
+            ("StockLens TTM EPS", stocklens["ttm_eps"]),
+            ("StockLens TTM PER", stocklens["ttm_per"]),
+        ):
+            st.write(
+                f"- {label}: `{field['status']}` · as_of `{field['as_of']}` · "
+                f"available_at `{field['available_at']}` · hash `{field['source_hash'][:12]}…`"
+            )
+            st.caption(field["calculation_basis"])
+        st.error("정식 적정가·매수구간·운영 신호로 연결하지 않음")
 
 
 st.set_page_config(page_title="StockLens 200 개인 연구", page_icon="🔒", layout="wide")
@@ -275,6 +430,12 @@ analysis = compute_personal_analysis(financial, market, qqq, manifest, estimates
 
 st.header(f"{financial['company']} ({ticker})")
 st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수집: {financial['collected_at_utc']}")
+_render_v23_comparison(
+    ticker,
+    market_path=market_path,
+    manifest_path=manifest_path,
+    financial_path=financial_path,
+)
 if ticker in COMPANY_PROFILES:
     st.subheader("A. 현재 상황")
     st.write(COMPANY_PROFILES[ticker]["business"])
