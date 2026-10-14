@@ -498,6 +498,17 @@ def test_integrated_analysis_keeps_research_references_out_of_operational_decisi
         "share_denominator", "discount_rate", "terminal_growth"
     ]
     assert references["reverse_dcf"]["formal_fcff_input_map"]["normalized_operating_tax_rate"] == "missing"
+    conditional = references["conditional_research_valuation"]
+    assert conditional["status"] == "research_only"
+    assert conditional["operational_eligible"] is False
+    assert conditional["is_fair_value"] is False
+    assert conditional["selected_base_value"] is None
+    assert conditional["model_version"] == "levered_proxy_grid_v1"
+    assert [row["growth_rate"] for row in conditional["scenario_values"]] == [0.0, 0.10, 0.20]
+    assert conditional["scenario_values"][0]["research_per_issued_share"] < conditional["scenario_values"][1]["research_per_issued_share"]
+    assert conditional["scenario_values"][1]["research_per_issued_share"] < conditional["scenario_values"][2]["research_per_issued_share"]
+    assert conditional["implied_growth_range"] is None
+    assert all(row["status"] == "not_bracketed" for row in conditional["implied_growth_sensitivity"])
     assert references["share_source_url"].startswith("https://ir.appliedmaterials.com/")
     assert references["proxy_p_fcf"] == references["proxy_equity_value_usd_millions"] / 12.0
     sensitivity = references["fcf_growth_sensitivity"]
@@ -554,6 +565,12 @@ def test_avgo_official_cover_shares_are_distinct_from_weighted_average_proxy() -
     assert references["formal_market_cap"] is None
     assert references["fair_value"] is None
     assert references["reverse_dcf"]["numeric_result"] is None
+    conditional = references["conditional_research_valuation"]
+    assert conditional["status"] == "research_only"
+    assert conditional["issued_common_shares_millions"] == 4773.629865
+    assert conditional["operational_eligible"] is False
+    assert conditional["date_gap_days"] == 45
+    assert conditional["selected_base_value"] is None
 
 
 def test_fundamental_trend_metrics_compare_ttm_with_fiscal_year_without_claiming_yoy() -> None:

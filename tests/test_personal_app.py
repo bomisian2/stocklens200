@@ -128,12 +128,16 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "실적은 개선되고 있는가?" in rendered_text
     assert "현재 가격에는 높은 성장이 요구되는가?" in rendered_text
     assert "대용 P/FCF" in metrics
+    assert "저성장·고할인 연구 조건" in metrics
+    assert "중간 연구 격자(공식 기본값 아님)" in metrics
+    assert "고성장·저할인 연구 조건" in metrics
     warnings = " ".join(item.value for item in app.warning)
     errors = " ".join(item.value for item in app.error)
     assert "연구 참고 전용" in warnings
     assert "확정 시가총액" in warnings
     assert "운영 판단: hold" in errors
     assert "정식 적정가" in errors
+    assert "목표가격·매수구간" in warnings
 
     app.selectbox[0].set_value("AVGO").run(timeout=20)
     assert not app.exception
@@ -143,6 +147,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     avgo_rendered = " ".join(item.value for item in [*app.caption, *app.warning, *app.error])
     assert "0001730168-26-000080" in avgo_rendered
     assert "정식 적정가" in avgo_rendered
+    assert "운영 자격 false" in " ".join(item.value for item in app.markdown)
 
 
 def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:

@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from stocklens.dcf import equity_fcf_schedule, solve_implied_fcf_growth
+
 from .market_data import compute_relative_strength, compute_technical_snapshot
 from .universe import PERSONAL_PILOT_UNIVERSE
 
@@ -310,6 +312,13 @@ def _research_valuation_references(
         ttm_metrics=ttm_metrics,
         share_evidence=share_evidence,
     )
+    conditional_research_valuation = _conditional_research_valuation(
+        financial=financial,
+        latest_price=latest_price,
+        price_as_of=price_as_of,
+        ttm_metrics=ttm_metrics,
+        share_evidence=share_evidence,
+    )
     common = {
         "operational_eligible": False,
         "share_basis": "latest-quarter diluted weighted-average shares; not point-in-time shares outstanding",
@@ -328,6 +337,7 @@ def _research_valuation_references(
         "point_in_time_share_evidence": share_evidence,
         "point_in_time_equity_reference": None,
         "reverse_dcf": reverse_dcf_readiness,
+        "conditional_research_valuation": conditional_research_valuation,
     }
     if latest_price is None or latest_price <= 0:
         return {
@@ -515,13 +525,210 @@ def _reverse_dcf_input_readiness(
         "missing_or_partial_inputs": missing_ids,
         "formal_fcff_input_map": formal_fcff,
         "reason": (
-            "No implied growth rate is solved: discount rate, terminal growth, and a point-in-time fully diluted "
-            "share denominator are not verified. Formal FCFF additionally lacks tax, D&A, working-capital, "
-            "WACC, and EV-to-common-equity bridge evidence."
+            "No formal implied growth rate is solved: discount rate, terminal growth, and a point-in-time fully "
+            "diluted share denominator are not verified. A separate explicitly assumed research grid may still "
+            "be shown. Formal FCFF additionally lacks tax, D&A, working-capital, WACC, and EV-to-common-equity "
+            "bridge evidence."
         ),
     }
 
 
+def _conditional_research_valuation(
+    *,
+    financial: dict[str, Any],
+    latest_price: float | None,
+    price_as_of: str | None,
+    ttm_metrics: dict[str, Any],
+    share_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Run a deterministic, non-operational equity cash-flow research grid.
+
+    The grid reuses PR #2's audited arithmetic but does not claim that any of its
+    growth, discount, or terminal assumptions are forecasts. Issued common shares
+    are an observed but incomplete denominator, so every output remains research
+    only and cannot flow into a recommendation.
+    """
+
+    base_fcf = ttm_metrics.get("fcf")
+    issued_shares = (share_evidence or {}).get("value_millions")
+    if latest_price is None or latest_price <= 0:
+        return {
+            "status": "unavailable",
+            "reason": "verified local EOD close is required",
+            "operational_eligible": False,
+        }
+    if base_fcf is None or float(base_fcf) <= 0:
+        return {
+            "status": "unavailable",
+            "reason": "positive verified TTM CFO-minus-CAPEX is required",
+            "operational_eligible": False,
+        }
+    if issued_shares is None or float(issued_shares) <= 0:
+        return {
+            "status": "unavailable",
+            "reason": "official point-in-time common shares outstanding are required",
+            "operational_eligible": False,
+        }
+
+    base_fcf = float(base_fcf)
+    issued_shares = float(issued_shares)
+    scenario_specs = [
+        {
+            "id": "low_growth_high_discount",
+            "label": "저성장·고할인 연구 조건",
+            "growth_rate": 0.00,
+            "discount_rate": 0.13,
+            "terminal_growth": 0.02,
+        },
+        {
+            "id": "middle_grid_not_base_case",
+            "label": "중간 연구 격자(공식 기본값 아님)",
+            "growth_rate": 0.10,
+            "discount_rate": 0.11,
+            "terminal_growth": 0.025,
+        },
+        {
+            "id": "high_growth_low_discount",
+            "label": "고성장·저할인 연구 조건",
+            "growth_rate": 0.20,
+            "discount_rate": 0.09,
+            "terminal_growth": 0.03,
+        },
+    ]
+    scenarios: list[dict[str, Any]] = []
+    for spec in scenario_specs:
+        result = equity_fcf_schedule(
+            base_fcf=base_fcf,
+            growth_rate=spec["growth_rate"],
+            discount_rate=spec["discount_rate"],
+            terminal_growth=spec["terminal_growth"],
+            diluted_shares=issued_shares,
+            years=5,
+        )
+        scenarios.append(
+            {
+                **spec,
+                "year5_fcf_usd_millions": result["schedule"][-1]["cash_flow"],
+                "explicit_present_value_usd_millions": result["explicit_present_value"],
+                "terminal_present_value_usd_millions": result["terminal_present_value"],
+                "terminal_value_share": result["terminal_value_share"],
+                "research_equity_value_usd_millions": result["equity_value"],
+                "research_per_issued_share": result["per_share_value"],
+            }
+        )
+
+    implied_specs = [
+        {"label": "고할인 조건", "discount_rate": 0.13, "terminal_growth": 0.02},
+        {"label": "중간 격자", "discount_rate": 0.11, "terminal_growth": 0.025},
+        {"label": "저할인 조건", "discount_rate": 0.09, "terminal_growth": 0.03},
+    ]
+    implied_rows: list[dict[str, Any]] = []
+    for spec in implied_specs:
+        solved = solve_implied_fcf_growth(
+            target_price=float(latest_price),
+            base_fcf=base_fcf,
+            diluted_shares=issued_shares,
+            discount_rate=spec["discount_rate"],
+            terminal_growth=spec["terminal_growth"],
+            years=5,
+        )
+        implied_rows.append({**spec, **solved})
+
+    def per_share(growth: float, discount: float, terminal: float) -> float:
+        return float(
+            equity_fcf_schedule(
+                base_fcf=base_fcf,
+                growth_rate=growth,
+                discount_rate=discount,
+                terminal_growth=terminal,
+                diluted_shares=issued_shares,
+                years=5,
+            )["per_share_value"]
+        )
+
+    driver_rows = [
+        {
+            "driver": "5년 현금흐름 성장률",
+            "low_assumption": 0.00,
+            "high_assumption": 0.20,
+            "per_share_low": per_share(0.00, 0.11, 0.025),
+            "per_share_high": per_share(0.20, 0.11, 0.025),
+        },
+        {
+            "driver": "할인율",
+            "low_assumption": 0.09,
+            "high_assumption": 0.13,
+            "per_share_low": per_share(0.10, 0.13, 0.025),
+            "per_share_high": per_share(0.10, 0.09, 0.025),
+        },
+        {
+            "driver": "터미널 성장률",
+            "low_assumption": 0.02,
+            "high_assumption": 0.03,
+            "per_share_low": per_share(0.10, 0.11, 0.02),
+            "per_share_high": per_share(0.10, 0.11, 0.03),
+        },
+    ]
+    for row in driver_rows:
+        row["per_share_impact"] = row["per_share_high"] - row["per_share_low"]
+    driver_rows.sort(key=lambda row: abs(row["per_share_impact"]), reverse=True)
+
+    solved_growths = [
+        row["implied_fcf_growth"] for row in implied_rows if row.get("status") == "solved"
+    ]
+    values = [row["research_per_issued_share"] for row in scenarios]
+    share_date = str((share_evidence or {}).get("as_of") or "")
+    date_gap_days = None
+    try:
+        if price_as_of and share_date:
+            date_gap_days = abs((date.fromisoformat(price_as_of) - date.fromisoformat(share_date)).days)
+    except ValueError:
+        date_gap_days = None
+
+    return {
+        "status": "research_only",
+        "grade": "conditional_research",
+        "operational_eligible": False,
+        "is_fair_value": False,
+        "is_target_price": False,
+        "is_buy_range": False,
+        "ticker": financial.get("ticker"),
+        "model_version": "levered_proxy_grid_v1",
+        "reused_engine": "PR #2 stocklens.dcf equity_fcf_schedule / solve_implied_fcf_growth",
+        "cash_flow_definition": "reported TTM CFO minus reported CAPEX",
+        "cash_flow_classification": "levered_equity_cash_flow_proxy_not_canonical_fcfe",
+        "base_fcf_usd_millions": base_fcf,
+        "price": float(latest_price),
+        "price_as_of": price_as_of,
+        "issued_common_shares_millions": issued_shares,
+        "shares_as_of": share_date or None,
+        "date_gap_days": date_gap_days,
+        "share_denominator_status": "observed_issued_common_not_fully_diluted",
+        "scenario_values": scenarios,
+        "research_per_share_outer_range": {"low": min(values), "high": max(values)},
+        "selected_base_value": None,
+        "implied_growth_sensitivity": implied_rows,
+        "implied_growth_range": (
+            {"low": min(solved_growths), "high": max(solved_growths)} if solved_growths else None
+        ),
+        "driver_sensitivity": driver_rows,
+        "assumption_policy": {
+            "growth_rates": [0.00, 0.10, 0.20],
+            "discount_rates": [0.09, 0.11, 0.13],
+            "terminal_growth_rates": [0.02, 0.025, 0.03],
+            "selection_rule": (
+                "fixed deterministic stress grid; middle row is not a forecast, consensus, or official base case"
+            ),
+            "source_status": "explicit_research_assumptions_not_external_forecasts",
+        },
+        "limitations": [
+            "발행 보통주 수는 완전희석 주식 수가 아니며 가격일과 기준일이 다름",
+            "CFO-CAPEX는 정식 FCFF 또는 완전한 FCFE가 아님",
+            "할인율·성장률·터미널 성장률은 외부 전망이 아닌 연구 스트레스 격자",
+            "순현금·부채·비영업자산을 더하거나 빼는 EV-to-equity 브리지를 적용하지 않음",
+            "결과는 목표가격·매수구간·수익률 예측이 아님",
+        ],
+    }
 def _investment_questions(
     financial: dict[str, Any],
     fundamental: dict[str, Any],
@@ -553,7 +760,15 @@ def _investment_questions(
 
     sensitivity = valuation.get("fcf_growth_sensitivity", {})
     row_15 = next((row for row in sensitivity.get("rows", []) if row.get("fcf_cagr") == 0.15), None)
-    if valuation.get("status") == "research_only" and valuation.get("proxy_p_fcf") is not None:
+    conditional = valuation.get("conditional_research_valuation", {})
+    implied_range = conditional.get("implied_growth_range")
+    if conditional.get("status") == "research_only" and implied_range:
+        expectation_answer = (
+            f"현재 가격을 재현하려면 연구 할인·터미널 격자에서 5년 대용 FCF CAGR "
+            f"{implied_range['low']:.1%}~{implied_range['high']:.1%}가 필요합니다. "
+            "이는 시장 컨센서스나 미래 전망이 아니라 조건부 역산이며 적정가 판단이 아닙니다."
+        )
+    elif valuation.get("status") == "research_only" and valuation.get("proxy_p_fcf") is not None:
         expectation_answer = (
             f"현재 대용 P/FCF는 {valuation['proxy_p_fcf']:.1f}배입니다. 가격·주식 수가 변하지 않고 FCF가 "
             f"5년간 연 15% 성장하는 연구 시나리오에서도 5년 후 대용 FCF yield는 "

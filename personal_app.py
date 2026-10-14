@@ -435,6 +435,73 @@ if analysis:
                 )
             elif point_reference and point_reference.get("formal_market_cap_eligible"):
                 st.success("가격일과 주식 수 기준일이 일치하는 검증 참고치입니다.")
+        conditional = references.get("conditional_research_valuation", {})
+        if conditional.get("status") == "research_only":
+            st.markdown("**조건부 연구 가치평가 · 운영 자격 false**")
+            st.warning(
+                "아래 값은 외부 전망치나 공식 적정가가 아닙니다. TTM CFO-CAPEX와 기준일 발행 "
+                "보통주에 고정 연구 가정 격자를 적용한 민감도이며 목표가격·매수구간으로 사용하지 않습니다."
+            )
+            scenario_rows = conditional.get("scenario_values", [])
+            with st.container(horizontal=True):
+                for scenario in scenario_rows:
+                    st.metric(
+                        scenario["label"],
+                        f"${scenario['research_per_issued_share']:,.2f}",
+                        border=True,
+                        help=(
+                            f"5년 FCF CAGR {scenario['growth_rate']:.1%} · 할인율 "
+                            f"{scenario['discount_rate']:.1%} · 터미널 성장률 {scenario['terminal_growth']:.1%}"
+                        ),
+                    )
+            outer = conditional.get("research_per_share_outer_range", {})
+            st.caption(
+                f"연구 격자 외곽 범위 ${outer.get('low', 0):,.2f}~${outer.get('high', 0):,.2f} · "
+                f"현재가 ${conditional['price']:,.2f} ({conditional.get('price_as_of', '미확보')}) · "
+                "공식 중간 적정가 없음"
+            )
+            implied_rows = conditional.get("implied_growth_sensitivity", [])
+            if implied_rows:
+                implied_frame = pd.DataFrame(
+                    {
+                        "조건": [row["label"] for row in implied_rows],
+                        "할인율": [row["discount_rate"] for row in implied_rows],
+                        "터미널 성장률": [row["terminal_growth"] for row in implied_rows],
+                        "현재가 내재 5년 FCF CAGR": [row.get("implied_fcf_growth") for row in implied_rows],
+                        "터미널가치 비중": [row.get("terminal_value_share") for row in implied_rows],
+                    }
+                )
+                st.dataframe(
+                    implied_frame,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "할인율": st.column_config.NumberColumn(format="percent"),
+                        "터미널 성장률": st.column_config.NumberColumn(format="percent"),
+                        "현재가 내재 5년 FCF CAGR": st.column_config.NumberColumn(format="percent"),
+                        "터미널가치 비중": st.column_config.NumberColumn(format="percent"),
+                    },
+                )
+                st.caption("현재가 내재 성장률은 선택한 연구 할인율·터미널 성장률에 종속되며 미래 전망이 아닙니다.")
+            drivers = conditional.get("driver_sensitivity", [])
+            if drivers:
+                st.write("가치 결과 영향도 순위")
+                for index, driver in enumerate(drivers, start=1):
+                    st.write(
+                        f"{index}. {driver['driver']} · 연구 격자 내 주당 영향 "
+                        f"${abs(driver['per_share_impact']):,.2f}"
+                    )
+            with st.expander("조건부 연구 평가의 가정·한계"):
+                policy = conditional["assumption_policy"]
+                st.write(f"- 모델: `{conditional['model_version']}`")
+                st.write(f"- 재사용 엔진: `{conditional['reused_engine']}`")
+                st.write(f"- 현금흐름: {conditional['cash_flow_definition']}")
+                st.write(f"- 가정 규칙: {policy['selection_rule']}")
+                st.write(
+                    f"- 가격일과 주식 수 기준일 차이: {conditional.get('date_gap_days', '미확보')}일"
+                )
+                for limitation in conditional["limitations"]:
+                    st.write(f"- {limitation}")
         with st.expander("연구용 계산식과 근거"):
             for label, formula in references.get("formulas", {}).items():
                 st.write(f"- {label}: `{formula}`")
