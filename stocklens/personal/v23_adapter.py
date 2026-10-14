@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,6 +32,8 @@ REQUIRED_EVIDENCE_KEYS = {
     "status",
     "operational_eligible",
 }
+SELF_HISTORY_PERCENTILES = (10, 25, 30, 35, 40, 50, 60, 70, 75, 85, 90)
+SELF_HISTORY_MINIMUM_SAMPLE = 20
 
 
 class V23LedgerError(ValueError):
@@ -243,6 +246,18 @@ def _normalize_ticker(
             unit="multiple",
             calculation_basis="latest confirmed close divided by v23 trailing-four-quarter diluted EPS",
         ),
+        "reported_current_percentile": _evidence(
+            _require_mapping(valuation.get("history10"), f"{ticker}.valuation.history10").get("percentile"),
+            source="v23 current valuation snapshot",
+            source_hash=ledger_hash,
+            as_of=price_as_of,
+            available_at=pe_available_at,
+            unit="percentile",
+            calculation_basis=(
+                "v23-reported current PER percentile; independently recomputed by the StockLens "
+                "self-history engine before comparison"
+            ),
+        ),
         "fcf_yield": _evidence(
             valuation.get("fcfYield"),
             source="v23 current valuation snapshot",
@@ -330,6 +345,8 @@ def load_v23_public_ledger(
         )
         for ticker in SUPPORTED_TICKERS
     }
+    for ticker_record in normalized.values():
+        ticker_record["self_history"] = build_self_history_market_premium(ticker_record)
     return {
         "version": APPROVED_LEDGER_VERSION,
         "generated_at": generated_at,
@@ -338,6 +355,265 @@ def load_v23_public_ledger(
         "operational_eligible": False,
         "tickers": normalized,
     }
+
+
+def _linear_quantile(sorted_values: list[float], percentile: int) -> float:
+    """Return the linearly interpolated sample quantile (NumPy method='linear')."""
+
+    if not sorted_values:
+        raise ValueError("quantile requires at least one value")
+    position = (len(sorted_values) - 1) * percentile / 100
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    if lower_index == upper_index:
+        return sorted_values[lower_index]
+    weight = position - lower_index
+    return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
+
+
+def _five_year_cutoff(as_of: str) -> str:
+    value = date.fromisoformat(as_of)
+    try:
+        return value.replace(year=value.year - 5).isoformat()
+    except ValueError:
+        return value.replace(year=value.year - 5, day=28).isoformat()
+
+
+def _per_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_values = [row.get("ttm_per", {}).get("value") for row in rows]
+    finite_positive = [
+        float(value)
+        for value in raw_values
+        if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0
+    ]
+    invalid_count = len(raw_values) - len(finite_positive)
+    ordered_valid = sorted(finite_positive)
+    if len(ordered_valid) >= 4:
+        q1 = _linear_quantile(ordered_valid, 25)
+        q3 = _linear_quantile(ordered_valid, 75)
+        iqr = q3 - q1
+        lower_fence = max(0.0, q1 - 1.5 * iqr)
+        upper_fence = q3 + 1.5 * iqr
+        used = [value for value in ordered_valid if lower_fence <= value <= upper_fence]
+    else:
+        q1 = q3 = lower_fence = upper_fence = None
+        used = ordered_valid
+    outlier_count = len(ordered_valid) - len(used)
+    percentiles = {
+        f"P{percentile}": _linear_quantile(used, percentile)
+        for percentile in SELF_HISTORY_PERCENTILES
+    } if used else {}
+    return {
+        "sample_count_total": len(raw_values),
+        "sample_count_finite_positive": len(ordered_valid),
+        "sample_count_used": len(used),
+        "excluded_count": invalid_count + outlier_count,
+        "excluded_invalid_count": invalid_count,
+        "excluded_outlier_count": outlier_count,
+        "tukey_lower_fence": lower_fence,
+        "tukey_upper_fence": upper_fence,
+        "values_used": used,
+        "percentiles": percentiles,
+    }
+
+
+def _price_candidate(
+    eps: float | None,
+    percentiles: dict[str, float],
+    low_percentile: int,
+    high_percentile: int,
+    *,
+    eligible: bool,
+) -> dict[str, Any]:
+    low_multiple = percentiles.get(f"P{low_percentile}")
+    high_multiple = percentiles.get(f"P{high_percentile}")
+    if not eligible or eps is None or not math.isfinite(eps) or eps <= 0:
+        low = high = None
+        status = "unavailable"
+    elif low_multiple is None or high_multiple is None:
+        low = high = None
+        status = "unavailable"
+    else:
+        low = eps * low_multiple
+        high = eps * high_multiple
+        status = RESEARCH_STATUS
+    return {
+        "low": low,
+        "high": high,
+        "unit": "USD per share",
+        "basis_percentiles": [f"P{low_percentile}", f"P{high_percentile}"],
+        "status": status,
+        "operational_eligible": False,
+    }
+
+
+def build_self_history_market_premium(
+    v23_ticker: dict[str, Any],
+    *,
+    as_of: str | None = None,
+    minimum_sample: int = SELF_HISTORY_MINIMUM_SAMPLE,
+) -> dict[str, Any]:
+    """Build a non-operational self-history PER read model.
+
+    Only rows available on or before ``as_of`` participate.  DCF, discount
+    rates, macro inputs, peers, and StockLens prices are intentionally absent
+    from the function signature so they cannot influence the result.
+    """
+
+    ticker = str(v23_ticker.get("ticker") or "")
+    current = _require_mapping(v23_ticker.get("current"), f"{ticker}.current")
+    current_price = _require_mapping(current.get("price"), f"{ticker}.current.price")
+    current_eps_field = _require_mapping(current.get("ttm_eps"), f"{ticker}.current.ttm_eps")
+    current_per_field = _require_mapping(current.get("ttm_per"), f"{ticker}.current.ttm_per")
+    calculation_as_of = _require_iso_date(as_of or current_price.get("as_of"), f"{ticker}.self_history.as_of")
+    historical = v23_ticker.get("historical_per")
+    if not isinstance(historical, list):
+        raise V23LedgerError(f"{ticker}.historical_per must be an array")
+    eligible_rows = [
+        row
+        for row in historical
+        if isinstance(row, dict)
+        and row.get("filing_date")
+        and _require_iso_date(row["filing_date"], f"{ticker}.historical.filing_date") <= calculation_as_of
+    ]
+    full = _per_distribution(eligible_rows)
+    cutoff = _five_year_cutoff(calculation_as_of)
+    recent_rows = [row for row in eligible_rows if row["filing_date"] >= cutoff]
+    recent = _per_distribution(recent_rows)
+    sample_gate_passed = full["sample_count_used"] >= minimum_sample
+
+    current_eps = current_eps_field.get("value")
+    current_eps_number = float(current_eps) if isinstance(current_eps, (int, float)) else None
+    current_per = current_per_field.get("value")
+    current_per_number = float(current_per) if isinstance(current_per, (int, float)) else None
+    current_percentile = None
+    if sample_gate_passed and current_per_number is not None and math.isfinite(current_per_number):
+        current_percentile = (
+            sum(value <= current_per_number for value in full["values_used"])
+            / len(full["values_used"])
+            * 100
+        )
+
+    # Reproduce the v23 builder's disclosed current-percentile policy solely
+    # for cross-checking: finite 0 < PER < 500, without Tukey filtering.
+    v23_policy_values = sorted(
+        value
+        for value in (
+            row.get("ttm_per", {}).get("value")
+            for row in eligible_rows
+        )
+        if isinstance(value, (int, float)) and math.isfinite(float(value)) and 0 < float(value) < 500
+    )
+    recomputed_v23_percentile = None
+    if current_per_number is not None and v23_policy_values:
+        recomputed_v23_percentile = (
+            sum(value <= current_per_number for value in v23_policy_values)
+            / len(v23_policy_values)
+            * 100
+        )
+    reported_field = current.get("reported_current_percentile", {})
+    reported_percentile = reported_field.get("value") if isinstance(reported_field, dict) else None
+    crosscheck_delta = None
+    if isinstance(reported_percentile, (int, float)) and recomputed_v23_percentile is not None:
+        crosscheck_delta = recomputed_v23_percentile - float(reported_percentile)
+
+    percentiles = full["percentiles"]
+    candidates = {
+        "aggressive_interest_candidate": _price_candidate(
+            current_eps_number, percentiles, 25, 35, eligible=sample_gate_passed
+        ),
+        "normal_interest_candidate": _price_candidate(
+            current_eps_number, percentiles, 35, 50, eligible=sample_gate_passed
+        ),
+        "neutral_hold_candidate": _price_candidate(
+            current_eps_number, percentiles, 50, 70, eligible=sample_gate_passed
+        ),
+        "high_expectation_candidate": _price_candidate(
+            current_eps_number, percentiles, 70, 85, eligible=sample_gate_passed
+        ),
+    }
+    current_location = "unavailable"
+    if current_per_number is not None and sample_gate_passed:
+        if current_per_number < percentiles["P25"]:
+            current_location = "below_aggressive_interest_candidate"
+        elif current_per_number <= percentiles["P35"]:
+            current_location = "aggressive_interest_candidate"
+        elif current_per_number <= percentiles["P50"]:
+            current_location = "normal_interest_candidate"
+        elif current_per_number <= percentiles["P70"]:
+            current_location = "neutral_hold_candidate"
+        elif current_per_number <= percentiles["P85"]:
+            current_location = "high_expectation_candidate"
+        else:
+            current_location = "above_high_expectation_candidate"
+
+    confidence = "insufficient_sample"
+    if sample_gate_passed:
+        confidence = "low_research_confidence" if full["sample_count_used"] < 30 else "moderate_research_confidence"
+    available_at = max(
+        str(current_price.get("available_at") or ""),
+        str(current_eps_field.get("available_at") or ""),
+    ) or None
+    limitations = [
+        "reconstructed PIT: filingDate is a date-only proxy because SEC acceptance timestamps are absent",
+        "source payload hashes were collected in 2026 and are not contemporaneous historical vintages",
+        "Tukey fences remove statistical extremes transparently but do not prove that the excluded observations were economically invalid",
+        "PER dispersion can reflect EPS denominator volatility and business-structure change; the ledger alone cannot separate those causes",
+        "recent-five-year distribution is displayed separately and is not promoted when its used sample is below 20",
+        "candidate prices are historical-multiple observations, not formal fair value, target price, or an operating signal",
+    ]
+    if full["sample_count_used"] == minimum_sample:
+        limitations.append("the full-history used sample only meets the minimum threshold exactly")
+
+    result = {
+        "source": "approved v23 historicalPer reconstructed point-in-time ledger",
+        "source_hash": str(v23_ticker.get("ledger_sha256") or ""),
+        "as_of": calculation_as_of,
+        "available_at": available_at,
+        "unit": "PER multiple; candidate prices in USD per share",
+        "calculation_basis": (
+            "linear-interpolated empirical PER quantiles after finite-positive validation and "
+            "1.5×IQR Tukey filtering; candidate price = current v23 TTM diluted EPS × PER quantile"
+        ),
+        "status": RESEARCH_STATUS if sample_gate_passed else "blocked_insufficient_sample",
+        "operational_eligible": False,
+        "minimum_sample": minimum_sample,
+        "sample_gate_passed": sample_gate_passed,
+        "sample_confidence": confidence,
+        "sample_count_total": full["sample_count_total"],
+        "sample_count_used": full["sample_count_used"],
+        "excluded_count": full["excluded_count"],
+        "exclusion_policy": {
+            "invalid": "exclude non-numeric, non-finite, zero, and negative PER",
+            "outliers": "exclude values outside full-history Tukey fences Q1−1.5×IQR and Q3+1.5×IQR",
+            "lower_fence": full["tukey_lower_fence"],
+            "upper_fence": full["tukey_upper_fence"],
+            "invalid_count": full["excluded_invalid_count"],
+            "outlier_count": full["excluded_outlier_count"],
+        },
+        "full_history_percentiles": full["percentiles"],
+        "recent_5y_percentiles": {
+            "cutoff": cutoff,
+            "sample_count_total": recent["sample_count_total"],
+            "sample_count_used": recent["sample_count_used"],
+            "excluded_count": recent["excluded_count"],
+            "sample_gate_passed": recent["sample_count_used"] >= minimum_sample,
+            "values": recent["percentiles"],
+        },
+        "current_ttm_eps": current_eps_number,
+        "current_ttm_per": current_per_number,
+        "current_percentile": current_percentile,
+        "current_percentile_crosscheck": {
+            "reported_v23": reported_percentile,
+            "recomputed_v23_policy": recomputed_v23_percentile,
+            "delta_percentage_points": crosscheck_delta,
+            "policy": "finite 0 < PER < 500, matching the disclosed v23 current-percentile rule",
+        },
+        "current_location": current_location,
+        **candidates,
+        "limitations": limitations,
+    }
+    return result
 
 
 def _load_csv_rows(path: Path) -> list[dict[str, str]]:

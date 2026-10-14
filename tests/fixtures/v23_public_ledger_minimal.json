@@ -25,7 +25,9 @@
         "epsPeriodEnd": "2026-08-02",
         "fcfAsOf": "2026-08-02",
         "ttmPe": 46.1721926319356,
-        "fcfYield": null
+        "fcfYield": null,
+        "history5": {"percentile": 61.904761904761905},
+        "history10": {"percentile": 61.904761904761905}
       },
       "historicalPer": [
         {
@@ -75,7 +77,9 @@
         "epsPeriodEnd": "2026-07-26",
         "fcfAsOf": "2026-07-26",
         "ttmPe": 27.5967121727096,
-        "fcfYield": null
+        "fcfYield": null,
+        "history5": {"percentile": 14.285714285714285},
+        "history10": {"percentile": 14.285714285714285}
       },
       "historicalPer": [
         {

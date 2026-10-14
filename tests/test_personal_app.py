@@ -184,13 +184,28 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "EPS·PER 정의는 합치거나 덮어쓰지 않았습니다" in avgo_success
     assert avgo_metrics["TTM 희석 EPS"] == "$7.84"
     assert avgo_metrics["TTM PER"] == "46.17배"
+    assert avgo_metrics["정상 관심 후보 · 연구 전용"] != "미산출"
+    assert avgo_metrics["자기 역사 정상 관심 후보"] != "미산출"
+    assert avgo_metrics["현재 v23 TTM PER"] == "46.17배"
+    assert avgo_metrics["사용 표본"] == "21/21"
+    avgo_markdown = " ".join(item.value for item in app.markdown)
+    assert "자기 역사 시장 프리미엄" in avgo_markdown
+    assert "DCF 스트레스 가격·할인율·거시 프록시·피어 배수는 이 계산에 사용하지 않았습니다" in avgo_rendered
+    assert "reconstructed PIT 연구 전용" in avgo_rendered
+    assert "전체 원본 21건 · 사용 21건 · 제외 0건" in avgo_rendered
+    expander_states = {item.label: item.proto.expanded for item in app.expander}
+    assert expander_states["자기 역사 표본·제외 규칙·한계"] is False
 
     app.selectbox[0].set_value("NVDA").run(timeout=20)
     assert not app.exception
     nvda_info = " ".join(item.value for item in app.info)
     nvda_captions = " ".join(item.value for item in app.caption)
+    nvda_metrics = {item.label: item.value for item in app.metric}
     assert "StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다" in nvda_info
     assert "NVDA Q2 FCF: null 유지" in nvda_captions
+    assert nvda_metrics["정상 관심 후보 · 연구 전용"] != "미산출"
+    assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
+    assert nvda_metrics["사용 표본"] == "36/36"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
 

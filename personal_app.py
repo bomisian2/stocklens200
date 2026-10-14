@@ -15,6 +15,7 @@ from stocklens.personal.v23_adapter import (
     APPROVED_LEDGER_SHA256,
     SUPPORTED_TICKERS as V23_SUPPORTED_TICKERS,
     V23LedgerError,
+    build_self_history_market_premium,
     compare_v23_with_stocklens,
     load_v23_public_ledger,
 )
@@ -85,7 +86,7 @@ def _render_v23_comparison(
     market_path: Path,
     manifest_path: Path,
     financial_path: Path,
-) -> None:
+) -> dict[str, Any] | None:
     if ticker not in V23_SUPPORTED_TICKERS:
         return
     st.subheader("v23 reconstructed PIT 비교 · 읽기 전용")
@@ -180,6 +181,123 @@ def _render_v23_comparison(
     else:
         st.info("StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다. 날짜 정렬이나 비교값은 만들지 않습니다.")
 
+    self_history = build_self_history_market_premium(v23_ticker)
+    st.markdown("### 자기 역사 시장 프리미엄")
+    st.warning(
+        "reconstructed PIT 연구 전용 · operational_eligible=false. "
+        "DCF 스트레스 가격·할인율·거시 프록시·피어 배수는 이 계산에 사용하지 않았습니다."
+    )
+    normal_candidate = self_history["normal_interest_candidate"]
+    with st.container(horizontal=True):
+        st.metric(
+            "정상 관심 후보 · 연구 전용",
+            (
+                f"${normal_candidate['low']:,.2f}~${normal_candidate['high']:,.2f}"
+                if normal_candidate["low"] is not None else "미산출"
+            ),
+            border=True,
+            help="현재 v23 TTM EPS × 전체기간 PER P35~P50. 정식 적정가나 매수구간이 아닙니다.",
+        )
+        st.metric("현재 v23 TTM PER", f"{self_history['current_ttm_per']:.2f}배", border=True)
+        st.metric("정제 역사 백분위", f"{self_history['current_percentile']:.1f}%", border=True)
+        st.metric(
+            "사용 표본",
+            f"{self_history['sample_count_used']}/{self_history['sample_count_total']}",
+            border=True,
+        )
+
+    location_labels = {
+        "below_aggressive_interest_candidate": "P25 미만",
+        "aggressive_interest_candidate": "적극 관심 후보(P25~P35)",
+        "normal_interest_candidate": "정상 관심 후보(P35~P50)",
+        "neutral_hold_candidate": "중립·보유 평가 구간(P50~P70)",
+        "high_expectation_candidate": "높은 기대 구간(P70~P85)",
+        "above_high_expectation_candidate": "P85 초과",
+        "unavailable": "미산출",
+    }
+    st.info(
+        f"현재 v23 가격 ${v23['price']['value']:,.2f} / PER {self_history['current_ttm_per']:.2f}배는 "
+        f"정제 전체기간 분포에서 **{location_labels[self_history['current_location']]}**에 위치합니다."
+    )
+    if self_history["current_location"] == "below_aggressive_interest_candidate":
+        st.warning(
+            "역사 하단이라는 사실만으로 저평가로 단정하지 않습니다. 최근 EPS 급증으로 분모가 일시적으로 "
+            "커졌는지, 사업·마진 구조가 달라졌는지를 다음 공시에서 확인해야 합니다."
+        )
+    elif self_history["current_location"] in {"high_expectation_candidate", "above_high_expectation_candidate"}:
+        st.warning(
+            "역사 상단이라는 사실만으로 고평가로 단정하지 않습니다. 높은 성장률·마진 지속성과 시장 지배력이 "
+            "상단 배수를 지지하는지 별도로 검증해야 합니다."
+        )
+
+    candidate_rows = []
+    for key, label in (
+        ("normal_interest_candidate", "정상 관심 후보"),
+        ("aggressive_interest_candidate", "적극 관심 후보"),
+        ("neutral_hold_candidate", "중립·보유 평가 구간"),
+        ("high_expectation_candidate", "높은 기대 구간"),
+    ):
+        candidate = self_history[key]
+        candidate_rows.append({
+            "구간": label,
+            "PER 기준": "~".join(candidate["basis_percentiles"]),
+            "하단": candidate["low"],
+            "상단": candidate["high"],
+            "상태": candidate["status"],
+        })
+    st.dataframe(
+        pd.DataFrame(candidate_rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "하단": st.column_config.NumberColumn(format="$%.2f"),
+            "상단": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+
+    full_percentiles = self_history["full_history_percentiles"]
+    recent = self_history["recent_5y_percentiles"]
+    recent_percentiles = recent["values"]
+    primary_percentiles = ("P10", "P25", "P35", "P50", "P70", "P85", "P90")
+    percentile_frame = pd.DataFrame({
+        "분위수": primary_percentiles,
+        "전체 기간 PER": [full_percentiles.get(key) for key in primary_percentiles],
+        "최근 5년 PER": [recent_percentiles.get(key) for key in primary_percentiles],
+    })
+    st.dataframe(
+        percentile_frame,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "전체 기간 PER": st.column_config.NumberColumn(format="%.2f배"),
+            "최근 5년 PER": st.column_config.NumberColumn(format="%.2f배"),
+        },
+    )
+    st.caption(
+        f"전체 원본 {self_history['sample_count_total']}건 · 사용 {self_history['sample_count_used']}건 · "
+        f"제외 {self_history['excluded_count']}건 · 최근 5년 사용 {recent['sample_count_used']}건"
+        + ("(20표본 미달, 보조 분포만 표시)" if not recent["sample_gate_passed"] else "")
+    )
+    crosscheck = self_history["current_percentile_crosscheck"]
+    st.caption(
+        f"v23 원정책 현재 백분위 교차검증: 보고 {crosscheck['reported_v23']:.4f}% · "
+        f"독립 재계산 {crosscheck['recomputed_v23_policy']:.4f}% · 차이 "
+        f"{crosscheck['delta_percentage_points']:+.6f}%p"
+    )
+    with st.expander("자기 역사 표본·제외 규칙·한계", expanded=False):
+        policy = self_history["exclusion_policy"]
+        st.write(f"- 무효값 규칙: {policy['invalid']}")
+        st.write(f"- 극단값 규칙: {policy['outliers']}")
+        st.write(
+            f"- Tukey 경계: {policy['lower_fence']:.2f}배~{policy['upper_fence']:.2f}배 · "
+            f"무효 제외 {policy['invalid_count']}건 · 극단값 제외 {policy['outlier_count']}건"
+        )
+        st.write(f"- 기준일: {self_history['as_of']} · available_at: {self_history['available_at']}")
+        st.write(f"- 원천 SHA-256: `{self_history['source_hash']}`")
+        st.write(f"- 표본 신뢰도: `{self_history['sample_confidence']}`")
+        for limitation in self_history["limitations"]:
+            st.write(f"- {limitation}")
+
     latest_fcf = v23_ticker["current"]["latest_reported_fcf"]
     fcf_yield = v23_ticker["current"]["fcf_yield"]
     if fcf_yield["value"] is None:
@@ -218,6 +336,8 @@ def _render_v23_comparison(
             )
             st.caption(field["calculation_basis"])
         st.error("정식 적정가·매수구간·운영 신호로 연결하지 않음")
+
+    return self_history
 
 
 st.set_page_config(page_title="StockLens 200 개인 연구", page_icon="🔒", layout="wide")
@@ -430,7 +550,7 @@ analysis = compute_personal_analysis(financial, market, qqq, manifest, estimates
 
 st.header(f"{financial['company']} ({ticker})")
 st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수집: {financial['collected_at_utc']}")
-_render_v23_comparison(
+v23_self_history = _render_v23_comparison(
     ticker,
     market_path=market_path,
     manifest_path=manifest_path,
@@ -551,13 +671,33 @@ if analysis:
     evidence_map = evidence_contract.get("map", {})
     conditional = references.get("conditional_research_valuation", {})
     implied_range = conditional.get("implied_growth_range")
-    st.warning(
-        "정상 관심 범위와 정식 적정가는 아직 없습니다. 정확성 부족을 더 낮은 가치로 바꾸지 않으며, "
-        "현재 시장 기대와 확보·미확보 근거를 먼저 보여줍니다."
-    )
+    if v23_self_history and v23_self_history.get("sample_gate_passed"):
+        st.warning(
+            "v23 자기 역사 PER 기반 정상 관심 후보는 연구 전용으로 표시합니다. 정식 적정가와 운영 매수 판단은 "
+            "여전히 비활성이며, 정확성 부족을 더 낮은 가치로 바꾸지 않습니다."
+        )
+    else:
+        st.warning(
+            "정상 관심 범위와 정식 적정가는 아직 없습니다. 정확성 부족을 더 낮은 가치로 바꾸지 않으며, "
+            "현재 시장 기대와 확보·미확보 근거를 먼저 보여줍니다."
+        )
 
     with st.container(horizontal=True):
-        st.metric("정상 관심 범위", "미산출", border=True)
+        normal_history = (
+            v23_self_history.get("normal_interest_candidate", {})
+            if v23_self_history else {}
+        )
+        normal_history_value = (
+            f"${normal_history['low']:,.2f}~${normal_history['high']:,.2f}"
+            if normal_history.get("low") is not None and normal_history.get("high") is not None
+            else "미산출"
+        )
+        st.metric(
+            "자기 역사 정상 관심 후보" if v23_self_history else "정상 관심 범위",
+            normal_history_value,
+            border=True,
+            help="v23 현재 TTM EPS × 정제 역사 PER P35~P50. 정식 적정가나 운영 매수구간이 아닙니다.",
+        )
         st.metric(
             "현재 시장 요구 성장",
             (
@@ -584,7 +724,13 @@ if analysis:
     else:
         st.info("현재가 역산에 필요한 검증 입력이 부족하여 시장 요구 성장도 미산출입니다.")
 
-    st.info(evidence_map.get("reason", "가치 지도 근거가 미확보되었습니다."))
+    if v23_self_history and v23_self_history.get("sample_gate_passed"):
+        st.info(
+            "자기 역사 PER 축은 reconstructed PIT 연구 상태로 활성화됐습니다. 피어 상대가치와 정식 내재가치 "
+            "입력은 여전히 미확보이며, 이 구간은 운영 투자판단에 사용하지 않습니다."
+        )
+    else:
+        st.info(evidence_map.get("reason", "가치 지도 근거가 미확보되었습니다."))
     map_rows = {
         "높은 기대 구간": evidence_map.get("high_expectation_range"),
         "검증된 위기 스트레스 범위": evidence_map.get("validated_crisis_stress_range"),
@@ -622,6 +768,24 @@ if analysis:
             ("quality_premium", "품질 프리미엄 증거"),
         ):
             axis = evidence_axes.get(axis_id, {})
+            if axis_id == "self_history" and v23_self_history:
+                axis = {
+                    "status": v23_self_history["status"],
+                    "calculation_basis": v23_self_history["calculation_basis"],
+                    "eligibility_policy": {
+                        "missing_behavior": "20개 미만 또는 EPS 결측이면 후보 범위를 null로 유지",
+                        "lower_bound_basis": "현재 v23 TTM EPS × 정제 역사 PER P35",
+                        "upper_bound_basis": "현재 v23 TTM EPS × 정제 역사 PER P50",
+                        "calculation_conditions": [
+                            "공시일 프록시가 계산 기준일 이하인 행만 사용",
+                            "유한한 양수 PER만 사용하고 1.5×IQR Tukey 극단값 제외",
+                            "사용 표본 20개 이상",
+                        ],
+                        "backtest_criteria": [
+                            "현재는 reconstructed PIT 연구 결과이며 운영 검증 전",
+                        ],
+                    },
+                }
             policy = axis.get("eligibility_policy", {})
             st.markdown(f"**{label}: {axis.get('status', 'unavailable')}**")
             st.caption(axis.get("calculation_basis", "산출 근거 미확보"))
