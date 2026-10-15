@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -43,7 +44,13 @@ def main() -> int:
     except (OSError, DecisionEvidenceError) as exc:
         print(f"same-date evidence audit failed: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"output": str(output), "status": report["status"], "decision_creation_allowed": report["decision_creation_allowed"], "block_stage": report["block_stage"]}, ensure_ascii=False))
+    print(json.dumps({
+        "output": str(output),
+        "audit_sha256": hashlib.sha256(output.read_bytes()).hexdigest().upper(),
+        "status": report["status"],
+        "decision_creation_allowed": report["decision_creation_allowed"],
+        "block_stage": report["block_stage"],
+    }, ensure_ascii=False))
     return 0
 
 
