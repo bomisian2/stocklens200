@@ -21,6 +21,9 @@ def main() -> int:
     parser.add_argument("--consensus", required=True)
     parser.add_argument("--regime", required=True)
     parser.add_argument("--price-history", required=True)
+    parser.add_argument("--decision-snapshot")
+    parser.add_argument("--v23-ledger")
+    parser.add_argument("--decision-config")
     parser.add_argument("--decision-time", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -32,6 +35,9 @@ def main() -> int:
             regime_path=args.regime,
             price_history_path=args.price_history,
             decision_time=args.decision_time,
+            decision_snapshot_path=args.decision_snapshot,
+            v23_ledger_path=args.v23_ledger,
+            decision_config_path=args.decision_config,
         )
         output = write_audit_report(report, args.output)
     except (OSError, DecisionEvidenceError) as exc:

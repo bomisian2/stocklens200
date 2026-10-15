@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
+from stocklens.personal.decision_evidence import load_and_validate_evidence_audit
 from stocklens.personal.decision_model import (
     APPROVED_LOCAL_INPUT_SHA256,
     SUPPORTED_TICKERS as DECISION_SUPPORTED_TICKERS,
@@ -83,6 +84,13 @@ SAME_DATE_AUDIT_PATH = Path(
     os.environ.get(
         "STOCKLENS_DECISION_AUDIT_PATH",
         str(DATA_DIR / "decision" / "evidence-audit-v1.json"),
+    )
+)
+SAME_DATE_AUDIT_SHA256 = os.environ.get("STOCKLENS_DECISION_AUDIT_SHA256")
+SAME_DATE_LEGACY_INPUT_PATH = Path(
+    os.environ.get(
+        "STOCKLENS_SAME_DATE_LEGACY_INPUT_PATH",
+        str(DATA_DIR / "decision" / "same-date-inputs-v1.json"),
     )
 )
 DECISION_CONFIG_PATH = Path(
@@ -909,11 +917,7 @@ st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수
 same_date_decision: dict[str, Any] | None = None
 same_date_backtest: dict[str, Any] | None = None
 same_date_error: str | None = None
-same_date_audit = (
-    load_json(str(SAME_DATE_AUDIT_PATH), _mtime(SAME_DATE_AUDIT_PATH))
-    if ticker in DECISION_SUPPORTED_TICKERS
-    else None
-)
+same_date_audit: dict[str, Any] | None = None
 if ticker in DECISION_SUPPORTED_TICKERS:
     try:
         decision_inputs = load_same_date_inputs(
@@ -923,17 +927,29 @@ if ticker in DECISION_SUPPORTED_TICKERS:
             source_root_text=str(SAME_DATE_SOURCE_ROOT),
             source_signature=_evidence_signature(SAME_DATE_SOURCE_ROOT),
         )
-        if same_date_audit and same_date_audit.get("decision_creation_allowed") is not True:
-            failed_requirements = [
-                str(row.get("id"))
-                for row in (same_date_audit.get("requirements") or [])
-                if isinstance(row, dict) and row.get("passed") is not True
-            ]
-            raise DecisionModelError(
-                "evidence_preflight blocked: " + ", ".join(failed_requirements)
-            )
         if not V23_LEDGER_PATH:
             raise DecisionModelError("approved v23 ledger path is not configured")
+        source_evidence = decision_inputs.get("source_evidence") or {}
+        source_paths = {
+            "legacy_snapshot": SAME_DATE_LEGACY_INPUT_PATH,
+            "decision_snapshot": SAME_DATE_INPUT_PATH,
+            "decision_ledger": SAME_DATE_SOURCE_ROOT
+            / str((source_evidence.get("decision_ledger") or {}).get("path") or ""),
+            "consensus": SAME_DATE_SOURCE_ROOT
+            / str((source_evidence.get("consensus") or {}).get("path") or ""),
+            "regime": SAME_DATE_SOURCE_ROOT
+            / str((source_evidence.get("regime") or {}).get("path") or ""),
+            "price_history": TOP10_PRICE_HISTORY_PATH,
+            "v23_ledger": Path(V23_LEDGER_PATH),
+            "decision_config": DECISION_CONFIG_PATH,
+        }
+        same_date_audit = load_and_validate_evidence_audit(
+            SAME_DATE_AUDIT_PATH,
+            expected_audit_sha256=SAME_DATE_AUDIT_SHA256,
+            decision_time=str(decision_inputs.get("decision_time") or ""),
+            target_tickers=tuple(sorted(DECISION_SUPPORTED_TICKERS)),
+            source_paths=source_paths,
+        )
         decision_config = load_decision_config(DECISION_CONFIG_PATH)
         decision_ledger_path = Path(V23_LEDGER_PATH)
         decision_ledger = load_v23_ledger(

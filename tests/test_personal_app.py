@@ -8,11 +8,72 @@ from pathlib import Path
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
+from stocklens.personal import decision_model
+from stocklens.personal.decision_evidence import (
+    AUDIT_VERSION,
+    REQUIRED_REQUIREMENT_IDS,
+    REQUIRED_SOURCE_ROLES,
+)
 from stocklens.personal.v23_adapter import EXPECTED_HISTORICAL_ROWS
 from stocklens.personal.same_date_builder import build_same_date_snapshot
 
 
 APPTEST_TIMEOUT_SECONDS = 30
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
+
+
+def _write_ready_audit(
+    *,
+    audit_path: Path,
+    legacy_path: Path,
+    decision_path: Path,
+    v23_path: Path,
+    price_history_path: Path,
+) -> str:
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    source_root = decision_path.parent
+    manifest = decision["source_evidence"]
+    config_path = Path(__file__).parents[1] / "config" / "decision-model-v1.json"
+    source_paths = {
+        "legacy_snapshot": legacy_path,
+        "decision_snapshot": decision_path,
+        "decision_ledger": source_root / manifest["decision_ledger"]["path"],
+        "consensus": source_root / manifest["consensus"]["path"],
+        "regime": source_root / manifest["regime"]["path"],
+        "price_history": price_history_path,
+        "v23_ledger": v23_path,
+        "decision_config": config_path,
+    }
+    assert set(source_paths) == set(REQUIRED_SOURCE_ROLES)
+    report = {
+        "audit_version": AUDIT_VERSION,
+        "decision_time": decision["decision_time"],
+        "target_tickers": ["AVGO", "NVDA"],
+        "legacy_snapshot_hash": _sha256(legacy_path),
+        "decision_snapshot_hash": _sha256(decision_path),
+        "status": "ready",
+        "decision_creation_allowed": True,
+        "decision_created": False,
+        "block_stage": None,
+        "operational_eligible": False,
+        "requirements": [
+            {"id": requirement_id, "passed": True, "status": "passed", "reason": "fixture"}
+            for requirement_id in REQUIRED_REQUIREMENT_IDS
+        ],
+        "evidence": [
+            {
+                "role": role,
+                "path": str(path.resolve()),
+                "source_hash": _sha256(path),
+            }
+            for role, path in source_paths.items()
+        ],
+    }
+    audit_path.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
+    return _sha256(audit_path)
 
 
 def _top10_consensus_fixture() -> dict:
@@ -213,6 +274,10 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         decision_time="2026-10-14T12:52:02.418Z",
     )
     decision_bytes = decision_path.read_bytes()
+    legacy_path = decision_dir / "same-date-inputs-legacy-v1.json"
+    legacy_payload = json.loads(decision_path.read_text(encoding="utf-8"))
+    legacy_payload["calculation_version"] = "same-date-investment-decision-v1"
+    legacy_path.write_text(json.dumps(legacy_payload, sort_keys=True), encoding="utf-8")
     monkeypatch.setenv("STOCKLENS_SAME_DATE_INPUT_PATH", str(decision_path))
     monkeypatch.setenv("STOCKLENS_SAME_DATE_SOURCE_ROOT", str(decision_dir))
     monkeypatch.setenv(
@@ -232,6 +297,17 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         encoding="utf-8",
     )
     monkeypatch.setenv("STOCKLENS_TOP10_PRICE_HISTORY_PATH", str(price_history_path))
+    audit_path = decision_dir / "evidence-audit-v1.json"
+    audit_sha256 = _write_ready_audit(
+        audit_path=audit_path,
+        legacy_path=legacy_path,
+        decision_path=decision_path,
+        v23_path=v23_path,
+        price_history_path=price_history_path,
+    )
+    monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_PATH", str(audit_path))
+    monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_SHA256", audit_sha256)
+    monkeypatch.setenv("STOCKLENS_SAME_DATE_LEGACY_INPUT_PATH", str(legacy_path))
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
         timeout=APPTEST_TIMEOUT_SECONDS
@@ -331,27 +407,52 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["현재 행동"] == "비활성"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
-    audit_path = decision_dir / "evidence-audit-v1.json"
-    audit_path.write_text(
-        json.dumps(
+    original_builder = decision_model.build_decision_analysis_snapshot
+
+    def _decision_must_not_run(*args, **kwargs):
+        raise AssertionError("decision generation must not run without a verified audit")
+
+    monkeypatch.setattr(decision_model, "build_decision_analysis_snapshot", _decision_must_not_run)
+    missing_audit_path = decision_dir / "missing-audit.json"
+    monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_PATH", str(missing_audit_path))
+    monkeypatch.delenv("STOCKLENS_DECISION_AUDIT_SHA256", raising=False)
+    missing_audit_app = AppTest.from_file(
+        str(Path(__file__).parents[1] / "personal_app.py")
+    ).run(timeout=APPTEST_TIMEOUT_SECONDS)
+    missing_audit_app.selectbox[0].set_value("AVGO").run(timeout=APPTEST_TIMEOUT_SECONDS)
+    assert not missing_audit_app.exception
+    missing_audit_rendered = " ".join(
+        item.value for item in [*missing_audit_app.warning, *missing_audit_app.caption]
+    )
+    assert "evidence_preflight blocked: evidence audit is missing" in missing_audit_rendered
+    assert "decision 객체 미생성" in missing_audit_rendered
+    missing_labels = [item.label for item in missing_audit_app.metric]
+    assert "현재 행동" not in missing_labels
+    assert "기준 적정가" not in missing_labels
+    assert "3회 분할매수" not in missing_labels
+    monkeypatch.setattr(decision_model, "build_decision_analysis_snapshot", original_builder)
+
+    blocked_report = {
+        "audit_version": AUDIT_VERSION,
+        "status": "blocked",
+        "block_stage": "evidence_preflight",
+        "decision_creation_allowed": False,
+        "decision_created": False,
+        "requirements": [
             {
+                "id": "verified_pit_forward_eps",
                 "status": "blocked",
-                "block_stage": "evidence_preflight",
-                "decision_creation_allowed": False,
-                "decision_created": False,
-                "requirements": [
-                    {
-                        "id": "verified_pit_forward_eps",
-                        "status": "blocked",
-                        "passed": False,
-                        "reason": "fixture basis is unverified",
-                    }
-                ],
+                "passed": False,
+                "reason": "fixture basis is unverified",
             }
-        ),
+        ],
+    }
+    audit_path.write_text(
+        json.dumps(blocked_report),
         encoding="utf-8",
     )
     monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_PATH", str(audit_path))
+    monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_SHA256", _sha256(audit_path))
     preflight_app = AppTest.from_file(
         str(Path(__file__).parents[1] / "personal_app.py")
     ).run(timeout=APPTEST_TIMEOUT_SECONDS)
@@ -361,12 +462,9 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         item.value for item in [*preflight_app.warning, *preflight_app.caption]
     )
     assert "Same-Date 모듈 비활성" in preflight_rendered
-    assert "evidence_preflight blocked: verified_pit_forward_eps" in preflight_rendered
-    assert "decision 생성 False" in preflight_rendered
+    assert "evidence_preflight blocked: evidence audit status is not ready" in preflight_rendered
 
-    legacy_payload = json.loads(decision_path.read_text(encoding="utf-8"))
-    legacy_payload["calculation_version"] = "same-date-investment-decision-v1"
-    legacy_bytes = json.dumps(legacy_payload, sort_keys=True).encode("utf-8")
+    legacy_bytes = legacy_path.read_bytes()
     decision_path.write_bytes(legacy_bytes)
     monkeypatch.setenv(
         "STOCKLENS_SAME_DATE_INPUT_SHA256",

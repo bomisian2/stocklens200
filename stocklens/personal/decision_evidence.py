@@ -16,6 +16,26 @@ from typing import Any
 
 TARGET_TICKERS = ("AVGO", "NVDA")
 AUDIT_VERSION = "same-date-evidence-audit-v1"
+REQUIRED_REQUIREMENT_IDS = (
+    "verified_pit_forward_eps",
+    "company_pit_forward_per_ledger",
+    "independent_qqq_soxx_peer_forward_multiples",
+    "original_consensus_bytes",
+    "same_date_price_and_regime",
+    "sec_acceptance_or_conservative_next_session",
+    "daily_adjusted_price_history",
+    "decision_display_rights",
+)
+REQUIRED_SOURCE_ROLES = (
+    "legacy_snapshot",
+    "decision_snapshot",
+    "decision_ledger",
+    "consensus",
+    "regime",
+    "price_history",
+    "v23_ledger",
+    "decision_config",
+)
 
 
 class DecisionEvidenceError(ValueError):
@@ -50,6 +70,142 @@ def _read_json(path: str | Path, label: str) -> tuple[Path, bytes, dict[str, Any
     if not isinstance(value, dict):
         raise DecisionEvidenceError(f"{label} root must be an object")
     return source_path, raw, value
+
+
+def _blocked(reason: str) -> DecisionEvidenceError:
+    return DecisionEvidenceError(f"evidence_preflight blocked: {reason}")
+
+
+def _normalized_hash(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        raise _blocked(f"{label} is missing or invalid")
+    try:
+        bytes.fromhex(value)
+    except ValueError as exc:
+        raise _blocked(f"{label} is missing or invalid") from exc
+    return value.upper()
+
+
+def load_and_validate_evidence_audit(
+    audit_path: str | Path,
+    *,
+    expected_audit_sha256: str | None,
+    decision_time: str,
+    target_tickers: tuple[str, ...],
+    source_paths: dict[str, str | Path],
+) -> dict[str, Any]:
+    """Load a ready audit and bind it to every current decision input byte.
+
+    This is deliberately fail-closed.  The audit is an assertion about exact
+    local bytes, not an authorization boolean that can be copied forward.
+    """
+
+    report_path = Path(audit_path)
+    if not report_path.is_file():
+        raise _blocked("evidence audit is missing")
+    if not expected_audit_sha256:
+        raise _blocked("evidence audit approved SHA-256 is missing")
+    expected_audit_hash = _normalized_hash(
+        expected_audit_sha256, "evidence audit approved SHA-256"
+    )
+    raw = report_path.read_bytes()
+    if _sha256(raw) != expected_audit_hash:
+        raise _blocked("evidence audit SHA-256 mismatch")
+    try:
+        report = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _blocked("evidence audit is not valid UTF-8 JSON") from exc
+    if not isinstance(report, dict):
+        raise _blocked("evidence audit root must be an object")
+    if report.get("audit_version") != AUDIT_VERSION:
+        raise _blocked("evidence audit version is not approved")
+    if report.get("status") != "ready":
+        raise _blocked("evidence audit status is not ready")
+    if report.get("decision_creation_allowed") is not True:
+        raise _blocked("evidence audit did not approve decision creation")
+    if report.get("decision_created") is not False:
+        raise _blocked("evidence audit must precede decision creation")
+    if report.get("block_stage") is not None:
+        raise _blocked("evidence audit block_stage must be null when ready")
+    if report.get("operational_eligible") is not False:
+        raise _blocked("evidence audit cannot grant operational eligibility")
+
+    actual_tickers = report.get("target_tickers")
+    if actual_tickers != list(target_tickers):
+        raise _blocked("evidence audit target tickers do not match")
+    try:
+        report_decision_time = _timestamp(report.get("decision_time"), "audit.decision_time")
+        current_decision_time = _timestamp(decision_time, "decision_time")
+    except DecisionEvidenceError as exc:
+        raise _blocked(str(exc)) from exc
+    if report_decision_time != current_decision_time:
+        raise _blocked("evidence audit decision_time does not match snapshot")
+
+    requirements = report.get("requirements")
+    if not isinstance(requirements, list):
+        raise _blocked("evidence audit requirements are missing")
+    requirement_by_id: dict[str, dict[str, Any]] = {}
+    for row in requirements:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            raise _blocked("evidence audit requirement is invalid")
+        requirement_id = row["id"]
+        if requirement_id in requirement_by_id:
+            raise _blocked(f"duplicate evidence requirement: {requirement_id}")
+        requirement_by_id[requirement_id] = row
+    if set(requirement_by_id) != set(REQUIRED_REQUIREMENT_IDS):
+        raise _blocked("evidence audit requirement set does not match")
+    failed = [
+        requirement_id
+        for requirement_id in REQUIRED_REQUIREMENT_IDS
+        if requirement_by_id[requirement_id].get("passed") is not True
+    ]
+    if failed:
+        raise _blocked("requirements not passed: " + ", ".join(failed))
+
+    evidence = report.get("evidence")
+    if not isinstance(evidence, list):
+        raise _blocked("evidence audit source hashes are missing")
+    evidence_by_role: dict[str, dict[str, Any]] = {}
+    for row in evidence:
+        if not isinstance(row, dict) or not isinstance(row.get("role"), str):
+            raise _blocked("evidence audit source record is invalid")
+        role = row["role"]
+        if role in evidence_by_role:
+            raise _blocked(f"duplicate evidence source role: {role}")
+        evidence_by_role[role] = row
+    if set(source_paths) != set(REQUIRED_SOURCE_ROLES):
+        raise _blocked("current decision source map is incomplete")
+    if Path(source_paths["legacy_snapshot"]).resolve() == Path(
+        source_paths["decision_snapshot"]
+    ).resolve():
+        raise _blocked("legacy and current decision snapshots must be separate files")
+    if not set(REQUIRED_SOURCE_ROLES).issubset(evidence_by_role):
+        raise _blocked("evidence audit source role set is incomplete")
+
+    actual_hashes: dict[str, str] = {}
+    for role in REQUIRED_SOURCE_ROLES:
+        current_path = Path(source_paths[role])
+        if not current_path.is_file():
+            raise _blocked(f"current source file is missing: {role}")
+        record = evidence_by_role[role]
+        recorded_path = record.get("path")
+        if not isinstance(recorded_path, str) or Path(recorded_path).resolve() != current_path.resolve():
+            raise _blocked(f"evidence source path mismatch: {role}")
+        recorded_hash = _normalized_hash(record.get("source_hash"), f"{role} source_hash")
+        actual_hash = _sha256(current_path.read_bytes())
+        if actual_hash != recorded_hash:
+            raise _blocked(f"current source hash mismatch: {role}")
+        actual_hashes[role] = actual_hash
+
+    if _normalized_hash(
+        report.get("legacy_snapshot_hash"), "legacy_snapshot_hash"
+    ) != actual_hashes["legacy_snapshot"]:
+        raise _blocked("legacy snapshot hash does not match current bytes")
+    if _normalized_hash(
+        report.get("decision_snapshot_hash"), "decision_snapshot_hash"
+    ) != actual_hashes["decision_snapshot"]:
+        raise _blocked("decision snapshot hash does not match current bytes")
+    return report
 
 
 def _legacy_hashes(snapshot: dict[str, Any]) -> dict[str, str | None]:
@@ -120,11 +276,20 @@ def audit_same_date_evidence(
     price_history_path: str | Path,
     decision_time: str,
     tickers: tuple[str, ...] = TARGET_TICKERS,
+    decision_snapshot_path: str | Path | None = None,
+    v23_ledger_path: str | Path | None = None,
+    decision_config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic evidence table and decision-creation gate."""
 
     decision_at = _timestamp(decision_time, "decision_time")
     legacy_path, legacy_raw, legacy = _read_json(legacy_snapshot_path, "legacy snapshot")
+    if decision_snapshot_path is None:
+        decision_path, decision_raw, decision_snapshot = legacy_path, legacy_raw, legacy
+    else:
+        decision_path, decision_raw, decision_snapshot = _read_json(
+            decision_snapshot_path, "decision snapshot"
+        )
     ledger_path, ledger_raw, ledger = _read_json(decision_ledger_path, "decision ledger")
     consensus_source_path, consensus_raw, consensus = _read_json(consensus_path, "consensus")
     regime_source_path, regime_raw, regime = _read_json(regime_path, "regime")
@@ -222,6 +387,34 @@ def audit_same_date_evidence(
             "status": "blocked",
             "reason": "legacy calculation version and no raw source_evidence manifest; version text must not be upgraded",
         },
+        {
+            "role": "decision_snapshot",
+            "path": str(decision_path.resolve()),
+            "source": "StockLens normalized local decision snapshot",
+            "source_hash": _sha256(decision_raw),
+            "legacy_expected_hash": None,
+            "exact_legacy_hash_match": decision_raw == legacy_raw,
+            "as_of": decision_snapshot.get("decision_time"),
+            "available_at": None,
+            "local_file_modified_at": datetime.fromtimestamp(
+                decision_path.stat().st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "price_as_of": sorted(
+                {
+                    str(row.get("price_as_of"))
+                    for row in (decision_snapshot.get("prices") or {}).values()
+                    if isinstance(row, dict) and row.get("price_as_of")
+                }
+            ),
+            "eps_fiscal_basis": (decision_snapshot.get("consensus") or {}).get("basis"),
+            "gaap_non_gaap": None,
+            "forecast_horizon": None,
+            "unit": None,
+            "currency": None,
+            "available_before_decision": None,
+            "status": "blocked",
+            "reason": "current snapshot is recorded exactly but is not promoted by this audit",
+        },
         _source_record(
             role="decision_ledger",
             path=ledger_path,
@@ -294,6 +487,26 @@ def audit_same_date_evidence(
         ),
     ]
 
+    for role, optional_path in (
+        ("v23_ledger", v23_ledger_path),
+        ("decision_config", decision_config_path),
+    ):
+        if optional_path is None:
+            continue
+        source_path, source_raw, source_value = _read_json(optional_path, role)
+        evidence.append(
+            _source_record(
+                role=role,
+                path=source_path,
+                raw=source_raw,
+                value=source_value,
+                expected_hash=None,
+                decision_at=decision_at,
+                status="available",
+                reason="hash-linked local analysis input; no operating eligibility granted",
+            )
+        )
+
     requirements = [
         {"id": "verified_pit_forward_eps", "passed": consensus_metadata_complete, "status": "available" if consensus_metadata_complete else "blocked", "reason": "verified" if consensus_metadata_complete else "consensus accounting basis metadata is incomplete"},
         {"id": "company_pit_forward_per_ledger", "passed": False, "status": "blocked", "reason": f"only {len(ledger_rows)} target decision rows; underlying EPS basis is not recorded"},
@@ -310,6 +523,7 @@ def audit_same_date_evidence(
         "decision_time": decision_time,
         "target_tickers": list(tickers),
         "legacy_snapshot_hash": _sha256(legacy_raw),
+        "decision_snapshot_hash": _sha256(decision_raw),
         "legacy_calculation_version": legacy.get("calculation_version"),
         "requested_calculation_version": "same-date-investment-decision-v1.1",
         "historical_reconstruction_allowed": False,
