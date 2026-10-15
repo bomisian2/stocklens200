@@ -191,6 +191,16 @@ def test_source_changed_after_audit_fails_closed(tmp_path: Path) -> None:
         _validate(audit_path, source_paths)
 
 
+def test_legacy_and_current_snapshot_same_file_fails_closed(tmp_path: Path) -> None:
+    audit_path, source_paths, _ = _ready_audit(tmp_path)
+    source_paths["decision_snapshot"] = source_paths["legacy_snapshot"]
+    with pytest.raises(
+        DecisionEvidenceError,
+        match="legacy and current decision snapshots must be separate files",
+    ):
+        _validate(audit_path, source_paths)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

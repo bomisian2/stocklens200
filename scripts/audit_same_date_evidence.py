@@ -13,6 +13,7 @@ from stocklens.personal.decision_evidence import (  # noqa: E402
     audit_same_date_evidence,
     write_audit_report,
 )
+from stocklens.personal.decision_contracts import CONTRACT_ROLES  # noqa: E402
 
 
 def main() -> int:
@@ -27,7 +28,14 @@ def main() -> int:
     parser.add_argument("--decision-config")
     parser.add_argument("--decision-time", required=True)
     parser.add_argument("--output", required=True)
+    for role in CONTRACT_ROLES:
+        parser.add_argument(f"--{role.replace('_', '-')}")
     args = parser.parse_args()
+    ready_contract_paths = {
+        role: getattr(args, role)
+        for role in CONTRACT_ROLES
+        if getattr(args, role)
+    }
     try:
         report = audit_same_date_evidence(
             legacy_snapshot_path=args.legacy_snapshot,
@@ -39,6 +47,7 @@ def main() -> int:
             decision_snapshot_path=args.decision_snapshot,
             v23_ledger_path=args.v23_ledger,
             decision_config_path=args.decision_config,
+            ready_contract_paths=ready_contract_paths,
         )
         output = write_audit_report(report, args.output)
     except (OSError, DecisionEvidenceError) as exc:
@@ -50,6 +59,8 @@ def main() -> int:
         "status": report["status"],
         "decision_creation_allowed": report["decision_creation_allowed"],
         "block_stage": report["block_stage"],
+        "evidence_classification": report["evidence_classification"],
+        "contract_schema_valid": report["contract_schema_valid"],
     }, ensure_ascii=False))
     return 0
 

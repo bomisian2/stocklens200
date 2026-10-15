@@ -50,6 +50,7 @@ def _write_ready_audit(
     assert set(source_paths) == set(REQUIRED_SOURCE_ROLES)
     report = {
         "audit_version": AUDIT_VERSION,
+        "evidence_classification": "synthetic_fixture",
         "decision_time": decision["decision_time"],
         "target_tickers": ["AVGO", "NVDA"],
         "legacy_snapshot_hash": _sha256(legacy_path),
@@ -354,6 +355,8 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert avgo_metrics["발행 보통주"] == "4,773.630M"
     assert avgo_metrics["시점 불일치 주식가치 참고"] != "미확보"
     avgo_rendered = " ".join(item.value for item in [*app.caption, *app.warning, *app.error])
+    assert "합성 fixture" in avgo_rendered
+    assert "실제 원본 통과 또는 운영 승격이 아닙니다" in avgo_rendered
     assert "0001730168-26-000080" in avgo_rendered
     assert "정식 적정가" in avgo_rendered
     assert "operational_eligible=false" in " ".join(item.value for item in app.caption)

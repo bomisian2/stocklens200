@@ -950,6 +950,16 @@ if ticker in DECISION_SUPPORTED_TICKERS:
             target_tickers=tuple(sorted(DECISION_SUPPORTED_TICKERS)),
             source_paths=source_paths,
         )
+        evidence_classification = same_date_audit.get("evidence_classification")
+        if evidence_classification == "synthetic_fixture":
+            st.warning(
+                "Same-Date 증거 구분: 합성 fixture · 계약/화면 시험 전용이며 "
+                "실제 원본 통과 또는 운영 승격이 아닙니다."
+            )
+        elif evidence_classification == "actual_local_evidence":
+            st.caption("Same-Date 증거 구분: 해시로 고정된 로컬 실제 원본")
+        else:
+            st.warning("Same-Date 증거 구분: 미확인 · 운영 판단 생성 차단 대상")
         decision_config = load_decision_config(DECISION_CONFIG_PATH)
         decision_ledger_path = Path(V23_LEDGER_PATH)
         decision_ledger = load_v23_ledger(

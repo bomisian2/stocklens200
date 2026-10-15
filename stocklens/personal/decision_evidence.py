@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .decision_contracts import validate_ready_contracts
+
 
 TARGET_TICKERS = ("AVGO", "NVDA")
 AUDIT_VERSION = "same-date-evidence-audit-v1"
@@ -197,6 +199,21 @@ def load_and_validate_evidence_audit(
             raise _blocked(f"current source hash mismatch: {role}")
         actual_hashes[role] = actual_hash
 
+    # Contract manifests and their raw source bytes are audit inputs too.  They
+    # are pinned by the approved audit hash and must still exist unchanged.
+    for role, record in evidence_by_role.items():
+        if role in REQUIRED_SOURCE_ROLES:
+            continue
+        recorded_path = record.get("path")
+        if not isinstance(recorded_path, str) or not recorded_path:
+            raise _blocked(f"evidence source path is missing: {role}")
+        current_path = Path(recorded_path)
+        if not current_path.is_file():
+            raise _blocked(f"current source file is missing: {role}")
+        recorded_hash = _normalized_hash(record.get("source_hash"), f"{role} source_hash")
+        if _sha256(current_path.read_bytes()) != recorded_hash:
+            raise _blocked(f"current source hash mismatch: {role}")
+
     if _normalized_hash(
         report.get("legacy_snapshot_hash"), "legacy_snapshot_hash"
     ) != actual_hashes["legacy_snapshot"]:
@@ -279,6 +296,7 @@ def audit_same_date_evidence(
     decision_snapshot_path: str | Path | None = None,
     v23_ledger_path: str | Path | None = None,
     decision_config_path: str | Path | None = None,
+    ready_contract_paths: dict[str, str | Path] | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic evidence table and decision-creation gate."""
 
@@ -507,16 +525,13 @@ def audit_same_date_evidence(
             )
         )
 
-    requirements = [
-        {"id": "verified_pit_forward_eps", "passed": consensus_metadata_complete, "status": "available" if consensus_metadata_complete else "blocked", "reason": "verified" if consensus_metadata_complete else "consensus accounting basis metadata is incomplete"},
-        {"id": "company_pit_forward_per_ledger", "passed": False, "status": "blocked", "reason": f"only {len(ledger_rows)} target decision rows; underlying EPS basis is not recorded"},
-        {"id": "independent_qqq_soxx_peer_forward_multiples", "passed": False, "status": "unavailable", "reason": "no independent same-basis forward-multiple ledger was supplied"},
-        {"id": "original_consensus_bytes", "passed": bool(consensus_raw), "status": "available" if consensus_raw else "unavailable", "reason": "current preserved bytes are hashable; historical 12:52 UTC bytes do not match" if consensus_raw else "missing"},
-        {"id": "same_date_price_and_regime", "passed": bool(latest_price_as_of and regime_as_of and price_dates == {regime_as_of}), "status": "partial", "reason": f"price={latest_price_as_of}, regime={regime_as_of}; regime remains a proxy"},
-        {"id": "sec_acceptance_or_conservative_next_session", "passed": False, "status": "unavailable", "reason": "acceptance timestamp evidence is not linked to the consensus inputs"},
-        {"id": "daily_adjusted_price_history", "passed": daily_adjusted, "status": "available" if daily_adjusted else "blocked", "reason": history_reason},
-        {"id": "decision_display_rights", "passed": False, "status": "blocked", "reason": "no hash-linked rights manifest permits action-decision display"},
-    ]
+    ready_contracts = validate_ready_contracts(
+        ready_contract_paths,
+        decision_time=decision_time,
+        tickers=tickers,
+    )
+    requirements = ready_contracts["requirements"]
+    evidence.extend(ready_contracts["evidence"])
     creation_allowed = all(bool(item["passed"]) for item in requirements)
     return {
         "audit_version": AUDIT_VERSION,
@@ -526,6 +541,9 @@ def audit_same_date_evidence(
         "decision_snapshot_hash": _sha256(decision_raw),
         "legacy_calculation_version": legacy.get("calculation_version"),
         "requested_calculation_version": "same-date-investment-decision-v1.1",
+        "ready_contract_version": ready_contracts["contract_version"],
+        "evidence_classification": ready_contracts["evidence_classification"],
+        "contract_schema_valid": ready_contracts["schema_valid"],
         "historical_reconstruction_allowed": False,
         "historical_reconstruction_reason": "the preserved consensus and regime bytes do not match the legacy hashes, and the matching ledger was generated after the legacy decision time",
         "evidence": evidence,
