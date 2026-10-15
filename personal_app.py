@@ -10,6 +10,15 @@ import pandas as pd
 import streamlit as st
 
 from stocklens.personal.analysis import COMPANY_PROFILES, compute_personal_analysis
+from stocklens.personal.decision_model import (
+    APPROVED_LOCAL_INPUT_SHA256,
+    SUPPORTED_TICKERS as DECISION_SUPPORTED_TICKERS,
+    DecisionModelError,
+    backtest_pit_per_anchor,
+    build_decision_analysis_snapshot,
+    load_decision_config,
+    load_decision_inputs,
+)
 from stocklens.personal.market_data import compute_technical_snapshot
 from stocklens.personal.market_regime import (
     MarketRegimeError,
@@ -57,6 +66,24 @@ TOP10_CONSENSUS_PATH = Path(
 TOP10_MACRO_SHA256 = os.environ.get("STOCKLENS_TOP10_MACRO_SHA256", APPROVED_MACRO_SHA256)
 TOP10_CONSENSUS_SHA256 = os.environ.get(
     "STOCKLENS_TOP10_CONSENSUS_SHA256", APPROVED_CONSENSUS_SHA256
+)
+SAME_DATE_INPUT_PATH = Path(
+    os.environ.get(
+        "STOCKLENS_SAME_DATE_INPUT_PATH",
+        str(DATA_DIR / "decision" / "same-date-inputs-v1.json"),
+    )
+)
+SAME_DATE_INPUT_SHA256 = os.environ.get(
+    "STOCKLENS_SAME_DATE_INPUT_SHA256", APPROVED_LOCAL_INPUT_SHA256
+)
+DECISION_CONFIG_PATH = Path(
+    os.environ.get(
+        "STOCKLENS_DECISION_CONFIG_PATH",
+        str(Path(__file__).resolve().parent / "config" / "decision-model-v1.json"),
+    )
+)
+TOP10_PRICE_HISTORY_PATH = Path(
+    os.environ.get("STOCKLENS_TOP10_PRICE_HISTORY_PATH", str(TOP10_DATA_DIR / "price-history.json"))
 )
 
 
@@ -108,6 +135,149 @@ def _money_millions(value: float | None) -> str:
 
 def _metric_value(metrics: dict[str, Any], key: str) -> Any:
     return metrics.get(key, {}).get("value")
+
+
+def _render_same_date_decision(decision: dict[str, Any], backtest: dict[str, Any]) -> None:
+    st.subheader("Same-Date Investment Decision Model v1")
+    st.warning(
+        "decision_status=candidate · operational_eligible=false. 행동 문구는 동일 시점 연구 판단이며, "
+        "운영 승격 게이트를 통과하기 전 자동 주문·알림·공개 신호에는 연결하지 않습니다."
+    )
+    st.markdown(f"### {decision['ticker']} · {decision['action_text']}")
+    st.write(
+        f"**${decision['buy_prices'][0]:,.2f} / ${decision['buy_prices'][1]:,.2f} / "
+        f"${decision['buy_prices'][2]:,.2f}에서 3회 분할매수**"
+    )
+    st.write(f"**${decision['reduction_review_price']:,.2f} 이상에서는 신규 매수 중단**")
+    with st.container(horizontal=True):
+        st.metric("동일시점 현재가", f"${decision['current_price']:,.2f}", border=True)
+        st.metric("기준 적정가 · candidate", f"${decision['base_fair_value']:,.2f}", border=True)
+        st.metric(
+            "현재 가격 부담도",
+            decision["price_burden"],
+            f"기준값 대비 {decision['valuation_gap']:+.1%}",
+            border=True,
+        )
+        st.metric("목표 Forward PER", f"{decision['target_per']:.2f}배", border=True)
+        st.metric("현재 행동", decision["action"], border=True)
+        st.metric(
+            "판단 신뢰도",
+            f"{decision['confidence']['label']} · {decision['confidence']['score']}/100",
+            border=True,
+        )
+    st.caption(
+        f"판단시각 {decision['decision_time']} · 시장세션/가격 {decision['market_session']} · "
+        f"컨센서스 공개 {decision['consensus_available_at']} · 시장환경 {decision['regime_as_of']} · "
+        f"가격 지연 {decision['price_lag_calendar_days']}일"
+    )
+    st.caption(
+        f"계산 버전 {decision['calculation_version']} · SHA-256 {decision['source_hash'][:16]}… · "
+        f"EPS basis {decision['eps_basis']}"
+    )
+
+    trace = decision["calculation_trace"]
+    trace_rows = [
+        {
+            "축": "자체 역사 Forward PER",
+            "가중치": trace["historical_forward_per"]["weight"],
+            "입력 PER": trace["historical_forward_per"]["per"],
+            "기여 PER": trace["historical_forward_per"]["weighted_contribution"],
+            "근거": trace["historical_forward_per"]["percentile"],
+        },
+        {
+            "축": "EPS 성장·추정치 변화",
+            "가중치": trace["growth_revision"]["weight"],
+            "입력 PER": trace["growth_revision"]["per"],
+            "기여 PER": trace["growth_revision"]["weighted_contribution"],
+            "근거": (
+                f"다음 EPS 성장 {trace['growth_revision']['raw_next_year_eps_growth']:.1%} · "
+                f"모델 반영 상한 {trace['growth_revision']['bounded_growth']:.1%}"
+            ),
+        },
+        {
+            "축": "시장·섹터 프리미엄",
+            "가중치": trace["market_sector_premium"]["weight"],
+            "입력 PER": trace["market_sector_premium"]["per"],
+            "기여 PER": trace["market_sector_premium"]["weighted_contribution"],
+            "근거": (
+                f"시장 PER {trace['market_sector_premium']['market_clearing_forward_per']:.2f}배 · "
+                f"섹터 {trace['market_sector_premium']['sector_adjustment']:+.1%} · "
+                f"AI/반도체 {trace['market_sector_premium']['ai_semiconductor_premium']:+.1%}"
+            ),
+        },
+    ]
+    st.dataframe(
+        pd.DataFrame(trace_rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "가중치": st.column_config.NumberColumn(format="percent"),
+            "입력 PER": st.column_config.NumberColumn(format="%.2f×"),
+            "기여 PER": st.column_config.NumberColumn(format="%.2f×"),
+        },
+    )
+    st.info(
+        f"시장 국면 조정 {trace['regime']['adjustment']:+.1%}: "
+        + " · ".join(trace["regime"]["trace"][:-1])
+    )
+    st.caption(
+        f"보수/기준/낙관 연구값 ${decision['scenario_values']['conservative']:,.2f} / "
+        f"${decision['scenario_values']['base']:,.2f} / ${decision['scenario_values']['optimistic']:,.2f}. "
+        "최종 매수구간은 이 넓은 외곽 범위가 아니라 자동 3단계 가격만 사용합니다."
+    )
+
+    with st.expander("판단 변경 조건·계산 근거", expanded=False):
+        for condition in decision["invalidation_conditions"]:
+            st.write(f"- {condition}")
+        st.write(f"- 분할 간격: 1차 대비 {decision['buy_ladder_span_of_first_price']:.1%}")
+        st.write(f"- 분할 기준: {decision['buy_ladder_basis']}")
+        st.write(f"- 계산: {decision['calculation_basis']}")
+        for name, digest in decision["source_hashes"].items():
+            st.write(f"- {name} SHA-256: `{digest}`")
+
+    st.markdown("#### Point-in-time 원장 부분 검증")
+    st.caption(backtest["scope"])
+    backtest_rows = []
+    for horizon, result in backtest["horizons"].items():
+        backtest_rows.append(
+            {
+                "기간": horizon,
+                "표본": result["sample_count"],
+                "적중률": result["hit_rate"],
+                "중앙 수익률": result["median_return"],
+                "QQQ 초과수익": result["qqq_excess_return"],
+                "최대 낙폭": result["maximum_drawdown"],
+            }
+        )
+    st.dataframe(
+        pd.DataFrame(backtest_rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "적중률": st.column_config.NumberColumn(format="percent"),
+            "중앙 수익률": st.column_config.NumberColumn(format="percent"),
+            "QQQ 초과수익": st.column_config.NumberColumn(format="percent"),
+            "최대 낙폭": st.column_config.NumberColumn(format="percent"),
+        },
+    )
+    st.caption(
+        f"원장 {backtest['ledger_row_count']}건 · P35 신호 {backtest['signal_count']}건 · "
+        f"미래정보 사용 {str(backtest['future_information_used']).lower()} · "
+        "MDD는 월말 종가 기준 · QQQ 월별 원장 미확보로 초과수익 미산출"
+    )
+
+    passed = sum(bool(row["passed"]) for row in decision["promotion_gates"])
+    st.markdown(f"#### 운영 승격 게이트 · {passed}/{len(decision['promotion_gates'])} 통과")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"조건": row["id"], "통과": "통과" if row["passed"] else "미통과", "근거": row["reason"]}
+                for row in decision["promotion_gates"]
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
 
 
 def _number(value: float | None, *, prefix: str = "", suffix: str = "", decimals: int = 2) -> str:
@@ -638,6 +808,55 @@ analysis = compute_personal_analysis(financial, market, qqq, manifest, estimates
 
 st.header(f"{financial['company']} ({ticker})")
 st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수집: {financial['collected_at_utc']}")
+same_date_decision: dict[str, Any] | None = None
+same_date_backtest: dict[str, Any] | None = None
+same_date_error: str | None = None
+if ticker in DECISION_SUPPORTED_TICKERS:
+    try:
+        if not V23_LEDGER_PATH:
+            raise DecisionModelError("approved v23 ledger path is not configured")
+        decision_inputs = load_decision_inputs(
+            SAME_DATE_INPUT_PATH,
+            expected_sha256=SAME_DATE_INPUT_SHA256,
+        )
+        decision_config = load_decision_config(DECISION_CONFIG_PATH)
+        decision_ledger_path = Path(V23_LEDGER_PATH)
+        decision_ledger = load_v23_ledger(
+            str(decision_ledger_path),
+            _mtime(decision_ledger_path),
+            V23_LEDGER_SHA256,
+        )
+        decision_ticker = decision_ledger["tickers"][ticker]
+        same_date_decision = build_decision_analysis_snapshot(
+            ticker,
+            inputs=decision_inputs,
+            self_history=decision_ticker["self_history"],
+            config=decision_config,
+        )
+        price_history = load_json(
+            str(TOP10_PRICE_HISTORY_PATH),
+            _mtime(TOP10_PRICE_HISTORY_PATH),
+        ) or {}
+        monthly_history = price_history.get("records", {}).get(ticker, [])
+        if not isinstance(monthly_history, list):
+            raise DecisionModelError(f"{ticker} monthly price history is unavailable")
+        same_date_backtest = backtest_pit_per_anchor(decision_ticker, monthly_history)
+    except (
+        OSError,
+        json.JSONDecodeError,
+        DecisionModelError,
+        V23LedgerError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        same_date_error = str(exc)
+
+if same_date_decision and same_date_backtest:
+    _render_same_date_decision(same_date_decision, same_date_backtest)
+elif ticker in DECISION_SUPPORTED_TICKERS:
+    st.warning(f"Same-Date candidate 비활성: {same_date_error or '검증된 입력이 없습니다.'}")
+
 v23_self_history = _render_v23_comparison(
     ticker,
     market_path=market_path,

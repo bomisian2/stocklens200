@@ -198,6 +198,32 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     macro_path.write_bytes(macro_bytes)
     monkeypatch.setenv("STOCKLENS_TOP10_MACRO_PATH", str(macro_path))
     monkeypatch.setenv("STOCKLENS_TOP10_MACRO_SHA256", hashlib.sha256(macro_bytes).hexdigest())
+    decision_dir = tmp_path / "decision"
+    decision_dir.mkdir()
+    decision_payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "same_date_inputs_v1.json").read_text(encoding="utf-8")
+    )
+    decision_bytes = json.dumps(decision_payload, sort_keys=True).encode("utf-8")
+    decision_path = decision_dir / "same-date-inputs-v1.json"
+    decision_path.write_bytes(decision_bytes)
+    monkeypatch.setenv("STOCKLENS_SAME_DATE_INPUT_PATH", str(decision_path))
+    monkeypatch.setenv(
+        "STOCKLENS_SAME_DATE_INPUT_SHA256",
+        hashlib.sha256(decision_bytes).hexdigest(),
+    )
+    price_history_path = top10_dir / "price-history.json"
+    price_history_path.write_text(
+        json.dumps(
+            {
+                "records": {
+                    "AVGO": [{"date": "2026-10-13", "close": 357.31}],
+                    "NVDA": [{"date": "2026-10-13", "close": 228.52}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCKLENS_TOP10_PRICE_HISTORY_PATH", str(price_history_path))
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
 
@@ -263,7 +289,12 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert avgo_metrics["미래 EPS×역사 PER 외곽"] != "미확보"
     assert avgo_metrics["Top10 프록시 상태"] == "중립"
     assert avgo_metrics["사용 표본"] == "21/21"
+    assert avgo_metrics["동일시점 현재가"] == "$357.31"
+    assert avgo_metrics["기준 적정가 · candidate"] != "미확보"
+    assert avgo_metrics["현재 행동"] in {"대기", "분할매수", "비중 축소"}
     avgo_markdown = " ".join(item.value for item in app.markdown)
+    assert "Same-Date Investment Decision Model v1" in " ".join(item.value for item in app.subheader)
+    assert "3회 분할매수" in avgo_markdown
     assert "자기 역사 시장 프리미엄" in avgo_markdown
     assert "DCF 스트레스 가격·할인율·거시 프록시·피어 배수는 이 계산에 사용하지 않았습니다" in avgo_rendered
     assert "reconstructed PIT 연구 전용" in avgo_rendered
@@ -283,6 +314,8 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
     assert nvda_metrics["미래 EPS 저/기준/고"] == "$9.01 / $9.25 / $9.71"
+    assert nvda_metrics["동일시점 현재가"] == "$228.52"
+    assert nvda_metrics["현재 행동"] == "분할매수"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
 

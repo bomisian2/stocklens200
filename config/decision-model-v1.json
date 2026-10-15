@@ -1,0 +1,43 @@
+{
+  "calculation_version": "same-date-investment-decision-v1",
+  "historical_anchor_percentile": "P35",
+  "weights": {
+    "self_history_forward_per": 0.5,
+    "growth_revision": 0.3,
+    "market_sector_premium": 0.2
+  },
+  "growth_rules": {
+    "minimum_growth": -0.2,
+    "maximum_growth": 0.5,
+    "growth_sensitivity": 0.6,
+    "revision_sensitivity": 0.5
+  },
+  "market_sector_rules": {
+    "sector_state_adjustments": {
+      "강세/돌파": 0.04,
+      "중립": 0.0,
+      "약세/실패": -0.04
+    },
+    "ai_semiconductor_leadership_premium": 0.06
+  },
+  "regime_rules": {
+    "qqq_above_20_50": 0.03,
+    "vix_below_20_50": 0.02,
+    "hyg_below_20_50": -0.03,
+    "ten_year_above_20_50": -0.03
+  },
+  "regime_adjustment_limit": 0.1,
+  "scenario_multipliers": {
+    "conservative": 0.95,
+    "optimistic": 1.05
+  },
+  "buy_ladder": {
+    "fair_value_discounts": [0.04, 0.08, 0.12],
+    "current_anchor_discounts": [0.0, 0.04, 0.08]
+  },
+  "reduction_review_premium": 0.15,
+  "maximum_price_lag_calendar_days": 4,
+  "invalidation_rules": {
+    "eps_cut": 0.1
+  }
+}

@@ -119,6 +119,12 @@ def _normalize_historical_row(
     derived_hash = _require_hash(row.get("rawPayloadHash"), f"{ticker}.row.rawPayloadHash")
     sec_hash = _require_hash(row.get("secRawPayloadHash"), f"{ticker}.row.secRawPayloadHash")
     price_hash = _require_hash(row.get("priceRawPayloadHash"), f"{ticker}.row.priceRawPayloadHash")
+    split_basis_factor = row.get("splitBasisFactor")
+    if not isinstance(split_basis_factor, (int, float)) or isinstance(split_basis_factor, bool):
+        raise V23LedgerError(f"{ticker}.row.splitBasisFactor must be numeric")
+    split_basis_factor = float(split_basis_factor)
+    if not math.isfinite(split_basis_factor) or split_basis_factor <= 0:
+        raise V23LedgerError(f"{ticker}.row.splitBasisFactor must be positive")
     filing_url = str(row.get("canonicalUrl") or source_ledger.get("secCompanyFactsUrl") or "")
     price_url = str(source_ledger.get("priceUrl") or "")
 
@@ -127,6 +133,7 @@ def _normalize_historical_row(
         "fiscal_period_end": fiscal_period_end,
         "accession": row.get("accession"),
         "availability_precision": "date_only_no_acceptance_timestamp",
+        "split_basis_factor": split_basis_factor,
         "price": _evidence(
             row.get("basisPrice"),
             source=f"v23 Yahoo chart payload · {price_url}",
