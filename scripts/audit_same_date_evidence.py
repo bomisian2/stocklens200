@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--decision-config")
     parser.add_argument("--decision-time", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--ready-contract-root")
     for role in CONTRACT_ROLES:
         parser.add_argument(f"--{role.replace('_', '-')}")
     args = parser.parse_args()
@@ -48,6 +49,7 @@ def main() -> int:
             v23_ledger_path=args.v23_ledger,
             decision_config_path=args.decision_config,
             ready_contract_paths=ready_contract_paths,
+            ready_contract_root=args.ready_contract_root,
         )
         output = write_audit_report(report, args.output)
     except (OSError, DecisionEvidenceError) as exc:

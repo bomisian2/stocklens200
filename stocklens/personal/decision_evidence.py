@@ -297,6 +297,7 @@ def audit_same_date_evidence(
     v23_ledger_path: str | Path | None = None,
     decision_config_path: str | Path | None = None,
     ready_contract_paths: dict[str, str | Path] | None = None,
+    ready_contract_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic evidence table and decision-creation gate."""
 
@@ -529,6 +530,7 @@ def audit_same_date_evidence(
         ready_contract_paths,
         decision_time=decision_time,
         tickers=tickers,
+        actual_evidence_root=ready_contract_root,
     )
     requirements = ready_contracts["requirements"]
     evidence.extend(ready_contracts["evidence"])

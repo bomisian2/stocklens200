@@ -555,6 +555,7 @@ def validate_ready_contracts(
     *,
     decision_time: str,
     tickers: tuple[str, ...],
+    actual_evidence_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Validate all six offline manifests without creating a snapshot or decision."""
 
@@ -667,6 +668,23 @@ def validate_ready_contracts(
     unique_evidence = {
         (row["role"], row["path"], row["source_hash"]): row for row in evidence
     }
+    if classification == "actual_local_evidence":
+        approved_root = Path(actual_evidence_root).resolve() if actual_evidence_root else None
+        root_error: str | None = None
+        if approved_root is None:
+            root_error = "actual evidence root is not approved"
+        else:
+            for row in unique_evidence.values():
+                try:
+                    Path(row["path"]).resolve().relative_to(approved_root)
+                except (KeyError, TypeError, ValueError):
+                    root_error = "actual evidence path is outside the approved root"
+                    break
+        if root_error:
+            for result in results.values():
+                result["passed"] = False
+                result["status"] = "blocked"
+                result["reason"] = root_error
     return {
         "contract_version": CONTRACT_VERSION,
         "evidence_classification": classification,

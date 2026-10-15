@@ -254,7 +254,14 @@ def _build_contracts(
 
 
 def _validate(paths: dict[str, Path]) -> dict:
-    return validate_ready_contracts(paths, decision_time=DECISION_TIME, tickers=TICKERS)
+    roots = {path.parent.resolve() for path in paths.values()}
+    assert len(roots) == 1
+    return validate_ready_contracts(
+        paths,
+        decision_time=DECISION_TIME,
+        tickers=TICKERS,
+        actual_evidence_root=next(iter(roots)),
+    )
 
 
 def _change(path: Path, mutator) -> None:
@@ -269,6 +276,15 @@ def test_all_requirements_pass_only_after_actual_validator_results(tmp_path: Pat
     assert report["promotion_ready"] is True
     assert all(row["passed"] is True for row in report["requirements"])
     assert report["decision_created"] is False
+
+
+def test_actual_classification_without_approved_evidence_root_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    report = validate_ready_contracts(paths, decision_time=DECISION_TIME, tickers=TICKERS)
+    assert report["schema_valid"] is True
+    assert report["promotion_ready"] is False
+    assert all(row["passed"] is False for row in report["requirements"])
+    assert all("root is not approved" in row["reason"] for row in report["requirements"])
 
 
 def test_synthetic_fixture_is_distinguished_and_never_promotion_ready(tmp_path: Path) -> None:
