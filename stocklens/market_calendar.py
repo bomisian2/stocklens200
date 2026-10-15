@@ -4,10 +4,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from statistics import median
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
-import exchange_calendars as xcals
-import pandas as pd
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,8 @@ class FreshnessAssessment:
 @lru_cache(maxsize=1)
 def _xnys_calendar():
     # Explicit bounds avoid depending on the package's moving default window.
+    import exchange_calendars as xcals
+
     return xcals.get_calendar("XNYS", start="2000-01-01", end="2035-12-31")
 
 
@@ -54,6 +56,8 @@ def _as_utc(value: datetime) -> datetime:
 
 def latest_completed_session(now: datetime) -> MarketSession:
     """Return the most recent NYSE session whose regular close has passed."""
+    import pandas as pd
+
     current = _as_utc(now)
     calendar = _xnys_calendar()
     start = (current - timedelta(days=14)).date().isoformat()
@@ -101,6 +105,8 @@ def market_phase(now: datetime) -> str:
 
 def assess_market_times(values: Iterable[str | None], now: datetime) -> FreshnessAssessment:
     """Validate per-security market times against the latest completed US session."""
+    import pandas as pd
+
     evaluated_at = _as_utc(now).replace(microsecond=0)
     phase = market_phase(evaluated_at)
     expected = latest_completed_session(evaluated_at)

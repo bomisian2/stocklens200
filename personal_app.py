@@ -79,6 +79,12 @@ SAME_DATE_INPUT_SHA256 = os.environ.get(
 SAME_DATE_SOURCE_ROOT = Path(
     os.environ.get("STOCKLENS_SAME_DATE_SOURCE_ROOT", str(SAME_DATE_INPUT_PATH.parent))
 )
+SAME_DATE_AUDIT_PATH = Path(
+    os.environ.get(
+        "STOCKLENS_DECISION_AUDIT_PATH",
+        str(DATA_DIR / "decision" / "evidence-audit-v1.json"),
+    )
+)
 DECISION_CONFIG_PATH = Path(
     os.environ.get(
         "STOCKLENS_DECISION_CONFIG_PATH",
@@ -98,22 +104,51 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=256)
 def load_json(path_text: str, modified_ns: int) -> dict[str, Any] | None:
     del modified_ns
     return _load_json(Path(path_text))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=64)
 def load_market(path_text: str, modified_ns: int) -> pd.DataFrame:
     del modified_ns
     path = Path(path_text)
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
 def load_v23_ledger(path_text: str, modified_ns: int, expected_sha256: str) -> dict[str, Any]:
     del modified_ns
     return load_v23_public_ledger(path_text, expected_sha256=expected_sha256)
+
+
+def _evidence_signature(root: Path) -> tuple[tuple[str, int, int], ...]:
+    if not root.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            (str(path.relative_to(root)), path.stat().st_size, path.stat().st_mtime_ns)
+            for path in root.rglob("*.json")
+            if path.is_file()
+        )
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def load_same_date_inputs(
+    path_text: str,
+    modified_ns: int,
+    expected_sha256: str | None,
+    source_root_text: str,
+    source_signature: tuple[tuple[str, int, int], ...],
+) -> dict[str, Any]:
+    del modified_ns, source_signature
+    return load_decision_inputs(
+        path_text,
+        expected_sha256=expected_sha256,
+        source_root=source_root_text,
+    )
 
 
 def _mtime(path: Path) -> int:
@@ -874,13 +909,29 @@ st.caption(f"공식 재무 상태: {financial['status']} · 마지막 로컬 수
 same_date_decision: dict[str, Any] | None = None
 same_date_backtest: dict[str, Any] | None = None
 same_date_error: str | None = None
+same_date_audit = (
+    load_json(str(SAME_DATE_AUDIT_PATH), _mtime(SAME_DATE_AUDIT_PATH))
+    if ticker in DECISION_SUPPORTED_TICKERS
+    else None
+)
 if ticker in DECISION_SUPPORTED_TICKERS:
     try:
-        decision_inputs = load_decision_inputs(
-            SAME_DATE_INPUT_PATH,
+        decision_inputs = load_same_date_inputs(
+            str(SAME_DATE_INPUT_PATH),
+            _mtime(SAME_DATE_INPUT_PATH),
             expected_sha256=SAME_DATE_INPUT_SHA256,
-            source_root=SAME_DATE_SOURCE_ROOT,
+            source_root_text=str(SAME_DATE_SOURCE_ROOT),
+            source_signature=_evidence_signature(SAME_DATE_SOURCE_ROOT),
         )
+        if same_date_audit and same_date_audit.get("decision_creation_allowed") is not True:
+            failed_requirements = [
+                str(row.get("id"))
+                for row in (same_date_audit.get("requirements") or [])
+                if isinstance(row, dict) and row.get("passed") is not True
+            ]
+            raise DecisionModelError(
+                "evidence_preflight blocked: " + ", ".join(failed_requirements)
+            )
         if not V23_LEDGER_PATH:
             raise DecisionModelError("approved v23 ledger path is not configured")
         decision_config = load_decision_config(DECISION_CONFIG_PATH)
@@ -924,6 +975,30 @@ elif ticker in DECISION_SUPPORTED_TICKERS:
         "행동 판단·적정가·분할매수 표시 0개 · 운영 승격 결과 없음"
     )
     st.caption(f"차단 사유: {same_date_error or '검증된 입력이 없습니다.'}")
+    if same_date_audit:
+        st.caption(
+            f"입력 사전감사 {same_date_audit.get('status', 'unknown')} · "
+            f"차단 단계 {same_date_audit.get('block_stage') or '없음'} · "
+            f"decision 생성 {bool(same_date_audit.get('decision_created'))}"
+        )
+        with st.expander("동일시점 입력 증거표"):
+            requirements = same_date_audit.get("requirements") or []
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "입력": row.get("id"),
+                            "상태": row.get("status"),
+                            "통과": bool(row.get("passed")),
+                            "사유": row.get("reason"),
+                        }
+                        for row in requirements
+                        if isinstance(row, dict)
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
 
 v23_self_history = _render_v23_comparison(
     ticker,

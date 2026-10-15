@@ -331,6 +331,39 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["현재 행동"] == "비활성"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
+    audit_path = decision_dir / "evidence-audit-v1.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "block_stage": "evidence_preflight",
+                "decision_creation_allowed": False,
+                "decision_created": False,
+                "requirements": [
+                    {
+                        "id": "verified_pit_forward_eps",
+                        "status": "blocked",
+                        "passed": False,
+                        "reason": "fixture basis is unverified",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_PATH", str(audit_path))
+    preflight_app = AppTest.from_file(
+        str(Path(__file__).parents[1] / "personal_app.py")
+    ).run(timeout=APPTEST_TIMEOUT_SECONDS)
+    preflight_app.selectbox[0].set_value("AVGO").run(timeout=APPTEST_TIMEOUT_SECONDS)
+    assert not preflight_app.exception
+    preflight_rendered = " ".join(
+        item.value for item in [*preflight_app.warning, *preflight_app.caption]
+    )
+    assert "Same-Date 모듈 비활성" in preflight_rendered
+    assert "evidence_preflight blocked: verified_pit_forward_eps" in preflight_rendered
+    assert "decision 생성 False" in preflight_rendered
+
     legacy_payload = json.loads(decision_path.read_text(encoding="utf-8"))
     legacy_payload["calculation_version"] = "same-date-investment-decision-v1"
     legacy_bytes = json.dumps(legacy_payload, sort_keys=True).encode("utf-8")
