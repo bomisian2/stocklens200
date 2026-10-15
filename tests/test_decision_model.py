@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,21 +12,31 @@ from stocklens.personal.decision_model import (
     DecisionModelError,
     backtest_pit_per_anchor,
     build_decision_analysis_snapshot,
+    calculate_target_multiple,
     load_decision_config,
     load_decision_inputs,
+    walk_forward_full_model,
 )
+from stocklens.personal.same_date_builder import build_same_date_snapshot
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "same_date_inputs_v1.json"
+SOURCE_FIXTURES = Path(__file__).parent / "fixtures" / "same_date_sources"
 CONFIG = Path(__file__).parents[1] / "config" / "decision-model-v1.json"
 
 
-def _inputs() -> dict:
-    digest = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
-    return load_decision_inputs(FIXTURE, expected_sha256=digest)
+def _build_inputs(tmp_path: Path) -> tuple[Path, dict]:
+    path = build_same_date_snapshot(
+        decision_ledger_path=SOURCE_FIXTURES / "decision-ledger.json",
+        consensus_path=SOURCE_FIXTURES / "consensus.json",
+        regime_path=SOURCE_FIXTURES / "regime.json",
+        output_dir=tmp_path,
+        decision_time="2026-10-14T12:52:02.418Z",
+    )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return path, load_decision_inputs(path, expected_sha256=digest, source_root=tmp_path)
 
 
-def _history(ticker: str) -> dict:
+def _legacy_history(ticker: str) -> dict:
     return {
         "ticker": ticker,
         "source_hash": "a" * 64,
@@ -33,135 +44,182 @@ def _history(ticker: str) -> dict:
         "sample_gate_passed": True,
         "minimum_sample": 20,
         "sample_count_used": 20 if ticker == "AVGO" else 31,
-        "full_history_percentiles": {
-            "P35": 31.431997604535702 if ticker == "AVGO" else 39.25852144282254,
-            "P50": 39.41570225551989 if ticker == "AVGO" else 44.653060809284646,
-        },
+        "multiple_basis": "ttm_per",
+        "eps_basis": "reported_ttm_unknown",
+        "full_history_percentiles": {"P35": 31.43, "P50": 39.42},
     }
 
 
-def test_same_date_snapshot_is_deterministic_and_uses_completed_session() -> None:
-    inputs = _inputs()
+def test_builder_and_loader_verify_raw_sources(tmp_path: Path) -> None:
+    path, inputs = _build_inputs(tmp_path)
+    assert inputs["source_evidence_verified"] is True
+    assert inputs["prices"]["AVGO"]["price_as_of"] == "2026-10-13"
+    assert inputs["prices"]["AVGO"]["market_session"] == "2026-10-13"
+    assert inputs["consensus"]["basis"] == "unverified_street_basis"
+    assert path.parent.joinpath("evidence", "consensus.json").is_file()
+    second_path = build_same_date_snapshot(
+        decision_ledger_path=SOURCE_FIXTURES / "decision-ledger.json",
+        consensus_path=SOURCE_FIXTURES / "consensus.json",
+        regime_path=SOURCE_FIXTURES / "regime.json",
+        output_dir=tmp_path / "second",
+        decision_time="2026-10-14T12:52:02.418Z",
+    )
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == hashlib.sha256(second_path.read_bytes()).hexdigest()
+
+
+def test_raw_source_missing_and_hash_mismatch_are_blocked(tmp_path: Path) -> None:
+    path, _ = _build_inputs(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    consensus_path = tmp_path / "evidence" / "consensus.json"
+    original = consensus_path.read_bytes()
+    consensus_path.unlink()
+    with pytest.raises(DecisionModelError, match="raw source file is missing"):
+        load_decision_inputs(path, expected_sha256=digest, source_root=tmp_path)
+    consensus_path.write_bytes(original + b" ")
+    with pytest.raises(DecisionModelError, match="raw source hash mismatch"):
+        load_decision_inputs(path, expected_sha256=digest, source_root=tmp_path)
+
+
+def test_normalized_basis_cannot_claim_more_than_raw_source(tmp_path: Path) -> None:
+    path, _ = _build_inputs(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["consensus"]["basis"] = "gaap_fy1"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(DecisionModelError, match="does not verify"):
+        load_decision_inputs(path, expected_sha256=digest, source_root=tmp_path)
+
+
+def test_ttm_forward_basis_mismatch_disables_action(tmp_path: Path) -> None:
+    _, inputs = _build_inputs(tmp_path)
+    result = build_decision_analysis_snapshot(
+        "AVGO", inputs=inputs, self_history=_legacy_history("AVGO"), config=load_decision_config(CONFIG)
+    )
+    assert result["status"] == "blocked"
+    assert result["target_per"] is None
+    assert result["base_fair_value"] is None
+    assert result["buy_prices"] == []
+    assert result["action"] == "비활성"
+    assert result["candidate_arithmetic"]["historical_multiple_basis"] == "ttm_per"
+    assert result["candidate_arithmetic"]["used_for_action"] is False
+
+
+def test_price_session_mismatch_and_stale_or_future_regime_are_blocked(tmp_path: Path) -> None:
+    _, inputs = _build_inputs(tmp_path)
     config = load_decision_config(CONFIG)
-    first = build_decision_analysis_snapshot("AVGO", inputs=inputs, self_history=_history("AVGO"), config=config)
-    second = build_decision_analysis_snapshot("AVGO", inputs=inputs, self_history=_history("AVGO"), config=config)
+    mismatched = copy.deepcopy(inputs)
+    mismatched["prices"]["AVGO"]["price_as_of"] = "2026-10-12"
+    with pytest.raises(DecisionModelError, match="price_as_of"):
+        build_decision_analysis_snapshot("AVGO", inputs=mismatched, self_history=_legacy_history("AVGO"), config=config)
 
-    assert first == second
-    assert first["source_hash"] == second["source_hash"]
-    assert first["market_session"] == first["price_as_of"] == "2026-10-13"
-    assert first["price_lag_calendar_days"] == 0
-    assert first["consensus_available_at"] == first["decision_time"]
-    assert first["decision_status"] == "candidate"
-    assert first["operational_eligible"] is False
+    stale = copy.deepcopy(inputs)
+    stale["regime"]["as_of"] = "2026-09-01"
+    with pytest.raises(DecisionModelError, match="regime is stale"):
+        build_decision_analysis_snapshot("AVGO", inputs=stale, self_history=_legacy_history("AVGO"), config=config)
 
-
-def test_future_information_and_stale_price_are_blocked() -> None:
-    config = load_decision_config(CONFIG)
-    future = _inputs()
-    future["consensus"]["available_at"] = "2026-10-14T12:52:02.419Z"
-    with pytest.raises(DecisionModelError, match="future information"):
-        build_decision_analysis_snapshot("AVGO", inputs=future, self_history=_history("AVGO"), config=config)
-
-    stale = _inputs()
-    stale["prices"]["AVGO"]["market_session"] = "2026-10-01"
-    stale["prices"]["AVGO"]["price_as_of"] = "2026-10-01"
-    stale["prices"]["AVGO"]["available_at"] = "2026-10-01T20:00:00Z"
-    with pytest.raises(DecisionModelError, match="stale"):
-        build_decision_analysis_snapshot("AVGO", inputs=stale, self_history=_history("AVGO"), config=config)
+    future = copy.deepcopy(inputs)
+    future["regime"]["as_of"] = "2026-10-15"
+    with pytest.raises(DecisionModelError, match="future regime"):
+        build_decision_analysis_snapshot("AVGO", inputs=future, self_history=_legacy_history("AVGO"), config=config)
 
 
-def test_eps_basis_cannot_be_mixed() -> None:
-    inputs = _inputs()
-    inputs["consensus"]["basis"] = "reported_gaap"
-    with pytest.raises(DecisionModelError, match="unverified_street_basis"):
-        build_decision_analysis_snapshot(
-            "AVGO",
-            inputs=inputs,
-            self_history=_history("AVGO"),
-            config=load_decision_config(CONFIG),
-        )
+def test_independent_target_multiple_does_not_accept_current_price() -> None:
+    weights = {"self_history_forward_per": 0.5, "growth_revision": 0.3, "market_sector_premium": 0.2}
+    axes = {"self_history_forward_per": 30.0, "growth_revision": 36.0, "market_sector_premium": 32.0}
+    first, _ = calculate_target_multiple(axes, weights, regime_adjustment=-0.01)
+    synthetic_current_prices = (100.0, 999.0)
+    results = [calculate_target_multiple(axes, weights, regime_adjustment=-0.01)[0] for _ in synthetic_current_prices]
+    assert results == pytest.approx([first, first])
 
 
-def test_actual_candidate_actions_target_per_and_buy_ladder() -> None:
-    inputs = _inputs()
-    config = load_decision_config(CONFIG)
-    avgo = build_decision_analysis_snapshot("AVGO", inputs=inputs, self_history=_history("AVGO"), config=config)
-    nvda = build_decision_analysis_snapshot("NVDA", inputs=inputs, self_history=_history("NVDA"), config=config)
-
-    assert avgo["current_price"] == pytest.approx(357.31)
-    assert avgo["target_per"] == pytest.approx(35.01254190436358)
-    assert avgo["base_fair_value"] == pytest.approx(363.0800595482503)
-    assert avgo["price_burden"] == "중립"
-    assert avgo["buy_prices"] == [348.56, 334.03, 319.51]
-    assert avgo["action"] == "대기"
-    assert avgo["action_text"] == "현재는 매수하지 말고 $348.56까지 기다림"
-
-    assert nvda["current_price"] == pytest.approx(228.52)
-    assert nvda["target_per"] == pytest.approx(39.92301248280606)
-    assert nvda["base_fair_value"] == pytest.approx(369.28786546595603)
-    assert nvda["price_burden"] == "낮음"
-    assert nvda["buy_prices"] == [228.52, 219.38, 210.24]
-    assert nvda["action"] == "분할매수"
-    assert nvda["action_text"] == "현재 가격에서 1차 매수를 시작"
-
-    for result in (avgo, nvda):
-        assert 0.05 <= result["buy_ladder_span_of_first_price"] <= 0.12
-        assert result["calculation_trace"]["historical_forward_per"]["weight"] == 0.5
-        assert result["calculation_trace"]["growth_revision"]["weight"] == 0.3
-        assert result["calculation_trace"]["market_sector_premium"]["weight"] == 0.2
-        assert result["calculation_trace"]["regime"]["adjustment"] == pytest.approx(-0.01)
-        assert any(not gate["passed"] for gate in result["promotion_gates"])
+def test_target_multiple_renormalizes_only_verified_axes() -> None:
+    target, trace = calculate_target_multiple(
+        {"self_history_forward_per": 30.0, "growth_revision": 36.0, "market_sector_premium": None},
+        {"self_history_forward_per": 0.5, "growth_revision": 0.3, "market_sector_premium": 0.2},
+        regime_adjustment=-0.02,
+    )
+    assert trace["normalized_weights"] == pytest.approx(
+        {"self_history_forward_per": 0.625, "growth_revision": 0.375}
+    )
+    assert target == pytest.approx((30.0 * 0.625 + 36.0 * 0.375) * 0.98)
 
 
-def test_snapshot_hash_change_is_rejected(tmp_path: Path) -> None:
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    path = tmp_path / "inputs.json"
-    original = json.dumps(payload, sort_keys=True).encode("utf-8")
-    path.write_bytes(original)
-    approved = hashlib.sha256(original).hexdigest()
-    load_decision_inputs(path, expected_sha256=approved)
-    payload["prices"]["AVGO"]["value"] = 999.0
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    with pytest.raises(DecisionModelError, match="SHA-256"):
-        load_decision_inputs(path, expected_sha256=approved)
+def test_date_only_filing_blocks_same_day_close_backtest() -> None:
+    result = backtest_pit_per_anchor(
+        {
+            "historical_per": [
+                {
+                    "filing_date": "2026-01-01",
+                    "availability_precision": "date_only_no_acceptance_timestamp",
+                    "ttm_per": {"value": 20.0},
+                }
+            ]
+        },
+        [{"date": "2026-01-02", "close": 100.0}],
+    )
+    assert result["status"] == "blocked_acceptance_time_unknown"
+    assert result["future_information_used"] == "unknown"
+    assert result["horizons"] == {}
 
 
-def _field(value, as_of: str) -> dict:
-    return {"value": value, "as_of": as_of}
-
-
-def test_partial_pit_backtest_uses_split_adjusted_entry_and_no_future_rows() -> None:
+def _walk_forward_rows() -> list[dict]:
+    start = datetime(2020, 1, 1, 21, tzinfo=timezone.utc)
     rows = []
-    per_values = [50, 48, 46, 44, 42, 20, 21]
-    dates = ["2022-01-15", "2022-02-15", "2022-03-15", "2022-04-15", "2022-05-15", "2022-06-15", "2022-07-15"]
-    for index, (as_of, per_value) in enumerate(zip(dates, per_values, strict=True)):
+    for index in range(20):
+        decision = start + timedelta(days=index * 30)
         rows.append(
             {
-                "filing_date": as_of,
-                "split_basis_factor": 10.0,
-                "price": _field(100.0 + index * 10.0, as_of),
-                "ttm_per": _field(float(per_value), as_of),
+                "decision_time": decision.isoformat(),
+                "available_at": (decision - timedelta(hours=2)).isoformat(),
+                "entry_time": (decision + timedelta(days=1)).isoformat(),
+                "eps_basis": "gaap_fy1",
+                "benchmark_verified": True,
+                "forward_per": 22.0 if index >= 12 else 26.0 + index * 0.1,
+                "growth_revision_per": 30.0,
+                "benchmark_forward_per": 28.0,
+                "regime_adjustment": -0.01,
+                "entry_price": 100.0,
+                "exit_price": 112.0 + index,
+                "qqq_entry_price": 100.0,
+                "qqq_exit_price": 108.0,
+                "soxx_entry_price": 100.0,
+                "soxx_exit_price": 110.0,
+                "daily_adjusted_path": [100.0, 96.0, 105.0, 112.0 + index],
             }
         )
-    history = [
-        {"date": "2022-12-31", "close": 20.0},
-        {"date": "2023-06-30", "close": 25.0},
-        {"date": "2023-07-31", "close": 30.0},
-    ]
-    result = backtest_pit_per_anchor({"historical_per": rows}, history)
+    return rows
 
-    assert result["ledger_row_count"] == 7
-    assert result["signal_count"] == 2
+
+def test_full_model_walk_forward_uses_chronological_holdout_and_daily_mdd() -> None:
+    result = walk_forward_full_model(
+        _walk_forward_rows(),
+        weights={"self_history_forward_per": 0.5, "growth_revision": 0.3, "market_sector_premium": 0.2},
+    )
+    assert result["status"] == "fixture_validated_full_model_walk_forward"
+    assert result["training_rows"] == 12
+    assert result["validation"]["sample_count"] == 4
+    assert result["holdout"]["sample_count"] == 4
+    assert result["holdout"]["median_qqq_excess"] is not None
+    assert result["holdout"]["median_soxx_excess"] is not None
+    assert result["holdout"]["maximum_drawdown"] == pytest.approx(-0.04)
     assert result["future_information_used"] is False
-    assert result["benchmark_status"] == "unavailable_no_qqq_monthly_history"
     assert result["operational_eligible"] is False
 
 
-def test_config_and_inputs_are_not_mutated() -> None:
-    inputs = _inputs()
+def test_full_model_walk_forward_blocks_incomplete_actual_evidence() -> None:
+    result = walk_forward_full_model(
+        [],
+        weights={"self_history_forward_per": 0.5, "growth_revision": 0.3, "market_sector_premium": 0.2},
+    )
+    assert result["status"] == "blocked_insufficient_full_model_rows"
+    assert result["operational_eligible"] is False
+
+
+def test_inputs_and_config_are_not_mutated(tmp_path: Path) -> None:
+    _, inputs = _build_inputs(tmp_path)
     config = load_decision_config(CONFIG)
     inputs_before = copy.deepcopy(inputs)
     config_before = copy.deepcopy(config)
-    build_decision_analysis_snapshot("NVDA", inputs=inputs, self_history=_history("NVDA"), config=config)
+    build_decision_analysis_snapshot("NVDA", inputs=inputs, self_history=_legacy_history("NVDA"), config=config)
     assert inputs == inputs_before
     assert config == config_before

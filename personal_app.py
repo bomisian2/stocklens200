@@ -76,6 +76,9 @@ SAME_DATE_INPUT_PATH = Path(
 SAME_DATE_INPUT_SHA256 = os.environ.get(
     "STOCKLENS_SAME_DATE_INPUT_SHA256", APPROVED_LOCAL_INPUT_SHA256
 )
+SAME_DATE_SOURCE_ROOT = Path(
+    os.environ.get("STOCKLENS_SAME_DATE_SOURCE_ROOT", str(SAME_DATE_INPUT_PATH.parent))
+)
 DECISION_CONFIG_PATH = Path(
     os.environ.get(
         "STOCKLENS_DECISION_CONFIG_PATH",
@@ -139,6 +142,70 @@ def _metric_value(metrics: dict[str, Any], key: str) -> Any:
 
 def _render_same_date_decision(decision: dict[str, Any], backtest: dict[str, Any]) -> None:
     st.subheader("Same-Date Investment Decision Model v1")
+    if decision.get("status") == "blocked":
+        st.error(
+            "독립 QA 차단 상태 · 행동 판단 비활성 · operational_eligible=false. "
+            "TTM PER를 Forward PER로 표시하거나 unverified Street EPS와 결합하지 않습니다."
+        )
+        with st.container(horizontal=True):
+            st.metric("동일시점 현재가", f"${decision['current_price']:,.2f}", border=True)
+            st.metric("기준 적정가", "미산출", border=True)
+            st.metric("3회 분할매수", "비활성", border=True)
+            st.metric("현재 행동", "비활성", border=True)
+        st.caption(
+            f"판단시각 {decision['decision_time']} · 시장세션/가격 {decision['market_session']} · "
+            f"컨센서스 공개 {decision['consensus_available_at']} · 시장환경 {decision['regime_as_of']}"
+        )
+        arithmetic = decision["candidate_arithmetic"]
+        st.markdown("#### 산술 입력 · 행동 계산에는 미사용")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "항목": "Street EPS low/base/high",
+                        "값": (
+                            f"{arithmetic['street_eps']['low']:.2f} / "
+                            f"{arithmetic['street_eps']['base']:.2f} / "
+                            f"{arithmetic['street_eps']['high']:.2f}"
+                        ),
+                        "basis": arithmetic["street_eps"]["basis"],
+                        "행동 계산 사용": "아니오",
+                    },
+                    {
+                        "항목": "레거시 역사 P35",
+                        "값": (
+                            f"{arithmetic['historical_ttm_per_p35']:.2f}배"
+                            if arithmetic.get("historical_ttm_per_p35") is not None
+                            else "미확보"
+                        ),
+                        "basis": arithmetic["historical_multiple_basis"],
+                        "행동 계산 사용": "아니오",
+                    },
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        for blocker in decision["blockers"]:
+            st.write(f"- {blocker}")
+        st.warning(decision["action_text"])
+        st.markdown("#### 백테스트 상태")
+        st.write(f"- 상태: `{backtest['status']}`")
+        st.write(f"- 미래정보 사용 판정: `{backtest['future_information_used']}`")
+        st.write(f"- 사유: {backtest.get('reason', backtest.get('scope', '미검증'))}")
+        passed = sum(bool(row["passed"]) for row in decision["promotion_gates"])
+        st.markdown(f"#### 운영 승격 게이트 · {passed}/{len(decision['promotion_gates'])} 통과")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"조건": row["id"], "통과": "통과" if row["passed"] else "미통과", "근거": row["reason"]}
+                    for row in decision["promotion_gates"]
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        return
     st.warning(
         "decision_status=candidate · operational_eligible=false. 행동 문구는 동일 시점 연구 판단이며, "
         "운영 승격 게이트를 통과하기 전 자동 주문·알림·공개 신호에는 연결하지 않습니다."
@@ -199,11 +266,7 @@ def _render_same_date_decision(decision: dict[str, Any], backtest: dict[str, Any
             "가중치": trace["market_sector_premium"]["weight"],
             "입력 PER": trace["market_sector_premium"]["per"],
             "기여 PER": trace["market_sector_premium"]["weighted_contribution"],
-            "근거": (
-                f"시장 PER {trace['market_sector_premium']['market_clearing_forward_per']:.2f}배 · "
-                f"섹터 {trace['market_sector_premium']['sector_adjustment']:+.1%} · "
-                f"AI/반도체 {trace['market_sector_premium']['ai_semiconductor_premium']:+.1%}"
-            ),
+            "근거": f"독립 동일시점 원장 · {trace['market_sector_premium']['source']}",
         },
     ]
     st.dataframe(
@@ -407,7 +470,7 @@ def _render_v23_comparison(
                 )
         except (OSError, json.JSONDecodeError, Top10BridgeError, KeyError, TypeError, ValueError) as exc:
             self_history["forward_consensus_error"] = str(exc)
-    st.markdown("### 자기 역사 시장 프리미엄")
+    st.markdown("### 자기 역사 TTM PER 분포")
     st.warning(
         "reconstructed PIT 연구 전용 · operational_eligible=false. "
         "DCF 스트레스 가격·할인율·거시 프록시·피어 배수는 이 계산에 사용하지 않았습니다."
@@ -818,6 +881,7 @@ if ticker in DECISION_SUPPORTED_TICKERS:
         decision_inputs = load_decision_inputs(
             SAME_DATE_INPUT_PATH,
             expected_sha256=SAME_DATE_INPUT_SHA256,
+            source_root=SAME_DATE_SOURCE_ROOT,
         )
         decision_config = load_decision_config(DECISION_CONFIG_PATH)
         decision_ledger_path = Path(V23_LEDGER_PATH)
@@ -1119,7 +1183,7 @@ if analysis:
         if v23_self_history else {}
     )
     if forward_candidate:
-        st.markdown("#### TTM 후보 옆 미래 EPS 컨센서스 후보 · 별도 축")
+        st.markdown("#### TTM PER × 미래 EPS basis 불일치 산술표 · 행동 계산 미사용")
         st.warning(
             "unverified_street_basis · 연구 전용 · operational_eligible=false. "
             "GAAP/비GAAP 정의가 검증되지 않았고 TTM EPS·회사 가이던스·자체 추정과 합치지 않습니다."
@@ -1142,7 +1206,7 @@ if analysis:
                 border=True,
             )
             st.metric(
-                "미래 EPS×역사 PER 외곽",
+                "미래 EPS×TTM PER 산술 외곽",
                 f"${forward_candidate['range_low']:.2f}~${forward_candidate['range_high']:.2f}",
                 "P35~P50 · 정식 적정가 아님",
                 border=True,

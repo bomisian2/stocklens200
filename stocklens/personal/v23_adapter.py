@@ -578,6 +578,8 @@ def build_self_history_market_premium(
         "as_of": calculation_as_of,
         "available_at": available_at,
         "unit": "PER multiple; candidate prices in USD per share",
+        "multiple_basis": "ttm_per",
+        "eps_basis": "reported_ttm_unknown",
         "calculation_basis": (
             "linear-interpolated empirical PER quantiles after finite-positive validation and "
             "1.5×IQR Tukey filtering; candidate price = current v23 TTM diluted EPS × PER quantile"
