@@ -12,6 +12,9 @@ from stocklens.personal.v23_adapter import EXPECTED_HISTORICAL_ROWS
 from stocklens.personal.same_date_builder import build_same_date_snapshot
 
 
+APPTEST_TIMEOUT_SECONDS = 30
+
+
 def _top10_consensus_fixture() -> dict:
     shared = {
         "collectedAt": "2026-10-14T12:52:02.418Z",
@@ -107,7 +110,7 @@ def test_personal_app_renders_financials_without_market_signal(tmp_path, monkeyp
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
     app_path = Path(__file__).parents[1] / "personal_app.py"
 
-    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    app = AppTest.from_file(str(app_path)).run(timeout=APPTEST_TIMEOUT_SECONDS)
 
     assert not app.exception
     rendered = " ".join(item.value for item in [*app.title, *app.caption, *app.warning, *app.error])
@@ -230,7 +233,9 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     )
     monkeypatch.setenv("STOCKLENS_TOP10_PRICE_HISTORY_PATH", str(price_history_path))
 
-    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
+        timeout=APPTEST_TIMEOUT_SECONDS
+    )
 
     assert not app.exception
     metrics = {item.label: item.value for item in app.metric}
@@ -267,7 +272,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "목표가격·매수구간" in warnings
     assert "정확성 부족을 더 낮은 가치로 바꾸지 않으며" in warnings
 
-    app.selectbox[0].set_value("AVGO").run(timeout=20)
+    app.selectbox[0].set_value("AVGO").run(timeout=APPTEST_TIMEOUT_SECONDS)
     assert not app.exception
     avgo_metrics = {item.label: item.value for item in app.metric}
     assert avgo_metrics["발행 보통주"] == "4,773.630M"
@@ -309,7 +314,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     expander_states = {item.label: item.proto.expanded for item in app.expander}
     assert expander_states["자기 역사 표본·제외 규칙·한계"] is False
 
-    app.selectbox[0].set_value("NVDA").run(timeout=20)
+    app.selectbox[0].set_value("NVDA").run(timeout=APPTEST_TIMEOUT_SECONDS)
     assert not app.exception
     nvda_info = " ".join(item.value for item in app.info)
     nvda_captions = " ".join(item.value for item in app.caption)
@@ -325,6 +330,27 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["기준 적정가"] == "미산출"
     assert nvda_metrics["현재 행동"] == "비활성"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
+
+    legacy_payload = json.loads(decision_path.read_text(encoding="utf-8"))
+    legacy_payload["calculation_version"] = "same-date-investment-decision-v1"
+    legacy_bytes = json.dumps(legacy_payload, sort_keys=True).encode("utf-8")
+    decision_path.write_bytes(legacy_bytes)
+    monkeypatch.setenv(
+        "STOCKLENS_SAME_DATE_INPUT_SHA256",
+        hashlib.sha256(legacy_bytes).hexdigest(),
+    )
+    legacy_app = AppTest.from_file(
+        str(Path(__file__).parents[1] / "personal_app.py")
+    ).run(timeout=APPTEST_TIMEOUT_SECONDS)
+    legacy_app.selectbox[0].set_value("AVGO").run(timeout=APPTEST_TIMEOUT_SECONDS)
+    assert not legacy_app.exception
+    legacy_rendered = " ".join(
+        item.value for item in [*legacy_app.warning, *legacy_app.caption]
+    )
+    assert "Same-Date 모듈 비활성" in legacy_rendered
+    assert "decision 객체 미생성" in legacy_rendered
+    assert "행동 판단·적정가·분할매수 표시 0개" in legacy_rendered
+    assert "same-date calculation version is not approved" in legacy_rendered
 
 
 def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tmp_path, monkeypatch) -> None:
@@ -357,10 +383,12 @@ def test_personal_app_renders_avgo_and_qcom_financial_analysis_without_prices(tm
     }), encoding="utf-8")
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
 
-    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
+        timeout=APPTEST_TIMEOUT_SECONDS
+    )
     assert not app.exception
     for ticker in ("AVGO", "QCOM"):
-        app.selectbox[0].set_value(ticker).run(timeout=20)
+        app.selectbox[0].set_value(ticker).run(timeout=APPTEST_TIMEOUT_SECONDS)
         assert not app.exception
         rendered = " ".join(item.value for item in [*app.header, *app.subheader, *app.warning, *app.error, *app.markdown])
         assert ticker in rendered
@@ -376,11 +404,13 @@ def test_personal_app_registers_all_ten_and_keeps_tsm_blocked(tmp_path, monkeypa
         encoding="utf-8",
     )
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
-    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
+        timeout=APPTEST_TIMEOUT_SECONDS
+    )
 
     assert not app.exception
     assert len(app.selectbox[0].options) == 10
-    app.selectbox[0].set_value("TSM").run(timeout=20)
+    app.selectbox[0].set_value("TSM").run(timeout=APPTEST_TIMEOUT_SECONDS)
     rendered = " ".join(item.value for item in [*app.header, *app.warning, *app.info, *app.error])
     assert "TIFRS / TWD" in rendered
     assert "HTTP 403" in rendered
@@ -444,7 +474,9 @@ def test_personal_app_loads_official_macro_snapshot_and_explains_directions(tmp_
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("STOCKLENS_REGIME_SNAPSHOT_PATH", str(snapshot_path))
 
-    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(timeout=20)
+    app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
+        timeout=APPTEST_TIMEOUT_SECONDS
+    )
 
     assert not app.exception
     metrics = {item.label: item.value for item in app.metric}

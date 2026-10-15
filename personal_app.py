@@ -876,13 +876,13 @@ same_date_backtest: dict[str, Any] | None = None
 same_date_error: str | None = None
 if ticker in DECISION_SUPPORTED_TICKERS:
     try:
-        if not V23_LEDGER_PATH:
-            raise DecisionModelError("approved v23 ledger path is not configured")
         decision_inputs = load_decision_inputs(
             SAME_DATE_INPUT_PATH,
             expected_sha256=SAME_DATE_INPUT_SHA256,
             source_root=SAME_DATE_SOURCE_ROOT,
         )
+        if not V23_LEDGER_PATH:
+            raise DecisionModelError("approved v23 ledger path is not configured")
         decision_config = load_decision_config(DECISION_CONFIG_PATH)
         decision_ledger_path = Path(V23_LEDGER_PATH)
         decision_ledger = load_v23_ledger(
@@ -919,7 +919,11 @@ if ticker in DECISION_SUPPORTED_TICKERS:
 if same_date_decision and same_date_backtest:
     _render_same_date_decision(same_date_decision, same_date_backtest)
 elif ticker in DECISION_SUPPORTED_TICKERS:
-    st.warning(f"Same-Date candidate 비활성: {same_date_error or '검증된 입력이 없습니다.'}")
+    st.warning(
+        "Same-Date 모듈 비활성 · decision 객체 미생성 · "
+        "행동 판단·적정가·분할매수 표시 0개 · 운영 승격 결과 없음"
+    )
+    st.caption(f"차단 사유: {same_date_error or '검증된 입력이 없습니다.'}")
 
 v23_self_history = _render_v23_comparison(
     ticker,
