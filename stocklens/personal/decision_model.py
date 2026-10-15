@@ -139,7 +139,8 @@ def load_decision_inputs(
             raise DecisionModelError("consensus normalized hash does not match raw source")
         if key == "regime" and regime.get("source_hash") != expected_source_hash:
             raise DecisionModelError("regime normalized hash does not match raw source")
-        if _timestamp(record.get("available_at"), f"source_evidence.{key}.available_at") > decision_at:
+        manifest_available_at = _timestamp(record.get("available_at"), f"source_evidence.{key}.available_at")
+        if manifest_available_at > decision_at:
             raise DecisionModelError(f"future raw source is blocked: {key}")
         verified_source_hashes[key] = actual_source_hash
         try:
@@ -148,6 +149,11 @@ def load_decision_inputs(
             raise DecisionModelError(f"raw source is not valid UTF-8 JSON: {key}") from exc
         if not isinstance(raw_value, dict):
             raise DecisionModelError(f"raw source root must be an object: {key}")
+        raw_generated_at = _timestamp(raw_value.get("generatedAt"), f"raw {key}.generatedAt")
+        if raw_generated_at != manifest_available_at:
+            raise DecisionModelError(f"raw generatedAt does not match manifest available_at: {key}")
+        if raw_generated_at > decision_at:
+            raise DecisionModelError(f"future raw generatedAt is blocked: {key}")
         verified_raw_sources[key] = raw_value
     raw_ledger_records = verified_raw_sources["decision_ledger"].get("records")
     raw_consensus_records = verified_raw_sources["consensus"].get("records")
@@ -171,7 +177,11 @@ def load_decision_inputs(
             price.get("market_session"), f"{ticker}.market_session"
         ):
             raise DecisionModelError(f"{ticker} price_as_of must equal market_session")
-        _timestamp(price.get("available_at"), f"{ticker}.price.available_at")
+        price_available_at = _timestamp(price.get("available_at"), f"{ticker}.price.available_at")
+        if price_available_at != _timestamp(
+            verified_raw_sources["decision_ledger"].get("generatedAt"), "decision_ledger.generatedAt"
+        ):
+            raise DecisionModelError(f"{ticker} price available_at does not match raw decision ledger")
         _hash(price.get("source_hash"), f"{ticker}.price.source_hash")
         if price.get("source_hash") != verified_source_hashes["decision_ledger"]:
             raise DecisionModelError(f"{ticker} normalized price hash does not match raw decision ledger")
@@ -210,6 +220,7 @@ def load_decision_inputs(
     value["snapshot_hash"] = digest
     value["source_evidence_verified"] = True
     value["consensus_basis_verified"] = False
+    value["operational_gate_verified_by_loader"] = False
     return value
 
 
@@ -375,7 +386,21 @@ def build_decision_analysis_snapshot(
     multiple_basis = str(self_history.get("multiple_basis") or "ttm_per")
     multiple_eps_basis = str(self_history.get("eps_basis") or "reported_ttm_unknown")
     benchmark = (inputs.get("benchmark_multiples") or {}).get(ticker)
+    walk_forward = (inputs.get("walk_forward_validation") or {}).get(ticker)
+    data_rights = inputs.get("data_rights") or {}
     verified_bases = set(config["verified_forward_eps_bases"])
+    walk_forward_passed = (
+        isinstance(walk_forward, dict)
+        and walk_forward.get("status") == "verified_actual_holdout"
+        and walk_forward.get("passed") is True
+        and walk_forward.get("future_information_used") is False
+    )
+    rights_passed = (
+        isinstance(data_rights, dict)
+        and data_rights.get("status") == "verified"
+        and data_rights.get("decision_display_allowed") is True
+    )
+    operational_gate_verified = inputs.get("operational_gate_verified_by_loader") is True
     blockers: list[str] = []
     if not inputs.get("source_evidence_verified"):
         blockers.append("원본 파일과 SHA-256 대조가 완료되지 않음")
@@ -389,6 +414,12 @@ def build_decision_analysis_snapshot(
         blockers.append("독립 QQQ/SOXX/피어 동일시점 배수 원장 미확보")
     elif benchmark.get("eps_basis") != consensus_basis:
         blockers.append("시장·섹터 배수 EPS basis 불일치")
+    if not walk_forward_passed:
+        blockers.append("실제 전체 모델 walk-forward 최종 holdout 미통과")
+    if not rights_passed:
+        blockers.append("행동 판단 데이터 표시 이용권 미검증")
+    if not operational_gate_verified:
+        blockers.append("walk-forward·이용권 원본 증거가 loader에서 검증되지 않음")
 
     source_hashes = {
         "decision_inputs": inputs["snapshot_hash"],
@@ -433,8 +464,17 @@ def build_decision_analysis_snapshot(
             },
             {"id": "basis_alignment", "passed": multiple_eps_basis == consensus_basis, "reason": f"{multiple_eps_basis} vs {consensus_basis}"},
             {"id": "independent_benchmark", "passed": isinstance(benchmark, dict) and bool(benchmark.get("verified")), "reason": "현재 가격 재사용 금지"},
-            {"id": "walk_forward_final_holdout", "passed": False, "reason": "전체 모델 독립 holdout 미완료"},
-            {"id": "data_rights", "passed": False, "reason": "운영 표시 권리 미확정"},
+            {
+                "id": "walk_forward_final_holdout",
+                "passed": walk_forward_passed,
+                "reason": "실제 원장의 전체 모델 독립 holdout만 인정",
+            },
+            {"id": "data_rights", "passed": rights_passed, "reason": "행동 판단 표시 권리 명시 확인 필요"},
+            {
+                "id": "operational_evidence_loader",
+                "passed": operational_gate_verified,
+                "reason": "walk-forward와 이용권 원본 파일·해시 검증 필요",
+            },
         ]
         blocked_hash = _canonical_hash({"common": common, "blockers": blockers, "gates": gates})
         return {
@@ -569,7 +609,11 @@ def build_decision_analysis_snapshot(
         "confidence": _confidence(self_history, consensus, inputs),
         "calculation_trace": calculation_trace,
         "invalidation_conditions": [],
-        "promotion_gates": [],
+        "promotion_gates": [
+            {"id": "walk_forward_final_holdout", "passed": walk_forward_passed, "reason": "verified_actual_holdout"},
+            {"id": "data_rights", "passed": rights_passed, "reason": "verified decision display permission"},
+            {"id": "operational_evidence_loader", "passed": operational_gate_verified, "reason": "raw evidence verified"},
+        ],
     }
 
 
@@ -623,6 +667,7 @@ def backtest_pit_per_anchor(
             "drawdown_frequency": "not_evaluated",
             "operational_eligible": False,
         }
+    rows = sorted(rows, key=lambda row: _timestamp(row.get("acceptance_timestamp"), "acceptance_timestamp"))
 
     prices = sorted(
         [
@@ -728,13 +773,33 @@ def walk_forward_full_model(
         decision_time = _timestamp(row.get("decision_time"), "decision_time")
         available_at = _timestamp(row.get("available_at"), "available_at")
         entry_time = _timestamp(row.get("entry_time"), "entry_time")
-        if available_at > decision_time or entry_time <= available_at:
+        exit_time = _timestamp(row.get("exit_time"), "exit_time")
+        if available_at > decision_time or entry_time <= max(available_at, decision_time):
             raise DecisionModelError("walk-forward future-information boundary failed")
+        if exit_time <= entry_time:
+            raise DecisionModelError("walk-forward exit_time must be after entry_time")
         if not row.get("benchmark_verified"):
             raise DecisionModelError("walk-forward benchmark multiple is not independently verified")
+        for benchmark in ("qqq", "soxx"):
+            benchmark_entry = _timestamp(row.get(f"{benchmark}_entry_time"), f"{benchmark}_entry_time")
+            benchmark_exit = _timestamp(row.get(f"{benchmark}_exit_time"), f"{benchmark}_exit_time")
+            if benchmark_entry != entry_time or benchmark_exit != exit_time:
+                raise DecisionModelError("benchmark timestamps must match the security holding period")
         path = row.get("daily_adjusted_path")
         if not isinstance(path, list) or not path:
             raise DecisionModelError("daily adjusted price path is required")
+        parsed_path = [
+            (_date(item.get("date"), "daily adjusted date"), _number(item.get("close"), "daily adjusted close", positive=True))
+            for item in path
+            if isinstance(item, dict)
+        ]
+        if len(parsed_path) != len(path) or parsed_path != sorted(parsed_path, key=lambda item: item[0]):
+            raise DecisionModelError("daily adjusted price path must be chronological")
+        path_dates = [item[0] for item in parsed_path]
+        if len(set(path_dates)) != len(path_dates):
+            raise DecisionModelError("daily adjusted price path contains duplicate dates")
+        if path_dates[0] != entry_time.date() or path_dates[-1] != exit_time.date():
+            raise DecisionModelError("daily adjusted price path must span the exact holding period")
 
     split_at = len(ordered) - validation_rows - holdout_rows
     validation_slice = range(split_at, split_at + validation_rows)
@@ -769,7 +834,10 @@ def walk_forward_full_model(
             soxx_exit = _number(row.get("soxx_exit_price"), "soxx_exit_price", positive=True)
             soxx_entry = _number(row.get("soxx_entry_price"), "soxx_entry_price", positive=True)
             net_return = exit_price / entry - 1.0 - cost
-            path = [_number(value, "daily adjusted price", positive=True) for value in row["daily_adjusted_path"]]
+            path = [
+                _number(value.get("close"), "daily adjusted price", positive=True)
+                for value in row["daily_adjusted_path"]
+            ]
             peak = entry
             mdd = 0.0
             for value in path:
