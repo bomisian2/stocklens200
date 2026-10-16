@@ -11,6 +11,7 @@ import pytest
 from stocklens.market_calendar import xnys_session_bounds, xnys_sessions
 from stocklens.personal.decision_contracts import (
     CONTRACT_ROLES,
+    build_candidate_registries,
     canonical_record_hash,
     validate_ready_contracts,
 )
@@ -21,6 +22,16 @@ TICKERS = ("AVGO", "NVDA")
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if "normalized_records_sha256" in value:
+        value["normalized_records_sha256"] = hashlib.sha256(
+            json.dumps(
+                value.get("records"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest().upper()
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
 
@@ -36,13 +47,54 @@ def _raw(
     captured_at: str = "2026-10-14T22:00:00Z",
     source_kind: str | None = None,
 ) -> str:
+    provider_path = path.with_name(f"{path.stem}.provider-native.json")
+    _write_json(provider_path, {
+        "provider": "unit-test-provider",
+        "role": role,
+        "source_kind": source_kind,
+        "provider_timestamp": captured_at,
+        "revision_id": f"unit-test-{role}-revision-1",
+        "records": records,
+    })
+    provider_hash = _hash(provider_path)
+    if source_kind == "historical_eps_archive":
+        for index, record in enumerate(records):
+            record["evidence_status"] = "provider_point_in_time_archive"
+            record["pit_proof"] = {
+                "type": "provider_point_in_time_archive",
+                "provider_raw_sha256": provider_hash,
+                "provider_timestamp": record["source_available_at"],
+                "vintage_id": f"unit-test-vintage-{index}",
+            }
     _write_json(
         path,
         {
-            "raw_schema_version": f"{role.replace('_', '-')}-source-v2",
+            "raw_schema_version": f"{role.replace('_', '-')}-source-v3",
             "source": "deterministic offline contract test evidence",
             "provider": "unit-test-provider",
             "captured_at": captured_at,
+            "provider_native": {
+                "path": provider_path.name,
+                "source_hash": provider_hash,
+                "mime_type": "application/json",
+                "source_url": f"https://unit-test.invalid/{provider_path.name}",
+                "local_collection_path": None,
+                "captured_at": captured_at,
+                "provider_timestamp": captured_at,
+                "revision_id": f"unit-test-{role}-revision-1",
+                "vintage_id": None,
+                "parser_name": "unit-test-parser",
+                "parser_version": "1.0.0",
+            },
+            "normalized_records_sha256": hashlib.sha256(
+                json.dumps(
+                    records,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest().upper(),
             **({"source_kind": source_kind} if source_kind else {}),
             "records": records,
         },
@@ -61,7 +113,7 @@ def _manifest(
 ) -> dict[str, Any]:
     return {
         "schema_version": f"{role.replace('_', '-')}-v2",
-        "contract_version": "same-date-ready-contract-v2",
+        "contract_version": "same-date-ready-contract-v3",
         "evidence_classification": classification,
         "decision_time": DECISION_TIME,
         "target_tickers": list(TICKERS),
@@ -410,36 +462,11 @@ def _approval_args(paths: dict[str, Path]) -> dict[str, Any]:
     roots = {path.parent.resolve() for path in paths.values()}
     assert len(roots) == 1
     root = next(iter(roots))
-    source_paths: dict[str, Path] = {}
-    for manifest_path in paths.values():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for item in manifest["source_files"]:
-            source_path = (manifest_path.parent / item["path"]).resolve()
-            source_paths[_hash(source_path)] = source_path
-    provenance_path = root / "operator-provenance-registry.json"
-    provenance_records = []
-    for source_hash, source_path in sorted(source_paths.items()):
-        raw = json.loads(source_path.read_text(encoding="utf-8"))
-        provenance_records.append({
-            "provider": raw["provider"],
-            "original_source_url": f"https://unit-test.invalid/{source_path.name}",
-            "captured_at": raw["captured_at"],
-            "original_mime_type": "application/json",
-            "original_file_sha256": source_hash,
-            "collector_version": "unit-test-collector-v1",
-            "parser_version": "unit-test-parser-v1",
-            "original_file_path": source_path.name,
-            "approval_receipt": "unit-test-operator-receipt",
-        })
-    _write_json(provenance_path, {
-        "schema_version": "same-date-provenance-registry-v1",
-        "records": provenance_records,
-    })
     terms_path = root / "unit-test-terms.txt"
     terms_path.write_text("Offline unit-test terms evidence.", encoding="utf-8")
-    policy_path = root / "operator-usage-policy-registry.json"
-    _write_json(policy_path, {
-        "schema_version": "same-date-usage-policy-registry-v1",
+    policy_input = root / "usage-policy-input.json"
+    _write_json(policy_input, {
+        "schema_version": "same-date-usage-policy-input-v1",
         "records": [{
             "provider": "unit-test-provider",
             "usage_scope": "personal_local_research",
@@ -447,20 +474,46 @@ def _approval_args(paths: dict[str, Path]) -> dict[str, Any]:
             "derivative_analysis_allowed": True,
             "local_display_allowed": True,
             "public_display_allowed": False,
-            "terms_document_path": terms_path.name,
+            "terms_document_path": "../unit-test-terms.txt",
             "terms_document_sha256": _hash(terms_path),
             "terms_clause_ids": ["unit-test-clause-1"],
             "reviewed_at": "2026-10-01T00:00:00Z",
             "expires_at": "2027-10-01T00:00:00Z",
-            "approval_receipt": "unit-test-rights-review-receipt",
         }],
+    })
+    candidates = build_candidate_registries(
+        paths,
+        actual_evidence_root=root,
+        usage_policy_input_path=policy_input,
+        output_dir=root / "candidates",
+        generated_by="unit-test-candidate-builder",
+        generated_at="2026-10-14T22:30:00Z",
+    )
+    qa_root = root.parent / f"{root.name}-independent-qa"
+    qa_root.mkdir(parents=True, exist_ok=True)
+    approval_path = qa_root / "approval-receipt.json"
+    _write_json(approval_path, {
+        "schema_version": "same-date-independent-approval-receipt-v1",
+        "status": "approved",
+        "approved_by": "independent-unit-test-qa",
+        "approved_at": "2026-10-14T22:45:00Z",
+        "approved_registry_sha256": {
+            "provenance_candidate": candidates["provenance_registry_sha256"],
+            "usage_policy_candidate": candidates["usage_policy_registry_sha256"],
+        },
+        "approval_scope": "personal_local_same_date_research",
+        "approval_receipt_id": "QA-UNIT-0001",
+        "expires_at": "2027-10-01T00:00:00Z",
+        "decision_time": DECISION_TIME,
+        "target_tickers": list(TICKERS),
+        "operational_eligible": False,
     })
     return {
         "actual_evidence_root": root,
-        "provenance_registry_path": provenance_path,
-        "approved_provenance_registry_sha256": _hash(provenance_path),
-        "usage_policy_registry_path": policy_path,
-        "approved_usage_policy_registry_sha256": _hash(policy_path),
+        "provenance_registry_path": Path(candidates["provenance_registry_path"]),
+        "usage_policy_registry_path": Path(candidates["usage_policy_registry_path"]),
+        "approval_receipt_path": approval_path,
+        "approved_approval_receipt_sha256": _hash(approval_path),
     }
 
 
@@ -495,7 +548,7 @@ def test_candidate_classification_without_pinned_approval_registries_is_blocked(
     report = _validate(paths, approve=False)
     assert report["promotion_ready"] is False
     assert all(row["passed"] is False for row in report["requirements"])
-    assert any("provenance registry is missing" in row["reason"] for row in report["requirements"])
+    assert any("provenance candidate registry is missing" in row["reason"] for row in report["requirements"])
 
 
 def test_manifest_cannot_self_declare_actual_evidence(tmp_path: Path) -> None:
@@ -510,7 +563,7 @@ def test_v1_contract_cannot_be_relabelled_as_v2(tmp_path: Path) -> None:
     manifest = json.loads(paths["pit_forward_eps"].read_text(encoding="utf-8"))
     manifest["contract_version"] = "same-date-ready-contract-v1"
     _write_json(paths["pit_forward_eps"], manifest)
-    row = _requirement(_validate(paths), "verified_pit_forward_eps")
+    row = _requirement(_validate(paths, approve=False), "verified_pit_forward_eps")
     assert row["passed"] is False
     assert "contract_version is not approved" in row["reason"]
 
@@ -708,7 +761,7 @@ def test_regime_missing_stale_or_future_is_blocked(
     paths = _build_contracts(tmp_path, **kwargs)
     if mode == "missing":
         paths.pop("regime")
-    row = _requirement(_validate(paths), "same_date_price_and_regime")
+    row = _requirement(_validate(paths, approve=mode != "missing"), "same_date_price_and_regime")
     assert row["passed"] is False
     assert message in row["reason"]
 
@@ -748,7 +801,6 @@ def test_usage_policy_registry_missing_expired_or_insufficient_is_blocked(
     approval = _approval_args(paths)
     if mode == "missing":
         approval["usage_policy_registry_path"] = None
-        approval["approved_usage_policy_registry_sha256"] = None
     else:
         registry_path = Path(approval["usage_policy_registry_path"])
         value = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -757,7 +809,6 @@ def test_usage_policy_registry_missing_expired_or_insufficient_is_blocked(
         else:
             value["records"][0]["local_display_allowed"] = False
         _write_json(registry_path, value)
-        approval["approved_usage_policy_registry_sha256"] = _hash(registry_path)
     report = validate_ready_contracts(
         paths,
         decision_time=DECISION_TIME,
@@ -769,12 +820,12 @@ def test_usage_policy_registry_missing_expired_or_insufficient_is_blocked(
     assert row["status"] == "blocked"
 
 
-def test_unpinned_or_mutated_provenance_registry_is_blocked(tmp_path: Path) -> None:
+def test_mutated_provenance_candidate_is_blocked_by_independent_receipt(tmp_path: Path) -> None:
     paths = _build_contracts(tmp_path)
     approval = _approval_args(paths)
     registry_path = Path(approval["provenance_registry_path"])
     value = json.loads(registry_path.read_text(encoding="utf-8"))
-    value["records"][0]["approval_receipt"] = "tampered"
+    value["generated_at"] = "2026-10-14T22:31:00Z"
     _write_json(registry_path, value)
     report = validate_ready_contracts(
         paths,
@@ -783,4 +834,164 @@ def test_unpinned_or_mutated_provenance_registry_is_blocked(tmp_path: Path) -> N
         **approval,
     )
     assert report["promotion_ready"] is False
-    assert any("provenance registry SHA-256 mismatch" in row["reason"] for row in report["requirements"])
+    assert any("provenance_candidate hash mismatch" in row["reason"] for row in report["requirements"])
+
+
+def test_candidate_generation_never_creates_approval(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    candidate_root = Path(approval["provenance_registry_path"]).parent
+    assert not list(candidate_root.glob("*approval*"))
+    assert Path(approval["approval_receipt_path"]).parent != candidate_root
+
+
+def test_independent_approval_receipt_is_required(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    approval["approval_receipt_path"] = None
+    approval["approved_approval_receipt_sha256"] = None
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "independent approval receipt is missing"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("approved_by", "unit-test-candidate-builder", "cannot approve its own"),
+        ("approval_scope", "public_display", "scope is not approved"),
+        ("expires_at", "2026-10-01T00:00:00Z", "not valid at decision_time"),
+        ("decision_time", "2026-10-13T23:00:00Z", "decision_time does not match"),
+        ("target_tickers", ["AVGO"], "target_tickers do not match"),
+    ],
+)
+def test_invalid_independent_approval_receipt_is_blocked(
+    tmp_path: Path, field: str, value: Any, message: str
+) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    receipt_path = Path(approval["approval_receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt[field] = value
+    _write_json(receipt_path, receipt)
+    approval["approved_approval_receipt_sha256"] = _hash(receipt_path)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert message in str(report["approval_error"])
+
+
+def test_untrusted_approval_receipt_hash_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    approval["approved_approval_receipt_sha256"] = "0" * 64
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "independent approval receipt SHA-256 mismatch"
+
+
+def test_approval_receipt_inside_candidate_root_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    source = Path(approval["approval_receipt_path"])
+    inside = tmp_path / "approval-receipt.json"
+    inside.write_bytes(source.read_bytes())
+    approval["approval_receipt_path"] = inside
+    approval["approved_approval_receipt_sha256"] = _hash(inside)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert "outside the candidate evidence root" in str(report["approval_error"])
+
+
+def test_provider_native_raw_must_not_equal_normalized_contract(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    source_path = tmp_path / "pit-forward-eps-source.json"
+    value = json.loads(source_path.read_text(encoding="utf-8"))
+    value["provider_native"]["path"] = source_path.name
+    value["provider_native"]["source_hash"] = _hash(source_path)
+    _write_json(source_path, value)
+    manifest = json.loads(paths["pit_forward_eps"].read_text(encoding="utf-8"))
+    manifest["source_files"][0]["source_hash"] = _hash(source_path)
+    _write_json(paths["pit_forward_eps"], manifest)
+    row = _requirement(_validate(paths, approve=False), "verified_pit_forward_eps")
+    assert "provider-native raw and normalized files must differ" in row["reason"]
+
+
+def test_provider_native_raw_changed_after_approval_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    registry_path = Path(approval["provenance_registry_path"])
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    original_path = (registry_path.parent / registry["records"][0]["original_file_path"]).resolve()
+    original_path.write_bytes(original_path.read_bytes() + b"\nchanged")
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert any(
+        "provider-native raw hash mismatch" in row["reason"]
+        or "original_file_sha256" in row["reason"]
+        for row in report["requirements"]
+    )
+
+
+def test_approval_cli_does_not_accept_registry_sha_arguments() -> None:
+    source = (Path(__file__).parents[1] / "scripts" / "audit_same_date_evidence.py").read_text(
+        encoding="utf-8"
+    )
+    assert "--approved-provenance-registry-sha256" not in source
+    assert "--approved-usage-policy-registry-sha256" not in source
+    assert "STOCKLENS_SAME_DATE_APPROVAL_RECEIPT_SHA256" in source
+
+
+def test_historical_availability_unverified_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    raw_path = tmp_path / "historical-eps-source.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["records"][0]["evidence_status"] = "historical_availability_unverified"
+    _write_json(raw_path, raw)
+    new_hash = _hash(raw_path)
+    manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
+    manifest["source_files"][1]["source_hash"] = new_hash
+    per_raw_path = tmp_path / "company-per-source.json"
+    per_raw = json.loads(per_raw_path.read_text(encoding="utf-8"))
+    per_raw["records"][0]["underlying_eps_source_hash"] = new_hash
+    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(raw["records"][0])
+    _write_json(per_raw_path, per_raw)
+    per_hash = _hash(per_raw_path)
+    manifest["source_files"][0]["source_hash"] = per_hash
+    manifest["records"] = _bound_rows(per_raw["records"], per_hash)
+    _write_json(paths["company_pit_forward_per"], manifest)
+    row = _requirement(_validate(paths, approve=False), "company_pit_forward_per_ledger")
+    assert row["passed"] is False
+    assert "historical_availability_unverified" in row["reason"]
+
+
+def test_self_declared_historical_timestamp_without_matching_proof_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    raw_path = tmp_path / "historical-eps-source.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["records"][0]["pit_proof"]["provider_timestamp"] = "2026-10-14T00:00:00Z"
+    _write_json(raw_path, raw)
+    new_hash = _hash(raw_path)
+    manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
+    manifest["source_files"][1]["source_hash"] = new_hash
+    per_raw_path = tmp_path / "company-per-source.json"
+    per_raw = json.loads(per_raw_path.read_text(encoding="utf-8"))
+    per_raw["records"][0]["underlying_eps_source_hash"] = new_hash
+    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(raw["records"][0])
+    _write_json(per_raw_path, per_raw)
+    per_hash = _hash(per_raw_path)
+    manifest["source_files"][0]["source_hash"] = per_hash
+    manifest["records"] = _bound_rows(per_raw["records"], per_hash)
+    _write_json(paths["company_pit_forward_per"], manifest)
+    row = _requirement(_validate(paths, approve=False), "company_pit_forward_per_ledger")
+    assert row["passed"] is False
+    assert "PIT proof timestamp does not match source availability" in row["reason"]

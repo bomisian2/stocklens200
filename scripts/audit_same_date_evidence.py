@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -30,9 +31,8 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--ready-contract-root")
     parser.add_argument("--provenance-registry")
-    parser.add_argument("--approved-provenance-registry-sha256")
     parser.add_argument("--usage-policy-registry")
-    parser.add_argument("--approved-usage-policy-registry-sha256")
+    parser.add_argument("--approval-receipt")
     for role in CONTRACT_ROLES:
         flag = "--regime-contract" if role == "regime" else f"--{role.replace('_', '-')}"
         parser.add_argument(flag, dest=f"{role}_contract")
@@ -56,9 +56,11 @@ def main() -> int:
             ready_contract_paths=ready_contract_paths,
             ready_contract_root=args.ready_contract_root,
             provenance_registry_path=args.provenance_registry,
-            approved_provenance_registry_sha256=args.approved_provenance_registry_sha256,
             usage_policy_registry_path=args.usage_policy_registry,
-            approved_usage_policy_registry_sha256=args.approved_usage_policy_registry_sha256,
+            approval_receipt_path=args.approval_receipt,
+            approved_approval_receipt_sha256=os.environ.get(
+                "STOCKLENS_SAME_DATE_APPROVAL_RECEIPT_SHA256"
+            ),
         )
         output = write_audit_report(report, args.output)
     except (OSError, DecisionEvidenceError) as exc:
