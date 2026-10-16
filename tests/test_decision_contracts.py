@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import copy
 import hashlib
 import json
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -9,15 +12,83 @@ from typing import Any
 import pytest
 
 from stocklens.market_calendar import xnys_session_bounds, xnys_sessions
+from stocklens.personal import approval_signatures
+from stocklens.personal.approval_signatures import (
+    SHA256_DIGEST_INFO_PREFIX,
+    SIGNATURE_ALGORITHM,
+    TrustedApprovalKey,
+    canonical_approval_payload,
+)
 from stocklens.personal.decision_contracts import (
     CONTRACT_ROLES,
     build_candidate_registries,
     canonical_record_hash,
     validate_ready_contracts,
 )
+from stocklens.personal.evidence_parsers import (
+    JSON_RECORDS_PARSER_ID,
+    JSON_RECORDS_PARSER_VERSION,
+    RAW_SHA256_SENTINEL,
+    registered_parser_code_sha256,
+)
 
 DECISION_TIME = "2026-10-14T23:00:00Z"
 TICKERS = ("AVGO", "NVDA")
+TEST_QA_KEY_ID = "synthetic-unit-test-qa-rsa-v1"
+TEST_QA_MODULUS_HEX = (
+    "BFC66364E8CBB957F76F61A46DBEF61E9B854C055C7C462614F36B66B06E1912"
+    "D9A622AA41EC5440F42564AA4BBBB9BB5B94734BC7524E8BB5C5FC573C8BF8B6"
+    "ADD55ED48BBC5C76D23FEB11D6AD1C19BADF7A879616AA6FE516BD95AA690B01F"
+    "4A332AB13B7669EA2A3EA5CF2A8E86ADE7AC8006A32B2BAA14587677BD0A48C0"
+    "42EAB36E1B63F8040B3EE862FB174ECD52644DF12A69F3D8C47C348D6515F386"
+    "6EB3A2248EC29D307CBE46F8CCADEC2C45D349E78A992766121F992B47F237438"
+    "2D1AA98E01BDCFC9EFD9B44100C95C405E7DAA87DC734FCFB6F18841623CEE248"
+    "E3A29009D6701E150960759B666236C3C63BEEAB7579DED044EFCDAD9A83D"
+)
+TEST_QA_PRIVATE_EXPONENT_HEX = (
+    "51D359378628DEB54CEB26535D4C3C8184C41452B94A8137E07A9859E16FA89D"
+    "2566C0A5BAA916ADFC3E343C8141E116B3159D38391CC24CD44B5CC6F01B9D0C"
+    "7D116C7BEDFF79C86D1F3EB286D1A80AC674723885EEB7DC3478467E248EDB568"
+    "3465AE929E9780CB9C28CCE09EFCDF343684A0BFB44148493293284120D4D177E"
+    "8653A4867D3941BEF56FBA85758DA46AB18F8D6EA105D16D87F8F25D05CA647D"
+    "7C16823564DD6C29384F1B9B7B1983B4F871D9528C42B4F223D89B8A7101CD79"
+    "D296B023BE631C5832E7508808FE019965A71834B0989240E1CA4D52E24AC1CBED"
+    "2B7395DDF13B2B91ACD22F9BC0241EAD7269126BECE14C709E577B1728B5"
+)
+
+
+@pytest.fixture(autouse=True)
+def _inject_synthetic_qa_public_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        approval_signatures,
+        "TRUSTED_APPROVAL_KEYS",
+        {
+            TEST_QA_KEY_ID: TrustedApprovalKey(
+                key_id=TEST_QA_KEY_ID,
+                approved_by="independent-unit-test-qa",
+                modulus_hex=TEST_QA_MODULUS_HEX,
+                exponent=65537,
+                allowed_scopes=frozenset({"personal_local_same_date_research"}),
+            )
+        },
+    )
+
+
+def _sign_receipt(receipt: dict[str, Any], *, key_id: str = TEST_QA_KEY_ID) -> None:
+    payload = canonical_approval_payload(receipt)
+    digest_info = SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(payload).digest()
+    modulus = int(TEST_QA_MODULUS_HEX, 16)
+    private_exponent = int(TEST_QA_PRIVATE_EXPONENT_HEX, 16)
+    size = (modulus.bit_length() + 7) // 8
+    encoded = b"\x00\x01" + (b"\xff" * (size - len(digest_info) - 3)) + b"\x00" + digest_info
+    signature = pow(int.from_bytes(encoded, "big"), private_exponent, modulus).to_bytes(
+        size, "big"
+    )
+    receipt["signature"] = {
+        "algorithm": SIGNATURE_ALGORITHM,
+        "key_id": key_id,
+        "value_base64": base64.b64encode(signature).decode("ascii"),
+    }
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -48,6 +119,15 @@ def _raw(
     source_kind: str | None = None,
 ) -> str:
     provider_path = path.with_name(f"{path.stem}.provider-native.json")
+    if source_kind == "historical_eps_archive":
+        for index, record in enumerate(records):
+            record["evidence_status"] = "provider_point_in_time_archive"
+            record["pit_proof"] = {
+                "type": "provider_point_in_time_archive",
+                "provider_raw_sha256": RAW_SHA256_SENTINEL,
+                "provider_timestamp": record["source_available_at"],
+                "vintage_id": f"unit-test-vintage-{index}",
+            }
     _write_json(provider_path, {
         "provider": "unit-test-provider",
         "role": role,
@@ -58,18 +138,12 @@ def _raw(
     })
     provider_hash = _hash(provider_path)
     if source_kind == "historical_eps_archive":
-        for index, record in enumerate(records):
-            record["evidence_status"] = "provider_point_in_time_archive"
-            record["pit_proof"] = {
-                "type": "provider_point_in_time_archive",
-                "provider_raw_sha256": provider_hash,
-                "provider_timestamp": record["source_available_at"],
-                "vintage_id": f"unit-test-vintage-{index}",
-            }
+        for record in records:
+            record["pit_proof"]["provider_raw_sha256"] = provider_hash
     _write_json(
         path,
         {
-            "raw_schema_version": f"{role.replace('_', '-')}-source-v3",
+            "raw_schema_version": f"{role.replace('_', '-')}-source-v4",
             "source": "deterministic offline contract test evidence",
             "provider": "unit-test-provider",
             "captured_at": captured_at,
@@ -83,8 +157,9 @@ def _raw(
                 "provider_timestamp": captured_at,
                 "revision_id": f"unit-test-{role}-revision-1",
                 "vintage_id": None,
-                "parser_name": "unit-test-parser",
-                "parser_version": "1.0.0",
+                "parser_name": JSON_RECORDS_PARSER_ID,
+                "parser_version": JSON_RECORDS_PARSER_VERSION,
+                "parser_code_sha256": registered_parser_code_sha256(),
             },
             "normalized_records_sha256": hashlib.sha256(
                 json.dumps(
@@ -113,7 +188,7 @@ def _manifest(
 ) -> dict[str, Any]:
     return {
         "schema_version": f"{role.replace('_', '-')}-v2",
-        "contract_version": "same-date-ready-contract-v3",
+        "contract_version": "same-date-ready-contract-v4",
         "evidence_classification": classification,
         "decision_time": DECISION_TIME,
         "target_tickers": list(TICKERS),
@@ -492,8 +567,8 @@ def _approval_args(paths: dict[str, Path]) -> dict[str, Any]:
     qa_root = root.parent / f"{root.name}-independent-qa"
     qa_root.mkdir(parents=True, exist_ok=True)
     approval_path = qa_root / "approval-receipt.json"
-    _write_json(approval_path, {
-        "schema_version": "same-date-independent-approval-receipt-v1",
+    approval_receipt = {
+        "schema_version": "same-date-independent-approval-receipt-v2",
         "status": "approved",
         "approved_by": "independent-unit-test-qa",
         "approved_at": "2026-10-14T22:45:00Z",
@@ -507,7 +582,9 @@ def _approval_args(paths: dict[str, Path]) -> dict[str, Any]:
         "decision_time": DECISION_TIME,
         "target_tickers": list(TICKERS),
         "operational_eligible": False,
-    })
+    }
+    _sign_receipt(approval_receipt)
+    _write_json(approval_path, approval_receipt)
     return {
         "actual_evidence_root": root,
         "provenance_registry_path": Path(candidates["provenance_registry_path"]),
@@ -533,6 +610,40 @@ def _change(path: Path, mutator) -> None:
     value = json.loads(path.read_text(encoding="utf-8"))
     mutator(value)
     _write_json(path, value)
+
+
+def _rewrite_normalized_records(
+    normalized_path: Path, records: Any
+) -> tuple[Any, str]:
+    """Rewrite synthetic provider bytes, then replay their raw-hash sentinel."""
+
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
+    provider_path = normalized_path.parent / normalized["provider_native"]["path"]
+    provider = json.loads(provider_path.read_text(encoding="utf-8"))
+    provider_records = copy.deepcopy(records)
+
+    def replace_proof_hash(value: Any, replacement: str) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    replacement
+                    if key == "provider_raw_sha256"
+                    else replace_proof_hash(item, replacement)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [replace_proof_hash(item, replacement) for item in value]
+        return value
+
+    provider["records"] = replace_proof_hash(provider_records, RAW_SHA256_SENTINEL)
+    _write_json(provider_path, provider)
+    provider_hash = _hash(provider_path)
+    normalized_records = replace_proof_hash(provider_records, provider_hash)
+    normalized["provider_native"]["source_hash"] = provider_hash
+    normalized["records"] = normalized_records
+    _write_json(normalized_path, normalized)
+    return normalized_records, _hash(normalized_path)
 
 
 def test_all_requirements_pass_only_after_actual_validator_results(tmp_path: Path) -> None:
@@ -606,19 +717,19 @@ def test_historical_per_future_as_of_with_earlier_available_at_is_blocked(tmp_pa
     raw_path = tmp_path / "historical-eps-source.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw["records"][0]["as_of"] = "2030-01-02"
-    _write_json(raw_path, raw)
+    historical_rows, new_hash = _rewrite_normalized_records(raw_path, raw["records"])
     manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
     old_hash = manifest["source_files"][1]["source_hash"]
-    new_hash = _hash(raw_path)
     manifest["source_files"][1]["source_hash"] = new_hash
     per_raw_path = tmp_path / "company-per-source.json"
     per_raw = json.loads(per_raw_path.read_text(encoding="utf-8"))
     per_raw["records"][0]["underlying_eps_source_hash"] = new_hash
-    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(raw["records"][0])
-    _write_json(per_raw_path, per_raw)
-    new_per_hash = _hash(per_raw_path)
+    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(
+        historical_rows[0]
+    )
+    per_rows, new_per_hash = _rewrite_normalized_records(per_raw_path, per_raw["records"])
     manifest["source_files"][0]["source_hash"] = new_per_hash
-    manifest["records"] = _bound_rows(per_raw["records"], new_per_hash)
+    manifest["records"] = _bound_rows(per_rows, new_per_hash)
     _write_json(paths["company_pit_forward_per"], manifest)
     assert old_hash != new_hash
     row = _requirement(_validate(paths), "company_pit_forward_per_ledger")
@@ -631,11 +742,10 @@ def test_historical_per_nonexistent_eps_source_hash_is_blocked(tmp_path: Path) -
     raw_path = tmp_path / "company-per-source.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw["records"][0]["underlying_eps_source_hash"] = "0" * 64
-    _write_json(raw_path, raw)
+    per_rows, new_hash = _rewrite_normalized_records(raw_path, raw["records"])
     manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
-    new_hash = _hash(raw_path)
     manifest["source_files"][0]["source_hash"] = new_hash
-    manifest["records"] = _bound_rows(raw["records"], new_hash)
+    manifest["records"] = _bound_rows(per_rows, new_hash)
     _write_json(paths["company_pit_forward_per"], manifest)
     row = _requirement(_validate(paths), "company_pit_forward_per_ledger")
     assert row["passed"] is False
@@ -729,11 +839,10 @@ def test_record_availability_cannot_be_later_than_source_capture(
     raw_path = tmp_path / source_name
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw["records"][0]["available_at"] = "2026-10-14T21:30:00Z"
-    _write_json(raw_path, raw)
+    normalized_rows, new_hash = _rewrite_normalized_records(raw_path, raw["records"])
     manifest = json.loads(paths[role].read_text(encoding="utf-8"))
-    new_hash = _hash(raw_path)
     manifest["source_files"][0]["source_hash"] = new_hash
-    manifest["records"] = _bound_rows(raw["records"], new_hash)
+    manifest["records"] = _bound_rows(normalized_rows, new_hash)
     _write_json(paths[role], manifest)
     row = _requirement(_validate(paths), requirement_id)
     assert row["passed"] is False
@@ -884,6 +993,109 @@ def test_invalid_independent_approval_receipt_is_blocked(
     assert message in str(report["approval_error"])
 
 
+def test_approval_timestamp_equal_to_candidate_generation_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    receipt_path = Path(approval["approval_receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["approved_at"] = "2026-10-14T22:30:00Z"
+    _sign_receipt(receipt)
+    _write_json(receipt_path, receipt)
+    approval["approved_approval_receipt_sha256"] = _hash(receipt_path)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == (
+        "independent approval must be later than candidate registries"
+    )
+
+
+def test_unsigned_approval_receipt_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    receipt_path = Path(approval["approval_receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.pop("signature")
+    _write_json(receipt_path, receipt)
+    approval["approved_approval_receipt_sha256"] = _hash(receipt_path)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "approval receipt signature is missing"
+
+
+def test_approval_receipt_signed_by_unknown_key_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    receipt_path = Path(approval["approval_receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    _sign_receipt(receipt, key_id="untrusted-qa-key")
+    _write_json(receipt_path, receipt)
+    approval["approved_approval_receipt_sha256"] = _hash(receipt_path)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "approval receipt QA public key is not trusted"
+
+
+def test_signed_approval_receipt_tampering_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    receipt_path = Path(approval["approval_receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["approval_receipt_id"] = "QA-TAMPERED-AFTER-SIGNING"
+    _write_json(receipt_path, receipt)
+    approval["approved_approval_receipt_sha256"] = _hash(receipt_path)
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "approval receipt signature verification failed"
+
+
+def test_revoked_qa_key_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    monkeypatch.setattr(
+        approval_signatures,
+        "TRUSTED_APPROVAL_KEYS",
+        {
+            TEST_QA_KEY_ID: TrustedApprovalKey(
+                key_id=TEST_QA_KEY_ID,
+                approved_by="independent-unit-test-qa",
+                modulus_hex=TEST_QA_MODULUS_HEX,
+                exponent=65537,
+                allowed_scopes=frozenset({"personal_local_same_date_research"}),
+                revoked=True,
+            )
+        },
+    )
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["approval_error"] == "approval receipt QA public key is revoked"
+
+
+def test_no_production_qa_key_keeps_actual_candidate_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _build_contracts(tmp_path)
+    approval = _approval_args(paths)
+    monkeypatch.setattr(approval_signatures, "TRUSTED_APPROVAL_KEYS", {})
+    report = validate_ready_contracts(
+        paths, decision_time=DECISION_TIME, tickers=TICKERS, **approval
+    )
+    assert report["promotion_ready"] is False
+    assert report["evidence_classification"] == "local_evidence_candidate"
+    assert report["approval_error"] == "approval receipt QA public key is not trusted"
+
+
 def test_untrusted_approval_receipt_hash_is_blocked(tmp_path: Path) -> None:
     paths = _build_contracts(tmp_path)
     approval = _approval_args(paths)
@@ -942,6 +1154,61 @@ def test_provider_native_raw_changed_after_approval_is_blocked(tmp_path: Path) -
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("parser_name", "unregistered-parser", "parser is not registered"),
+        ("parser_version", "999.0", "parser is not registered"),
+        ("parser_code_sha256", "0" * 64, "parser code SHA-256 mismatch"),
+    ],
+)
+def test_unregistered_or_forged_parser_is_blocked(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    paths = _build_contracts(tmp_path)
+    normalized_path = tmp_path / "pit-forward-eps-source.json"
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
+    normalized["provider_native"][field] = value
+    _write_json(normalized_path, normalized)
+    manifest = json.loads(paths["pit_forward_eps"].read_text(encoding="utf-8"))
+    manifest["source_files"][0]["source_hash"] = _hash(normalized_path)
+    _write_json(paths["pit_forward_eps"], manifest)
+    row = _requirement(_validate(paths, approve=False), "verified_pit_forward_eps")
+    assert row["passed"] is False
+    assert message in row["reason"]
+
+
+def test_parser_replay_mismatch_is_blocked(tmp_path: Path) -> None:
+    paths = _build_contracts(tmp_path)
+    normalized_path = tmp_path / "pit-forward-eps-source.json"
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
+    provider_path = tmp_path / normalized["provider_native"]["path"]
+    provider = json.loads(provider_path.read_text(encoding="utf-8"))
+    provider["records"][0]["eps_base"] = 999.0
+    _write_json(provider_path, provider)
+    normalized["provider_native"]["source_hash"] = _hash(provider_path)
+    _write_json(normalized_path, normalized)
+    manifest = json.loads(paths["pit_forward_eps"].read_text(encoding="utf-8"))
+    manifest["source_files"][0]["source_hash"] = _hash(normalized_path)
+    _write_json(paths["pit_forward_eps"], manifest)
+    row = _requirement(_validate(paths, approve=False), "verified_pit_forward_eps")
+    assert row["passed"] is False
+    assert "parser replay does not reproduce normalized records" in row["reason"]
+
+
+def test_parser_replay_uses_no_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _build_contracts(tmp_path)
+
+    def _network_forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("network access is forbidden during parser replay")
+
+    monkeypatch.setattr(socket, "create_connection", _network_forbidden)
+    report = _validate(paths)
+    assert report["promotion_ready"] is True
+
+
 def test_approval_cli_does_not_accept_registry_sha_arguments() -> None:
     source = (Path(__file__).parents[1] / "scripts" / "audit_same_date_evidence.py").read_text(
         encoding="utf-8"
@@ -956,18 +1223,18 @@ def test_historical_availability_unverified_is_blocked(tmp_path: Path) -> None:
     raw_path = tmp_path / "historical-eps-source.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw["records"][0]["evidence_status"] = "historical_availability_unverified"
-    _write_json(raw_path, raw)
-    new_hash = _hash(raw_path)
+    historical_rows, new_hash = _rewrite_normalized_records(raw_path, raw["records"])
     manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
     manifest["source_files"][1]["source_hash"] = new_hash
     per_raw_path = tmp_path / "company-per-source.json"
     per_raw = json.loads(per_raw_path.read_text(encoding="utf-8"))
     per_raw["records"][0]["underlying_eps_source_hash"] = new_hash
-    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(raw["records"][0])
-    _write_json(per_raw_path, per_raw)
-    per_hash = _hash(per_raw_path)
+    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(
+        historical_rows[0]
+    )
+    per_rows, per_hash = _rewrite_normalized_records(per_raw_path, per_raw["records"])
     manifest["source_files"][0]["source_hash"] = per_hash
-    manifest["records"] = _bound_rows(per_raw["records"], per_hash)
+    manifest["records"] = _bound_rows(per_rows, per_hash)
     _write_json(paths["company_pit_forward_per"], manifest)
     row = _requirement(_validate(paths, approve=False), "company_pit_forward_per_ledger")
     assert row["passed"] is False
@@ -979,18 +1246,18 @@ def test_self_declared_historical_timestamp_without_matching_proof_is_blocked(tm
     raw_path = tmp_path / "historical-eps-source.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw["records"][0]["pit_proof"]["provider_timestamp"] = "2026-10-14T00:00:00Z"
-    _write_json(raw_path, raw)
-    new_hash = _hash(raw_path)
+    historical_rows, new_hash = _rewrite_normalized_records(raw_path, raw["records"])
     manifest = json.loads(paths["company_pit_forward_per"].read_text(encoding="utf-8"))
     manifest["source_files"][1]["source_hash"] = new_hash
     per_raw_path = tmp_path / "company-per-source.json"
     per_raw = json.loads(per_raw_path.read_text(encoding="utf-8"))
     per_raw["records"][0]["underlying_eps_source_hash"] = new_hash
-    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(raw["records"][0])
-    _write_json(per_raw_path, per_raw)
-    per_hash = _hash(per_raw_path)
+    per_raw["records"][0]["underlying_eps_record_hash"] = canonical_record_hash(
+        historical_rows[0]
+    )
+    per_rows, per_hash = _rewrite_normalized_records(per_raw_path, per_raw["records"])
     manifest["source_files"][0]["source_hash"] = per_hash
-    manifest["records"] = _bound_rows(per_raw["records"], per_hash)
+    manifest["records"] = _bound_rows(per_rows, per_hash)
     _write_json(paths["company_pit_forward_per"], manifest)
     row = _requirement(_validate(paths, approve=False), "company_pit_forward_per_ledger")
     assert row["passed"] is False

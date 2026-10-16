@@ -14,6 +14,14 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from stocklens.personal.approval_signatures import (
+    ApprovalSignatureError,
+    verify_approval_receipt_signature,
+)
+from stocklens.personal.evidence_parsers import (
+    EvidenceParserError,
+    get_evidence_parser,
+)
 from stocklens.market_calendar import (
     is_xnys_session,
     latest_completed_session,
@@ -22,11 +30,11 @@ from stocklens.market_calendar import (
     xnys_sessions,
 )
 
-CONTRACT_VERSION = "same-date-ready-contract-v3"
+CONTRACT_VERSION = "same-date-ready-contract-v4"
 EVIDENCE_CLASSES = {"synthetic_fixture", "local_evidence_candidate"}
-PROVENANCE_REGISTRY_VERSION = "same-date-provenance-candidate-v2"
+PROVENANCE_REGISTRY_VERSION = "same-date-provenance-candidate-v3"
 USAGE_POLICY_REGISTRY_VERSION = "same-date-usage-policy-candidate-v2"
-APPROVAL_RECEIPT_VERSION = "same-date-independent-approval-receipt-v1"
+APPROVAL_RECEIPT_VERSION = "same-date-independent-approval-receipt-v2"
 APPROVAL_SCOPE = "personal_local_same_date_research"
 ACCOUNTING_BASES = {"gaap", "non_gaap"}
 FORECAST_HORIZONS = {"FY1", "NTM"}
@@ -168,7 +176,7 @@ def _source_files(
     root = manifest_path.parent.resolve()
     sources: dict[str, dict[str, Any]] = {}
     evidence: list[dict[str, Any]] = []
-    expected_schema = f"{role.replace('_', '-')}-source-v3"
+    expected_schema = f"{role.replace('_', '-')}-source-v4"
     for index, item in enumerate(rows):
         row = _object(item, f"{role}.source_files[{index}]")
         relative = row.get("path")
@@ -218,11 +226,16 @@ def _source_files(
             native.get("source_hash"),
             f"{role}.source_files[{index}].provider_native.source_hash",
         )
-        if not native_path.is_file() or _sha256(native_path.read_bytes()) != native_hash:
+        if not native_path.is_file():
+            raise DecisionContractError(
+                f"{role}.source_files[{index}] provider-native raw is missing"
+            )
+        native_raw = native_path.read_bytes()
+        if _sha256(native_raw) != native_hash:
             raise DecisionContractError(
                 f"{role}.source_files[{index}] provider-native raw hash mismatch"
             )
-        for field in ("mime_type", "parser_name", "parser_version"):
+        for field in ("mime_type", "parser_name", "parser_version", "parser_code_sha256"):
             if not isinstance(native.get(field), str) or not native[field].strip():
                 raise DecisionContractError(
                     f"{role}.source_files[{index}].provider_native.{field} is missing"
@@ -259,9 +272,29 @@ def _source_files(
             parsed.get("normalized_records_sha256"),
             f"{role}.source_files[{index}].normalized_records_sha256",
         )
-        if normalized_records_hash != _sha256(_canonical_bytes(parsed.get("records"))):
+        normalized_records = parsed.get("records")
+        if normalized_records_hash != _sha256(_canonical_bytes(normalized_records)):
             raise DecisionContractError(
                 f"{role}.source_files[{index}] normalized records hash mismatch"
+            )
+        try:
+            parser = get_evidence_parser(
+                native["parser_name"],
+                native["parser_version"],
+                _hash(
+                    native["parser_code_sha256"],
+                    f"{role}.source_files[{index}].provider_native.parser_code_sha256",
+                ),
+            )
+            replayed_records = parser.parse(native_raw, role, parsed["provider"])
+        except EvidenceParserError as exc:
+            raise DecisionContractError(
+                f"{role}.source_files[{index}] parser replay failed: {exc}"
+            ) from exc
+        replayed_hash = _sha256(_canonical_bytes(replayed_records))
+        if replayed_hash != normalized_records_hash:
+            raise DecisionContractError(
+                f"{role}.source_files[{index}] parser replay does not reproduce normalized records"
             )
         if actual_hash in sources:
             raise DecisionContractError(f"{role}.source_files contain a duplicate source_hash")
@@ -277,6 +310,7 @@ def _source_files(
         }
         evidence.append({
             "role": f"contract_source:{role}:{index}",
+            "contract_role": role,
             "path": str(source_path),
             "source_hash": actual_hash,
             "available_at": available_at.isoformat(),
@@ -288,6 +322,8 @@ def _source_files(
             "normalized_records_hash": normalized_records_hash,
             "parser_name": native["parser_name"],
             "parser_version": native["parser_version"],
+            "parser_code_sha256": parser.code_sha256,
+            "parser_replay_sha256": replayed_hash,
             "revision_id": native.get("revision_id"),
             "vintage_id": native.get("vintage_id"),
         })
@@ -915,12 +951,14 @@ def _validate_provenance_registry(
         if normalized_hash in by_hash:
             raise DecisionContractError("provenance registry contains duplicate normalized hashes")
         for field in (
+            "contract_role",
             "provider",
             "captured_at",
             "provider_timestamp",
             "original_mime_type",
             "parser_name",
             "parser_version",
+            "parser_code_sha256",
             "original_file_path",
             "normalized_file_path",
             "normalized_records_sha256",
@@ -959,11 +997,33 @@ def _validate_provenance_registry(
             raise DecisionContractError("provenance normalized bytes do not match normalized_file_sha256")
         if original_path == normalized_path:
             raise DecisionContractError("provenance original and normalized files must differ")
+        try:
+            parser = get_evidence_parser(
+                row["parser_name"],
+                row["parser_version"],
+                _hash(row["parser_code_sha256"], "provenance.parser_code_sha256"),
+            )
+            normalized_value = _load(normalized_path, "provenance normalized source")[2]
+            replayed_records = parser.parse(
+                original_path.read_bytes(),
+                row["contract_role"],
+                str(row["provider"]),
+            )
+        except EvidenceParserError as exc:
+            raise DecisionContractError(f"provenance parser replay failed: {exc}") from exc
+        replayed_hash = _sha256(_canonical_bytes(replayed_records))
+        if replayed_hash != _hash(
+            row["normalized_records_sha256"], "provenance.normalized_records_sha256"
+        ):
+            raise DecisionContractError(
+                "provenance parser replay does not reproduce normalized records"
+            )
         by_hash[normalized_hash] = {
             **row,
             "resolved_original_path": str(original_path),
             "resolved_normalized_path": str(normalized_path),
             "original_file_sha256": original_hash,
+            "parser_replay_sha256": replayed_hash,
         }
     required = {str(row["source_hash"]): row for row in source_evidence}
     if set(required) != set(by_hash):
@@ -985,11 +1045,14 @@ def _validate_provenance_registry(
             raise DecisionContractError("provenance normalized records hash does not match")
         if evidence.get("provider") != registry_row.get("provider"):
             raise DecisionContractError("provenance provider does not match current contract source")
+        if evidence.get("contract_role") != registry_row.get("contract_role"):
+            raise DecisionContractError("provenance contract role does not match current source")
         for evidence_field, registry_field in (
             ("provider_captured_at", "captured_at"),
             ("provider_timestamp", "provider_timestamp"),
             ("parser_name", "parser_name"),
             ("parser_version", "parser_version"),
+            ("parser_code_sha256", "parser_code_sha256"),
             ("revision_id", "revision_id"),
             ("vintage_id", "vintage_id"),
         ):
@@ -1116,11 +1179,13 @@ def _validate_independent_approval_receipt(
     expires_at = _timestamp(value.get("expires_at"), "independent approval receipt expires_at")
     if approved_at > decision_at or expires_at <= decision_at:
         raise DecisionContractError("independent approval receipt is not valid at decision_time")
-    if approved_at < max(
+    if approved_at <= max(
         _timestamp(provenance["generated_at"], "provenance candidate generated_at"),
         _timestamp(usage_policy["generated_at"], "usage policy candidate generated_at"),
     ):
-        raise DecisionContractError("independent approval predates candidate registries")
+        raise DecisionContractError(
+            "independent approval must be later than candidate registries"
+        )
     if value.get("decision_time") != decision_time:
         raise DecisionContractError("independent approval receipt decision_time does not match")
     if value.get("target_tickers") != list(tickers):
@@ -1140,6 +1205,10 @@ def _validate_independent_approval_receipt(
     for role, expected_hash in expected_registries.items():
         if _hash(approved_registries.get(role), f"approved registry {role}") != expected_hash:
             raise DecisionContractError(f"independent approval receipt {role} hash mismatch")
+    try:
+        signature = verify_approval_receipt_signature(value, expected_scope=APPROVAL_SCOPE)
+    except ApprovalSignatureError as exc:
+        raise DecisionContractError(str(exc)) from exc
     if actual_evidence_root is not None:
         candidate_root = Path(actual_evidence_root).resolve()
         try:
@@ -1157,6 +1226,7 @@ def _validate_independent_approval_receipt(
         "expires_at": expires_at.isoformat(),
         "approval_scope": value["approval_scope"],
         "approval_receipt_id": value["approval_receipt_id"],
+        "signature": signature,
     }, [{
         "role": "independent_approval_receipt",
         "path": str(receipt_path.resolve()),
@@ -1218,9 +1288,38 @@ def build_candidate_registries(
             except ValueError as exc:
                 raise DecisionContractError("provider-native source path is outside evidence root") from exc
             original_hash = _hash(native.get("source_hash"), "provider_native.source_hash")
-            if not original_path.is_file() or _sha256(original_path.read_bytes()) != original_hash:
+            if not original_path.is_file():
+                raise DecisionContractError("provider-native source is missing")
+            original_raw = original_path.read_bytes()
+            if _sha256(original_raw) != original_hash:
                 raise DecisionContractError("provider-native source hash mismatch")
+            parser_code_sha256 = _hash(
+                native.get("parser_code_sha256"), "provider_native.parser_code_sha256"
+            )
+            try:
+                parser = get_evidence_parser(
+                    str(native.get("parser_name")),
+                    str(native.get("parser_version")),
+                    parser_code_sha256,
+                )
+                replayed_records = parser.parse(
+                    original_raw,
+                    role,
+                    str(normalized.get("provider")),
+                )
+            except EvidenceParserError as exc:
+                raise DecisionContractError(f"provider-native parser replay failed: {exc}") from exc
+            replayed_hash = _sha256(_canonical_bytes(replayed_records))
+            normalized_records_hash = _hash(
+                normalized.get("normalized_records_sha256"),
+                "normalized contract source normalized_records_sha256",
+            )
+            if replayed_hash != normalized_records_hash:
+                raise DecisionContractError(
+                    "provider-native parser replay does not reproduce normalized records"
+                )
             provenance_records.append({
+                "contract_role": role,
                 "provider": normalized.get("provider"),
                 "original_source_url": native.get("source_url"),
                 "local_collection_path": native.get("local_collection_path"),
@@ -1235,9 +1334,10 @@ def build_candidate_registries(
                 "original_file_path": os.path.relpath(original_path, destination),
                 "normalized_file_sha256": normalized_hash,
                 "normalized_file_path": os.path.relpath(normalized_path, destination),
-                "normalized_records_sha256": normalized.get("normalized_records_sha256"),
+                "normalized_records_sha256": normalized_records_hash,
                 "parser_name": native.get("parser_name"),
                 "parser_version": native.get("parser_version"),
+                "parser_code_sha256": parser.code_sha256,
                 "revision_id": native.get("revision_id"),
                 "vintage_id": native.get("vintage_id"),
             })
