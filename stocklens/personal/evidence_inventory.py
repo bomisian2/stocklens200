@@ -11,7 +11,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
-INVENTORY_VERSION = "same-date-evidence-inventory-p4.2-v1"
+from .alpha_evidence_validation import validate_dataset_bytes, validate_terms_bytes
+
+INVENTORY_VERSION = "same-date-evidence-inventory-p4.2.1-v1"
 MANIFEST_VERSION = "evidence-inventory-manifest-v1"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = REPOSITORY_ROOT / "config" / "evidence-inventory-manifest-v1.json"
@@ -393,22 +395,68 @@ def _apply_record_timestamp_rules(
         })
 
 
-def _source_set(root: Path) -> tuple[list[dict[str, Any]], str]:
-    base = root.resolve(strict=True)
-    rows: list[dict[str, Any]] = []
-    for path in sorted((item for item in root.iterdir() if item.is_file()), key=lambda item: item.name):
-        resolved = path.resolve(strict=True)
-        if not _is_within(resolved, base):
-            raise EvidenceInventoryError("Top10 source file resolves outside the declared root")
-        rows.append({"name": path.name, "bytes": path.stat().st_size, "source_hash": _sha256(path)})
+def _evidence_source_set(
+    *, private_root: Path, top10_root: Path, manifest_path: Path, manifest: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    """Hash every file that can affect the inventory, except the inventory output itself."""
+
+    private_base = private_root.resolve(strict=True)
+    top10_base = top10_root.resolve(strict=True)
+    candidates: dict[Path, str] = {manifest_path.resolve(strict=True): "config_manifest"}
+    for path in top10_root.rglob("*"):
+        if path.is_file():
+            resolved = path.resolve(strict=True)
+            if not _is_within(resolved, top10_base):
+                raise EvidenceInventoryError("Top10 source file resolves outside the declared root")
+            candidates[resolved] = f"top10_data/{path.relative_to(top10_root).as_posix()}"
+    for spec in manifest["artifacts"]:
+        if spec["root"] != "private_data":
+            continue
+        path = _resolved_child(private_root, str(spec["path"]), label=f"artifact {spec['artifact_id']}")
+        if path.is_file():
+            candidates[path.resolve(strict=True)] = f"private_data/{path.relative_to(private_root).as_posix()}"
+    for relative_root in (Path("raw"), Path("rights"), Path("normalized/financials")):
+        directory = private_root / relative_root
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            resolved = path.resolve(strict=True)
+            if not _is_within(resolved, private_base):
+                raise EvidenceInventoryError("private evidence source resolves outside private_data")
+            candidates[resolved] = f"private_data/{path.relative_to(private_root).as_posix()}"
+    output = (private_root / "decision" / DEFAULT_OUTPUT_NAME).resolve(strict=False)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    candidates.pop(output, None)
+    candidates.pop(temporary, None)
+    rows = [
+        {"relative_path": label, "bytes": path.stat().st_size, "source_hash": _sha256(path)}
+        for path, label in sorted(candidates.items(), key=lambda item: item[1])
+    ]
     payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return rows, hashlib.sha256(payload).hexdigest().upper()
 
 
-def validate_inventory_source_set(report: dict[str, Any], top10_data_root: str | Path) -> dict[str, Any]:
-    """Recompute the immutable Top10 file set before a persisted inventory is used."""
+def validate_inventory_source_set(
+    report: dict[str, Any],
+    top10_data_root: str | Path,
+    private_data_root: str | Path | None = None,
+    inventory_manifest_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Recompute every source byte used by a persisted inventory."""
 
-    rows, digest = _source_set(Path(top10_data_root))
+    private_root = Path(private_data_root or report.get("private_data_root") or "")
+    manifest_path = Path(inventory_manifest_path or report.get("manifest_path") or DEFAULT_MANIFEST)
+    if not private_root.is_dir():
+        raise EvidenceInventoryError("private_data root is required to validate the complete source set")
+    manifest = _load_manifest(manifest_path)
+    rows, digest = _evidence_source_set(
+        private_root=private_root,
+        top10_root=Path(top10_data_root),
+        manifest_path=manifest_path,
+        manifest=manifest,
+    )
     expected = str(report.get("source_set_hash") or "").upper()
     stale = not expected or digest != expected
     return {
@@ -456,20 +504,55 @@ def _apply_provider_native_integrity(
     cutoff_dt: datetime,
 ) -> None:
     by_id = {row["artifact_id"]: row for row in artifacts}
-    spec_by_id = {row["artifact_id"]: row for row in specs}
     rights_value = values.get("usage-rights-manifest")
     linked_hashes = {
         str(value).upper()
         for value in (rights_value or {}).get("linked_response_hashes", [])
         if isinstance(value, str)
     }
-    rights_allowed = bool(
-        isinstance(rights_value, dict)
-        and rights_value.get("personal_noncommercial_confirmed") is True
-        and rights_value.get("local_storage_permission") == "allowed"
-        and rights_value.get("derived_analysis_permission") == "allowed"
-        and rights_value.get("local_display_permission") == "allowed"
+    terms_raw = by_id.get("alpha-terms-raw", {})
+    terms_capture = by_id.get("alpha-terms-capture", {})
+    reviewed_at, reviewed_error, reviewed_dt = _parse_timestamp(
+        (rights_value or {}).get("reviewed_at") if isinstance(rights_value, dict) else None
     )
+    expires_at, expires_error, expires_dt = _parse_timestamp(
+        (rights_value or {}).get("expires_at") if isinstance(rights_value, dict) else None
+    )
+    scopes = (rights_value or {}).get("review_scope") if isinstance(rights_value, dict) else None
+    required_scopes = {"local_storage", "derived_analysis", "local_display"}
+    rights_checks = {
+        "manifest_exists": isinstance(rights_value, dict),
+        "terms_bytes_exist": terms_raw.get("exists") is True,
+        "terms_capture_exists": terms_capture.get("exists") is True,
+        "terms_source_hash": bool(
+            isinstance(rights_value, dict)
+            and str(rights_value.get("terms_source_hash") or "").upper()
+            == str(terms_raw.get("source_hash") or "").upper()
+        ),
+        "terms_capture_manifest_hash": bool(
+            isinstance(rights_value, dict)
+            and str(rights_value.get("terms_capture_manifest_hash") or "").upper()
+            == str(terms_capture.get("source_hash") or "").upper()
+        ),
+        "reviewed_by": bool(isinstance(rights_value, dict) and str(rights_value.get("reviewed_by") or "").strip()),
+        "reviewed_at": not reviewed_error and reviewed_dt is not None and reviewed_dt <= cutoff_dt,
+        "review_scope": isinstance(scopes, list) and required_scopes.issubset(set(scopes)),
+        "review_result": bool(isinstance(rights_value, dict) and rights_value.get("review_result") == "approved"),
+        "not_expired": not expires_error and expires_dt is not None and expires_dt > cutoff_dt,
+        "personal_noncommercial": bool(
+            isinstance(rights_value, dict) and rights_value.get("personal_noncommercial_confirmed") is True
+        ),
+        "local_storage": bool(
+            isinstance(rights_value, dict) and rights_value.get("local_storage_permission") == "allowed"
+        ),
+        "derived_analysis": bool(
+            isinstance(rights_value, dict) and rights_value.get("derived_analysis_permission") == "allowed"
+        ),
+        "local_display": bool(
+            isinstance(rights_value, dict) and rights_value.get("local_display_permission") == "allowed"
+        ),
+    }
+    rights_allowed = all(rights_checks.values())
     for raw_spec in specs:
         native = raw_spec.get("provider_native")
         if not isinstance(native, dict) or native.get("kind") != "response_bytes":
@@ -498,8 +581,16 @@ def _apply_provider_native_integrity(
         declared_hash = str(capture_value.get("response_sha256") or "").upper()
         hash_ok = len(actual_hash) == 64 and actual_hash == declared_hash
         length_ok = capture_value.get("byte_length") == raw.get("bytes")
-        captured_at, timestamp_error, captured_dt = _parse_timestamp(capture_value.get("captured_at"))
-        timestamp_ok = not timestamp_error and captured_dt is not None and captured_dt <= cutoff_dt
+        completed_at, timestamp_error, completed_dt = _parse_timestamp(
+            capture_value.get("response_completed_at") or capture_value.get("available_at")
+        )
+        started_at, started_error, started_dt = _parse_timestamp(capture_value.get("request_started_at"))
+        headers_at, headers_error, headers_dt = _parse_timestamp(capture_value.get("headers_received_at"))
+        timestamp_ok = bool(
+            not timestamp_error and not started_error and not headers_error
+            and completed_dt is not None and started_dt is not None and headers_dt is not None
+            and started_dt <= headers_dt <= completed_dt <= cutoff_dt
+        )
         try:
             final_url = str(capture_value.get("final_url") or "")
             parsed = urlsplit(final_url)
@@ -515,18 +606,37 @@ def _apply_provider_native_integrity(
             and capture_value.get("http_status") == 200
             and capture_value.get("capture_state") == "captured"
         )
+        content_type = str(capture_value.get("content_type") or "")
+        if native.get("function") is None:
+            dataset_validation = validate_terms_bytes(Path(raw["path"]).read_bytes(), content_type)
+        else:
+            dataset_validation = validate_dataset_bytes(
+                Path(raw["path"]).read_bytes(),
+                content_type,
+                function=str(native.get("function")),
+                ticker=str(native.get("ticker")),
+            )
+        dataset_ok = bool(
+            dataset_validation.get("valid_provider_dataset") is True
+            and capture_value.get("valid_provider_dataset") is True
+        )
         rights_hash_ok = actual_hash in linked_hashes
         basis = native.get("basis")
         basis_ok = basis in {"raw_as_traded_unadjusted", "terms_text"}
         if basis == "provider_estimate_basis_required":
-            basis_ok = capture_value.get("accounting_basis") in {"GAAP", "NON_GAAP"}
+            basis_ok = (
+                capture_value.get("accounting_basis") in {"GAAP", "NON_GAAP"}
+                and dataset_validation.get("accounting_basis") in {"GAAP", "NON_GAAP"}
+                and capture_value.get("accounting_basis") == dataset_validation.get("accounting_basis")
+            )
         checks = {
             "capture_manifest": True,
             "source_hash": hash_ok,
             "byte_length": length_ok,
-            "captured_at": timestamp_ok,
+            "request_response_timestamps": timestamp_ok,
             "approved_final_url": url_ok,
             "request_identity": request_ok,
+            "valid_provider_dataset": dataset_ok,
             "rights_hash_link": rights_hash_ok,
             "rights_scope": rights_allowed,
             "basis": basis_ok,
@@ -535,8 +645,10 @@ def _apply_provider_native_integrity(
             if not passed:
                 reasons.append(f"{label} check failed")
         raw.update({
-            "captured_at": captured_at,
+            "available_at": completed_at,
             "candidate_checks": checks,
+            "provider_dataset_validation": dataset_validation,
+            "rights_review_checks": rights_checks,
             "rights_manifest_source_hash": (
                 by_id.get("usage-rights-manifest", {}).get("source_hash")
                 if isinstance(by_id.get("usage-rights-manifest"), dict) else None
@@ -663,14 +775,22 @@ def _discover_private_provider_artifacts(
             relative = path.relative_to(private_root).as_posix()
             if relative in declared:
                 continue
+            filename = path.name.upper()
+            target_roles: list[str] = []
+            ticker = next((value for value in TARGET_TICKERS if filename.startswith(f"{value}_")), None)
+            if "TIME_SERIES_DAILY.RESPONSE.RAW" in filename:
+                target_roles = ["daily_price"]
+            elif "EARNINGS_ESTIMATES.RESPONSE.RAW" in filename:
+                target_roles = ["forward_eps"]
             results.append({
                 "relative_path": relative,
                 "path": str(resolved),
                 "source_hash": _sha256(path),
                 "bytes": path.stat().st_size,
                 "classification": "discovered_unverified",
-                "provider_native_raw_exists": path.suffix.lower() in {".raw", ".html", ".json"}
-                and ".manifest." not in path.name,
+                "provider_native_raw_exists": path.name.lower().endswith(".response.raw"),
+                "ticker": ticker,
+                "target_roles": target_roles,
                 "parser_eligible": False,
                 "promotion_eligible": False,
                 "reason": "provider artifact was discovered but is not declared and verified by the manifest",
@@ -696,9 +816,14 @@ def build_p4_evidence_inventory(
     _, cutoff_error, cutoff_dt = _parse_timestamp(decision_time or inspected_at)
     if cutoff_error or cutoff_dt is None:
         raise EvidenceInventoryError("decision_time must be a timezone-aware ISO timestamp")
-    before_source_set, before_source_hash = _source_set(top10_root)
     manifest_path = Path(inventory_manifest_path)
     manifest = _load_manifest(manifest_path)
+    before_source_set, before_source_hash = _evidence_source_set(
+        private_root=private_root,
+        top10_root=top10_root,
+        manifest_path=manifest_path,
+        manifest=manifest,
+    )
     roots = {"private_data": private_root, "top10_data": top10_root}
     artifacts: list[dict[str, Any]] = []
     values: dict[str, dict[str, Any] | None] = {}
@@ -714,7 +839,12 @@ def build_p4_evidence_inventory(
     )
     unclassified, excluded = _classify_top10_directory(top10_root, manifest)
     discovered_provider = _discover_private_provider_artifacts(private_root, manifest)
-    after_source_set, after_source_hash = _source_set(top10_root)
+    after_source_set, after_source_hash = _evidence_source_set(
+        private_root=private_root,
+        top10_root=top10_root,
+        manifest_path=manifest_path,
+        manifest=manifest,
+    )
     source_set_changed = before_source_hash != after_source_hash
     supporting = _issuer_supporting_evidence(private_root, inspected_dt)
     missing = [row for row in artifacts if row["inspection_status"] == "missing" and row["required"]]
@@ -723,20 +853,36 @@ def build_p4_evidence_inventory(
                       "timezone_missing", "invalid_timestamp", "record_timestamp_invalid"}
     invalid = [row for row in artifacts if row["classification"] in invalid_states
                or row["inspection_status"] in invalid_states]
-    target_native = [
+    declared_target_native = [
         row for row in artifacts
         if row.get("provider_native_raw_exists") is True and row.get("target_roles")
     ]
+    discovered_target_native = [
+        row for row in discovered_provider
+        if row.get("provider_native_raw_exists") is True and row.get("target_roles")
+    ]
+    target_native = [*declared_target_native, *discovered_target_native]
     parser_candidates = [row for row in target_native if row.get("parser_eligible") is True]
     supporting_native = [row for row in supporting if row.get("provider_native_raw_exists") is True]
     discovered_native = [row for row in discovered_provider if row.get("provider_native_raw_exists") is True]
-    native = [*target_native, *supporting_native, *discovered_native]
+    native_by_path = {
+        str(
+            row.get("path")
+            or row.get("relative_path")
+            or ((row.get("file") or {}).get("path") if isinstance(row.get("file"), dict) else "")
+            or f"supporting:{row.get('ticker')}:{row.get('source_hash')}"
+        ): row
+        for row in [*target_native, *supporting_native, *discovered_native]
+    }
+    native = list(native_by_path.values())
     source_paths = [str(manifest_path.resolve())] + [row["path"] for row in artifacts if row.get("exists")]
     source_paths += [str(row["file"]["path"]) for row in supporting if isinstance(row.get("file"), dict)]
     source_paths += [str(row["path"]) for row in discovered_provider]
     return {
         "inventory_version": INVENTORY_VERSION, "manifest_version": manifest["manifest_version"],
         "manifest_path": str(manifest_path.resolve()), "manifest_hash": _sha256(manifest_path),
+        "private_data_root": str(private_root.resolve()),
+        "top10_data_root": str(top10_root.resolve()),
         "inspected_at": inspected,
         "decision_time": cutoff_dt.isoformat().replace("+00:00", "Z"),
         "target_tickers": list(TARGET_TICKERS),

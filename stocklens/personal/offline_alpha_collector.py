@@ -1,8 +1,8 @@
-"""Fail-closed Alpha Vantage evidence collector for an approved local run.
+"""Fail-closed Alpha Vantage evidence collector for a separately approved run.
 
-The module deliberately does not parse, normalize, promote, or calculate an
-investment decision.  It only preserves provider response bytes and a
-redacted capture manifest under the repository's ignored ``private_data``.
+The collector preserves immutable provider bytes and redacted manifests only.
+It never parses into StockLens data, promotes a candidate, creates a snapshot,
+or calculates an investment decision.
 """
 
 from __future__ import annotations
@@ -13,21 +13,23 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Callable, Iterable
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
-from .evidence_inventory import EvidenceInventoryError, resolve_repository_private_data
+from .alpha_evidence_validation import validate_dataset_bytes, validate_terms_bytes
+from .evidence_inventory import resolve_repository_private_data
 
 
-COLLECTOR_VERSION = "alpha-vantage-offline-evidence-v1"
+COLLECTOR_VERSION = "alpha-vantage-offline-evidence-v2"
 API_ENDPOINT = "https://www.alphavantage.co/query"
 TERMS_URL = "https://www.alphavantage.co/terms_of_service/"
 ALLOWED_HOSTS = frozenset({"www.alphavantage.co", "alphavantage.co"})
 ALLOWED_TICKERS = frozenset({"AVGO", "NVDA"})
 ALLOWED_FUNCTIONS = frozenset({"TIME_SERIES_DAILY", "EARNINGS_ESTIMATES"})
 MAX_CALLS = 5
+MAX_HTTP_REQUESTS = 5
 
 
 @dataclass(frozen=True)
@@ -52,8 +54,19 @@ class OfflineCollectorError(ValueError):
     """Raised before or during a local evidence collection run."""
 
 
+def _utc(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None:
+        raise OfflineCollectorError("collector clock must return a timezone-aware timestamp")
+    return value.astimezone(timezone.utc)
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def exact_request_plan() -> list[dict[str, Any]]:
-    """Return the immutable, secret-free five-request allowlist."""
+    """Return the immutable, secret-free five-operation allowlist."""
 
     return [
         {
@@ -71,9 +84,9 @@ def exact_request_plan() -> list[dict[str, Any]]:
 def _safe_url(value: str) -> str:
     parsed = urlsplit(value)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or host not in ALLOWED_HOSTS:
-        raise OfflineCollectorError("provider redirected outside the approved Alpha Vantage domain")
-    return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    if parsed.scheme != "https" or host not in ALLOWED_HOSTS or parsed.username or parsed.password:
+        raise OfflineCollectorError("provider URL is outside the approved HTTPS Alpha Vantage domain")
+    return urlunsplit(("https", host, parsed.path or "/", "", ""))
 
 
 def _validate_request(row: EvidenceRequest) -> None:
@@ -88,7 +101,7 @@ def _validate_request(row: EvidenceRequest) -> None:
 
 def _raw_name(row: EvidenceRequest) -> str:
     if row.kind == "terms":
-        return "terms-of-service.html"
+        return "terms-of-service.response.raw"
     return f"{row.ticker}_{row.function}.response.raw"
 
 
@@ -97,6 +110,15 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _create_json_exclusive(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    with path.open("xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _response_chunks(response: Any) -> Iterable[bytes]:
@@ -108,72 +130,216 @@ def _response_chunks(response: Any) -> Iterable[bytes]:
         yield bytes(content)
 
 
+def _planned_paths(private_root: Path, run_id: str) -> dict[str, Any]:
+    run_root = private_root / "raw" / "alpha_vantage" / run_id
+    rights_path = private_root / "rights" / "alpha_vantage" / run_id / "provider-terms-manifest.json"
+    requests: dict[str, dict[str, Path]] = {}
+    for row in REQUEST_PLAN:
+        raw = run_root / _raw_name(row)
+        requests[row.request_id] = {
+            "raw": raw,
+            "partial": raw.with_suffix(raw.suffix + ".partial"),
+            "manifest": raw.with_suffix(raw.suffix + ".manifest.json"),
+        }
+    return {
+        "run_root": run_root,
+        "run_ledger": run_root / "collection-run.json",
+        "rights": rights_path,
+        "requests": requests,
+    }
+
+
+def _preflight_output_paths(paths: dict[str, Any]) -> None:
+    collisions: list[Path] = []
+    run_root = paths["run_root"]
+    if run_root.exists():
+        collisions.append(run_root)
+    if paths["rights"].exists():
+        collisions.append(paths["rights"])
+    for row in paths["requests"].values():
+        collisions.extend(path for path in row.values() if path.exists())
+    if paths["run_ledger"].exists():
+        collisions.append(paths["run_ledger"])
+    if collisions:
+        raise OfflineCollectorError("collection output collision detected before any network request")
+
+
+class _ExclusiveCollectorLock:
+    def __init__(self, private_root: Path, run_id: str, started_at: str) -> None:
+        self.path = private_root / "raw" / "alpha_vantage" / ".collector.lock"
+        self.run_id = run_id
+        self.started_at = started_at
+        self.acquired = False
+
+    def __enter__(self) -> "_ExclusiveCollectorLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({
+            "collector_version": COLLECTOR_VERSION,
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "state": "running",
+        }, sort_keys=True).encode("utf-8")
+        try:
+            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise OfflineCollectorError("another Alpha Vantage collection is already active") from exc
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self.acquired = True
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        if self.acquired:
+            try:
+                current = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = {}
+            if current.get("run_id") == self.run_id:
+                self.path.unlink(missing_ok=True)
+        self.acquired = False
+
+
+def _failure_code(exc: BaseException) -> str:
+    if isinstance(exc, KeyboardInterrupt):
+        return "interrupted"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "tls_error"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "connection_error"
+    if isinstance(exc, requests.exceptions.RequestException):
+        return "request_error"
+    if isinstance(exc, OSError):
+        return "local_io_error"
+    if isinstance(exc, OfflineCollectorError):
+        return "collector_policy_error"
+    return "unexpected_error"
+
+
 def _capture_one(
     row: EvidenceRequest,
     *,
-    raw_root: Path,
+    paths: dict[str, Path],
     api_key: str,
     session: requests.Session,
-    captured_at: datetime,
+    clock: Callable[[], datetime],
+    before_http_request: Callable[[str, str], None],
+    after_http_request_completed: Callable[[], None],
 ) -> dict[str, Any]:
+    """Capture one logical operation using manually validated redirects."""
+
     _validate_request(row)
-    raw_path = raw_root / _raw_name(row)
-    partial_path = raw_path.with_suffix(raw_path.suffix + ".partial")
-    manifest_path = raw_path.with_suffix(raw_path.suffix + ".manifest.json")
-    if raw_path.exists() or partial_path.exists() or manifest_path.exists():
-        raise OfflineCollectorError(f"duplicate collection target exists for {row.request_id}")
-    params = None
+    raw_path, partial_path, manifest_path = paths["raw"], paths["partial"], paths["manifest"]
+    params: dict[str, str] | None = None
     if row.kind == "dataset":
-        if not api_key:
-            raise OfflineCollectorError("ALPHAVANTAGE_API_KEY is required for dataset requests")
-        params = {"function": row.function, "symbol": row.ticker, "apikey": api_key}
+        params = {"function": str(row.function), "symbol": str(row.ticker), "apikey": api_key}
         if row.function == "TIME_SERIES_DAILY":
             params["outputsize"] = "compact"
-    raw_root.mkdir(parents=True, exist_ok=True)
+    request_started_at: datetime | None = None
+    headers_received_at: datetime | None = None
+    response_completed_at: datetime | None = None
     response: Any | None = None
     status_code: int | None = None
     content_type: str | None = None
     final_url: str | None = None
     digest = hashlib.sha256()
     byte_length = 0
-    state = "failed"
+    capture_state = "failed"
     failure_code: str | None = None
+    validation: dict[str, Any] = {"valid_provider_dataset": False, "validation_code": "not_validated"}
+    redirect_chain: list[dict[str, Any]] = []
+    current_url = row.url
+    current_params = params
+    propagate: BaseException | None = None
     try:
-        response = session.get(row.url, params=params, timeout=30, allow_redirects=True, stream=True)
-        status_code = int(response.status_code)
-        final_url = _safe_url(str(getattr(response, "url", row.url)))
-        content_type = str(getattr(response, "headers", {}).get("Content-Type") or "") or None
-        with partial_path.open("xb") as handle:
-            for chunk in _response_chunks(response):
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                digest.update(chunk)
-                byte_length += len(chunk)
-        partial_path.replace(raw_path)
-        state = "captured" if status_code == 200 else "http_error"
-        failure_code = None if status_code == 200 else f"http_{status_code}"
-    except KeyboardInterrupt:
-        failure_code = "interrupted"
-        raise
-    except requests.exceptions.Timeout:
-        failure_code = "timeout"
-    except requests.exceptions.SSLError:
-        failure_code = "tls_error"
-    except requests.exceptions.ConnectionError:
-        failure_code = "connection_error"
-    except requests.exceptions.RequestException:
-        failure_code = "request_error"
-    except OSError:
-        failure_code = "local_io_error"
+        while True:
+            attempt_started = _utc(clock)
+            if request_started_at is None:
+                request_started_at = attempt_started
+            before_http_request(row.request_id, _iso(attempt_started))
+            response = session.get(
+                current_url,
+                params=current_params,
+                timeout=30,
+                allow_redirects=False,
+                stream=True,
+            )
+            attempt_headers = _utc(clock)
+            status_code = int(response.status_code)
+            response_url = _safe_url(str(getattr(response, "url", current_url)))
+            if 300 <= status_code < 400:
+                location = str(getattr(response, "headers", {}).get("Location") or "")
+                if not location:
+                    raise OfflineCollectorError("redirect response did not provide a Location header")
+                redirected = _safe_url(urljoin(current_url, location))
+                redirect_chain.append({
+                    "status": status_code,
+                    "from": response_url,
+                    "to": redirected,
+                    "request_started_at": _iso(attempt_started),
+                    "headers_received_at": _iso(attempt_headers),
+                })
+                response.close()
+                after_http_request_completed()
+                response = None
+                current_url = redirected
+                current_params = None
+                continue
+            headers_received_at = attempt_headers
+            final_url = response_url
+            content_type = str(getattr(response, "headers", {}).get("Content-Type") or "") or None
+            with partial_path.open("xb") as handle:
+                for chunk in _response_chunks(response):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    handle.flush()
+                    digest.update(chunk)
+                    byte_length += len(chunk)
+                os.fsync(handle.fileno())
+            response_completed_at = _utc(clock)
+            after_http_request_completed()
+            payload = partial_path.read_bytes()
+            if row.kind == "terms":
+                validation = validate_terms_bytes(payload, content_type)
+            else:
+                validation = validate_dataset_bytes(
+                    payload, content_type, function=str(row.function), ticker=str(row.ticker),
+                )
+            if status_code != 200:
+                capture_state, failure_code = "http_error", f"http_{status_code}"
+            elif not validation["valid_provider_dataset"]:
+                capture_state = "invalid_provider_dataset"
+                failure_code = str(validation.get("validation_code") or "provider_dataset_invalid")
+            else:
+                capture_state = "captured"
+            partial_path.replace(raw_path)
+            break
+    except BaseException as exc:
+        failure_code = _failure_code(exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            propagate = exc
+        elif not isinstance(exc, Exception):
+            propagate = exc
     finally:
         if response is not None and hasattr(response, "close"):
             response.close()
         kept_path = raw_path if raw_path.exists() else partial_path if partial_path.exists() else None
-        if kept_path is not None and byte_length == 0:
+        if kept_path is not None:
             payload = kept_path.read_bytes()
             digest = hashlib.sha256(payload)
             byte_length = len(payload)
+        timestamp_order_valid = bool(
+            request_started_at is not None
+            and headers_received_at is not None
+            and response_completed_at is not None
+            and request_started_at <= headers_received_at <= response_completed_at
+        )
         manifest = {
             "collector_version": COLLECTOR_VERSION,
             "request_id": row.request_id,
@@ -182,15 +348,21 @@ def _capture_one(
             "request_path": urlsplit(row.url).path,
             "function": row.function,
             "ticker": row.ticker,
-            "captured_at": captured_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "request_started_at": _iso(request_started_at) if request_started_at else None,
+            "headers_received_at": _iso(headers_received_at) if headers_received_at else None,
+            "response_completed_at": _iso(response_completed_at) if response_completed_at else None,
+            "available_at": _iso(response_completed_at) if response_completed_at else None,
+            "timestamp_order_valid": timestamp_order_valid,
             "http_status": status_code,
             "final_url": final_url,
+            "redirect_chain": redirect_chain,
             "content_type": content_type,
             "byte_length": byte_length,
             "response_sha256": digest.hexdigest().upper() if kept_path is not None else None,
             "response_file": kept_path.name if kept_path is not None else None,
-            "capture_state": state,
+            "capture_state": capture_state,
             "failure_code": failure_code,
+            **validation,
             "automatic_retries": 0,
             "api_key_persisted": False,
             "request_query_persisted": False,
@@ -201,6 +373,8 @@ def _capture_one(
             "operational_eligible": False,
         }
         _write_json(manifest_path, manifest)
+    if propagate is not None:
+        raise propagate
     return manifest
 
 
@@ -213,76 +387,140 @@ def collect_approved_alpha_evidence(
     max_calls: int = MAX_CALLS,
     session: requests.Session | None = None,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
-    """Execute the exact five-call plan once and preserve only raw evidence."""
+    """Execute at most five actual HTTP requests and preserve raw evidence."""
 
     if not personal_noncommercial_confirmed:
         raise OfflineCollectorError("personal non-commercial Alpha Vantage use must be confirmed")
     if not api_key.strip():
         raise OfflineCollectorError("ALPHAVANTAGE_API_KEY is required before any request")
-    if max_calls != MAX_CALLS or len(REQUEST_PLAN) != MAX_CALLS:
-        raise OfflineCollectorError("the approved collection budget must be exactly five calls")
+    if max_calls != MAX_HTTP_REQUESTS or len(REQUEST_PLAN) != MAX_CALLS:
+        raise OfflineCollectorError("the approved budget must be exactly five actual HTTP requests")
     if not run_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in run_id):
         raise OfflineCollectorError("run_id must use only letters, digits, hyphen, or underscore")
-    private_root = resolve_repository_private_data(project_root, require_exists=False)
-    raw_root = private_root / "raw" / "alpha_vantage"
-    run_path = raw_root / f"collection-run-{run_id}.json"
-    if run_path.exists():
-        raise OfflineCollectorError("duplicate collection run_id is blocked")
     for row in REQUEST_PLAN:
         _validate_request(row)
-    captured_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    private_root = resolve_repository_private_data(project_root, require_exists=False)
+    effective_clock = clock or (lambda: datetime.now(timezone.utc))
+    if now is not None and now.tzinfo is None:
+        raise OfflineCollectorError("run start timestamp must be timezone-aware")
+    started_at = now.astimezone(timezone.utc) if now else _utc(effective_clock)
+    started_text = _iso(started_at)
+    paths = _planned_paths(private_root, run_id)
     client = session or requests.Session()
-    results: list[dict[str, Any]] = []
-    calls_made = 0
-    for row in REQUEST_PLAN:
-        result = _capture_one(
-            row,
-            raw_root=raw_root,
-            api_key=api_key,
-            session=client,
-            captured_at=captured_at,
-        )
-        calls_made += 1
-        results.append(result)
-    terms = next(row for row in results if row["request_id"] == "alpha-vantage-terms")
-    rights = {
-        "schema_version": 1,
-        "provider": "Alpha Vantage",
-        "terms_url": TERMS_URL,
-        "terms_source_hash": terms.get("response_sha256"),
-        "terms_capture_manifest_hash": hashlib.sha256(
-            (raw_root / "terms-of-service.html.manifest.json").read_bytes()
-        ).hexdigest().upper(),
-        "reviewed_at": captured_at.date().isoformat(),
-        "personal_noncommercial_confirmed": True,
-        "local_storage_permission": "manual_review_required",
-        "derived_analysis_permission": "manual_review_required",
-        "local_display_permission": "manual_review_required",
-        "public_display_permission": "not_authorized",
-        "expires_at": None,
-        "linked_response_hashes": [row["response_sha256"] for row in results if row.get("response_sha256")],
-        "parser_candidate": False,
-        "operational_eligible": False,
-    }
-    _write_json(private_root / "rights" / "provider-terms-manifest.json", rights)
-    run_report = {
+    report: dict[str, Any] = {
         "collector_version": COLLECTOR_VERSION,
         "run_id": run_id,
-        "started_at": captured_at.isoformat().replace("+00:00", "Z"),
-        "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "approved_call_budget": MAX_CALLS,
-        "calls_made": calls_made,
+        "started_at": started_text,
+        "finished_at": None,
+        "logical_operation_count": len(REQUEST_PLAN),
+        "approved_actual_http_request_budget": MAX_HTTP_REQUESTS,
+        "calls_attempted": 0,
+        "calls_completed": 0,
         "automatic_retries": 0,
-        "results": results,
+        "run_state": "initializing",
+        "failure_code": None,
+        "active_request_id": None,
+        "results": [],
         "parser_attempted": False,
         "candidate_created": False,
         "snapshot_created": False,
         "decision_created": False,
         "operational_eligible": False,
     }
-    _write_json(run_path, run_report)
-    return run_report
+    with _ExclusiveCollectorLock(private_root, run_id, started_text):
+        _preflight_output_paths(paths)
+        _create_json_exclusive(paths["run_ledger"], report)
+
+        def persist() -> None:
+            _write_json(paths["run_ledger"], report)
+
+        def before_http(request_id: str, attempted_at: str) -> None:
+            if report["calls_attempted"] >= MAX_HTTP_REQUESTS:
+                raise OfflineCollectorError("actual HTTP request budget exhausted")
+            report["calls_attempted"] += 1
+            report["active_request_id"] = request_id
+            report["last_attempted_at"] = attempted_at
+            report["run_state"] = "running"
+            persist()
+
+        def after_http_completed() -> None:
+            report["calls_completed"] += 1
+            persist()
+
+        try:
+            for row in REQUEST_PLAN:
+                result = _capture_one(
+                    row,
+                    paths=paths["requests"][row.request_id],
+                    api_key=api_key,
+                    session=client,
+                    clock=effective_clock,
+                    before_http_request=before_http,
+                    after_http_request_completed=after_http_completed,
+                )
+                report["results"].append(result)
+                report["active_request_id"] = None
+                persist()
+                if row.kind == "terms" and result.get("valid_provider_dataset") is not True:
+                    report["run_state"] = "failed"
+                    report["failure_code"] = "terms_validation_failed"
+                    break
+            if report["run_state"] != "failed":
+                failed_results = [row for row in report["results"] if row.get("capture_state") != "captured"]
+                if failed_results:
+                    report["run_state"] = "failed"
+                    report["failure_code"] = "data_collection_incomplete"
+                else:
+                    report["run_state"] = "completed"
+        except KeyboardInterrupt:
+            report["run_state"] = "interrupted"
+            report["failure_code"] = "interrupted"
+            raise
+        except BaseException as exc:
+            report["run_state"] = "failed"
+            report["failure_code"] = _failure_code(exc)
+            raise
+        finally:
+            report["finished_at"] = _iso(_utc(effective_clock))
+            persist()
+
+        terms = next((row for row in report["results"] if row["request_id"] == "alpha-vantage-terms"), None)
+        if terms and terms.get("valid_provider_dataset") is True:
+            terms_manifest = paths["requests"]["alpha-vantage-terms"]["manifest"]
+            rights = {
+                "schema_version": 2,
+                "provider": "Alpha Vantage",
+                "run_id": run_id,
+                "terms_url": TERMS_URL,
+                "terms_source_hash": terms.get("response_sha256"),
+                "terms_capture_manifest_hash": hashlib.sha256(terms_manifest.read_bytes()).hexdigest().upper(),
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "review_scope": None,
+                "review_result": "manual_review_required",
+                "personal_noncommercial_confirmed": True,
+                "local_storage_permission": "manual_review_required",
+                "derived_analysis_permission": "manual_review_required",
+                "local_display_permission": "manual_review_required",
+                "public_display_permission": "not_authorized",
+                "expires_at": None,
+                "linked_response_hashes": [
+                    row["response_sha256"] for row in report["results"] if row.get("response_sha256")
+                ],
+                "parser_candidate": False,
+                "operational_eligible": False,
+            }
+            try:
+                _create_json_exclusive(paths["rights"], rights)
+            except BaseException as exc:
+                report["run_state"] = "failed"
+                report["failure_code"] = _failure_code(exc)
+                report["finished_at"] = _iso(_utc(effective_clock))
+                persist()
+                raise
+    return report
 
 
 def api_key_from_environment() -> str:

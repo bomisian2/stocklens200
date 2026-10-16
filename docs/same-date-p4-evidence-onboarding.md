@@ -37,8 +37,11 @@ The tracked `config/evidence-inventory-manifest-v1.json` declares every expected
 artifact and every known local Top10 exclusion. Any undeclared file is reported
 as `unclassified`; a missing, malformed, unreadable, future-dated, hash-mismatched,
 or unclassified artifact keeps `inventory_complete=false`. The inventory also
-hashes the complete Top10 filename/SHA set as `source_set_hash`; any later file
-addition, deletion, or byte change makes a persisted inventory `stale`.
+hashes the complete evidence source set as `source_set_hash`. That set includes
+the inventory contract, all Top10 files, declared private artifacts, provider
+raw/capture/run manifests, rights records, and normalized issuer evidence. The
+inventory output itself is excluded. Any later source addition, deletion, or
+byte change makes a persisted inventory `stale`.
 
 ## Evidence classes
 
@@ -74,19 +77,46 @@ Preview the exact request plan without a network call:
 .\.venv-personal\Scripts\python.exe scripts\collect_alpha_evidence.py --show-plan
 ```
 
-The collector is fail-closed and can execute only these five requests after a
+The collector is fail-closed and can execute only these five logical operations after a
 separate approval: the Alpha Vantage terms page; `TIME_SERIES_DAILY` for AVGO
 and NVDA; and `EARNINGS_ESTIMATES` for AVGO and NVDA. It permits exactly five
-calls, makes zero retries, accepts no user-provided endpoint/function/ticker,
+actual HTTP requests in total, makes zero retries, accepts no user-provided endpoint/function/ticker,
 and stores response bytes before any parser is allowed. API keys, query strings,
 provider response text, and exception text are excluded from console output and
 capture manifests.
+
+Every run acquires one global exclusive lock before network access. It then
+preflights every raw, partial, request-manifest, rights-manifest, and run-ledger
+path before the first request. Immutable bytes are stored below
+`private_data/raw/alpha_vantage/<run_id>/`; later PIT runs use a new run ID and
+never overwrite prior evidence. The run ledger is created atomically before
+the first request, increments `calls_attempted` immediately before each actual
+HTTP request, records `calls_completed` separately, and is finalized after
+success, failure, or interruption.
+
+Capture manifests record per-request `request_started_at`,
+`headers_received_at`, `response_completed_at`, and use the completion time as
+`available_at`. Automatic redirects are disabled. A 3xx response is followed
+only after its HTTPS Alpha Vantage Location is validated, and that follow-up
+counts against the same five-request budget.
+
+Terms bytes use the neutral name `terms-of-service.response.raw`; HTML and PDF
+media types are accepted. A missing, failed, or unexpected terms response
+stops all four data operations. Dataset validation rejects Alpha Vantage
+`Note`, `Information`, and `Error Message` envelopes, empty daily series,
+ticker mismatches, invalid OHLCV records, and estimate payloads without a
+period structure. Missing GAAP/non-GAAP basis remains `unknown` and cannot be a
+parser candidate.
 
 `TIME_SERIES_DAILY` is retained as raw, as-traded, unadjusted history. It cannot
 be promoted to adjusted long-term backtest evidence. Estimate accounting basis
 remains unknown unless the provider bytes state GAAP or non-GAAP explicitly.
 The generated rights manifest is hash-linked but remains
 `manual_review_required`; collection alone cannot create a parser candidate.
+Promotion additionally requires the current terms bytes and capture-manifest
+hashes plus `reviewed_by`, timezone-aware `reviewed_at`, explicit
+`review_scope`, `review_result=approved`, and a future `expires_at`. Self-written
+permission flags without this evidence fail closed.
 
 Execution syntax is documented for the post-QA approval step only:
 

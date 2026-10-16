@@ -369,6 +369,55 @@ def test_source_set_hash_detects_added_deleted_or_changed_files(tmp_path: Path) 
     assert stale["source_set_hash"] != report["source_set_hash"]
 
 
+@pytest.mark.parametrize(
+    ("relative", "payload"),
+    [
+        ("raw/alpha_vantage/new-run/AVGO_TIME_SERIES_DAILY.response.raw", b"raw"),
+        ("raw/alpha_vantage/new-run/AVGO_TIME_SERIES_DAILY.response.raw.manifest.json", b"{}"),
+        ("rights/alpha_vantage/new-run/provider-terms-manifest.json", b"{}"),
+        ("normalized/financials/NEW.json", b"{}"),
+    ],
+)
+def test_complete_source_set_detects_added_private_evidence(
+    tmp_path: Path, relative: str, payload: bytes,
+) -> None:
+    report, private_root, top10_root = _build(tmp_path)
+    path = private_root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    stale = validate_inventory_source_set(report, top10_root)
+    assert stale["inventory_status"] == "stale"
+    assert stale["source_set_hash"] != report["source_set_hash"]
+
+
+def test_complete_source_set_detects_manifest_change_and_top10_deletion(tmp_path: Path) -> None:
+    private_root, top10_root = _build_roots(tmp_path)
+    manifest = tmp_path / "inventory-manifest.json"
+    manifest.write_bytes(Path("config/evidence-inventory-manifest-v1.json").read_bytes())
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root,
+        top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+        inventory_manifest_path=manifest,
+    )
+    manifest.write_text(manifest.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert validate_inventory_source_set(report, top10_root)["inventory_status"] == "stale"
+    refreshed = build_p4_evidence_inventory(
+        private_data_root=private_root,
+        top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+        inventory_manifest_path=manifest,
+    )
+    (top10_root / "price-history.json").unlink()
+    assert validate_inventory_source_set(refreshed, top10_root)["inventory_status"] == "stale"
+
+
+def test_inventory_output_itself_is_excluded_from_source_set(tmp_path: Path) -> None:
+    report, private_root, top10_root = _build(tmp_path)
+    write_p4_inventory(report, private_data_root=private_root)
+    assert validate_inventory_source_set(report, top10_root)["inventory_status"] == "current"
+
+
 def test_volume_breakout_study_is_explicitly_excluded(tmp_path: Path) -> None:
     _, private_root, top10_root = _build(tmp_path)
     _write_json(top10_root / "volume-breakout-study.json", {"generatedAt": "2026-10-16T07:23:59Z"})
@@ -432,7 +481,7 @@ def test_provider_raw_is_discovered_but_not_parser_candidate_without_rights(tmp_
     assert report["provider_parser_eligible_count"] == 0
 
 
-def test_provider_raw_becomes_parser_candidate_only_after_all_checks(tmp_path: Path) -> None:
+def test_empty_dataset_and_self_declared_rights_cannot_create_parser_candidate(tmp_path: Path) -> None:
     _, private_root, top10_root = _build(tmp_path)
     raw = private_root / "raw" / "alpha_vantage" / "AVGO_TIME_SERIES_DAILY.response.raw"
     raw.parent.mkdir(parents=True, exist_ok=True)
@@ -440,25 +489,84 @@ def test_provider_raw_becomes_parser_candidate_only_after_all_checks(tmp_path: P
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
     _write_json(raw.with_suffix(raw.suffix + ".manifest.json"), {
         "provider": "Alpha Vantage", "function": "TIME_SERIES_DAILY", "ticker": "AVGO",
-        "captured_at": "2026-10-15T20:00:00Z", "http_status": 200,
+        "request_started_at": "2026-10-15T19:59:58Z",
+        "headers_received_at": "2026-10-15T19:59:59Z",
+        "response_completed_at": "2026-10-15T20:00:00Z",
+        "available_at": "2026-10-15T20:00:00Z", "http_status": 200,
         "final_url": "https://www.alphavantage.co/query", "content_type": "application/json",
         "byte_length": len(raw.read_bytes()), "response_sha256": digest, "capture_state": "captured",
+        "valid_provider_dataset": True,
+    })
+    terms = private_root / "raw/alpha_vantage/terms-of-service.response.raw"
+    terms.write_bytes(b"<html>terms</html>")
+    terms_digest = hashlib.sha256(terms.read_bytes()).hexdigest()
+    terms_capture = terms.with_suffix(terms.suffix + ".manifest.json")
+    _write_json(terms_capture, {
+        "provider": "Alpha Vantage", "function": None, "ticker": None,
+        "request_started_at": "2026-10-15T19:59:50Z",
+        "headers_received_at": "2026-10-15T19:59:51Z",
+        "response_completed_at": "2026-10-15T19:59:52Z",
+        "available_at": "2026-10-15T19:59:52Z", "http_status": 200,
+        "final_url": "https://www.alphavantage.co/terms_of_service/", "content_type": "text/html",
+        "byte_length": len(terms.read_bytes()), "response_sha256": terms_digest,
+        "capture_state": "captured", "valid_provider_dataset": True,
     })
     _write_json(private_root / "rights" / "provider-terms-manifest.json", {
         "personal_noncommercial_confirmed": True,
         "local_storage_permission": "allowed",
         "derived_analysis_permission": "allowed",
         "local_display_permission": "allowed",
-        "linked_response_hashes": [digest],
+        "terms_source_hash": terms_digest,
+        "terms_capture_manifest_hash": hashlib.sha256(terms_capture.read_bytes()).hexdigest(),
+        "linked_response_hashes": [terms_digest, digest],
     })
     report = build_p4_evidence_inventory(
         private_data_root=private_root, top10_data_root=top10_root,
         inspected_at="2026-10-16T08:00:00Z",
     )
     row = next(item for item in report["artifacts"] if item["artifact_id"] == "alpha-avgo-daily-raw")
-    assert row["classification"] == "parser_candidate"
-    assert row["parser_eligible"] is True
-    assert report["provider_parser_eligible_count"] == 1
+    assert row["classification"] == "discovered_unverified"
+    assert row["parser_eligible"] is False
+    assert row["candidate_checks"]["valid_provider_dataset"] is False
+    assert row["candidate_checks"]["rights_scope"] is False
+    assert row["rights_review_checks"]["terms_source_hash"] is True
+    assert row["rights_review_checks"]["terms_capture_manifest_hash"] is True
+    assert row["rights_review_checks"]["reviewed_by"] is False
+    assert row["rights_review_checks"]["review_result"] is False
+    assert report["provider_parser_eligible_count"] == 0
+
+
+def test_provider_response_completed_after_decision_time_is_blocked(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    raw = private_root / "raw" / "alpha_vantage" / "AVGO_TIME_SERIES_DAILY.response.raw"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(json.dumps({
+        "Meta Data": {"2. Symbol": "AVGO"},
+        "Time Series (Daily)": {
+            "2026-10-13": {
+                "1. open": "100", "2. high": "102", "3. low": "99",
+                "4. close": "101", "5. volume": "1000",
+            }
+        },
+    }), encoding="utf-8")
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    _write_json(raw.with_suffix(raw.suffix + ".manifest.json"), {
+        "provider": "Alpha Vantage", "function": "TIME_SERIES_DAILY", "ticker": "AVGO",
+        "request_started_at": "2026-10-16T07:59:58Z",
+        "headers_received_at": "2026-10-16T07:59:59Z",
+        "response_completed_at": "2026-10-16T08:00:01Z",
+        "available_at": "2026-10-16T08:00:01Z",
+        "http_status": 200, "final_url": "https://www.alphavantage.co/query",
+        "content_type": "application/json", "byte_length": len(raw.read_bytes()),
+        "response_sha256": digest, "capture_state": "captured", "valid_provider_dataset": True,
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:01:00Z", decision_time="2026-10-16T08:00:00Z",
+    )
+    row = next(item for item in report["artifacts"] if item["artifact_id"] == "alpha-avgo-daily-raw")
+    assert row["candidate_checks"]["request_response_timestamps"] is False
+    assert row["parser_eligible"] is False
 
 
 def test_private_root_name_is_fail_closed(tmp_path: Path) -> None:

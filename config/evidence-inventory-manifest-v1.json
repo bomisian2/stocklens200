@@ -2,8 +2,8 @@
   "manifest_version": "evidence-inventory-manifest-v1",
   "allowed_formats": ["csv", "json", "raw", "html"],
   "artifacts": [
-    {"artifact_id": "alpha-terms-raw", "root": "private_data", "path": "raw/alpha_vantage/terms-of-service.html", "format": "html", "classification": "supporting_only", "required": true, "purpose": "Alpha Vantage terms bytes captured for local rights review", "provider_native": {"kind": "response_bytes", "function": null, "ticker": null, "basis": "terms_text", "target_roles": [], "capture_manifest_artifact_id": "alpha-terms-capture"}},
-    {"artifact_id": "alpha-terms-capture", "root": "private_data", "path": "raw/alpha_vantage/terms-of-service.html.manifest.json", "format": "json", "classification": "supporting_only", "required": true, "purpose": "redacted Alpha Vantage terms response metadata"},
+    {"artifact_id": "alpha-terms-raw", "root": "private_data", "path": "raw/alpha_vantage/terms-of-service.response.raw", "format": "raw", "classification": "supporting_only", "required": true, "purpose": "legacy fixed-path Alpha Vantage terms bytes; new captures use immutable run directories", "provider_native": {"kind": "response_bytes", "function": null, "ticker": null, "basis": "terms_text", "target_roles": [], "capture_manifest_artifact_id": "alpha-terms-capture"}},
+    {"artifact_id": "alpha-terms-capture", "root": "private_data", "path": "raw/alpha_vantage/terms-of-service.response.raw.manifest.json", "format": "json", "classification": "supporting_only", "required": true, "purpose": "legacy fixed-path redacted terms metadata; new captures use immutable run directories"},
     {"artifact_id": "alpha-avgo-daily-raw", "root": "private_data", "path": "raw/alpha_vantage/AVGO_TIME_SERIES_DAILY.response.raw", "format": "raw", "classification": "supporting_only", "required": true, "purpose": "provider-native AVGO unadjusted daily response bytes", "provider_native": {"kind": "response_bytes", "function": "TIME_SERIES_DAILY", "ticker": "AVGO", "basis": "raw_as_traded_unadjusted", "target_roles": ["daily_price"], "capture_manifest_artifact_id": "alpha-avgo-daily-capture"}},
     {"artifact_id": "alpha-avgo-daily-capture", "root": "private_data", "path": "raw/alpha_vantage/AVGO_TIME_SERIES_DAILY.response.raw.manifest.json", "format": "json", "classification": "supporting_only", "required": true, "purpose": "redacted AVGO daily response metadata"},
     {"artifact_id": "alpha-nvda-daily-raw", "root": "private_data", "path": "raw/alpha_vantage/NVDA_TIME_SERIES_DAILY.response.raw", "format": "raw", "classification": "supporting_only", "required": true, "purpose": "provider-native NVDA unadjusted daily response bytes", "provider_native": {"kind": "response_bytes", "function": "TIME_SERIES_DAILY", "ticker": "NVDA", "basis": "raw_as_traded_unadjusted", "target_roles": ["daily_price"], "capture_manifest_artifact_id": "alpha-nvda-daily-capture"}},
@@ -36,6 +36,18 @@
     {"artifact_id": "top10-valuation-scenarios", "root": "top10_data", "path": "valuation-scenarios.json", "format": "json", "classification": "derived_only", "required": true, "purpose": "derived research scenarios"},
     {"artifact_id": "independent-forward-multiples", "root": "private_data", "path": "decision/independent-forward-multiples.json", "format": "json", "classification": "supporting_only", "required": true, "purpose": "same-basis QQQ SOXX and peer forward multiple evidence"},
     {"artifact_id": "usage-rights-manifest", "root": "private_data", "path": "rights/provider-terms-manifest.json", "format": "json", "classification": "supporting_only", "required": true, "purpose": "hash-linked provider rights evidence"}
+  ],
+  "dynamic_provider_runs": [
+    {
+      "provider": "Alpha Vantage",
+      "root": "private_data",
+      "path_prefix": "raw/alpha_vantage/<run_id>/",
+      "immutable_raw_name_suffix": ".response.raw",
+      "request_manifest_suffix": ".response.raw.manifest.json",
+      "run_manifest_name": "collection-run.json",
+      "rights_path_prefix": "rights/alpha_vantage/<run_id>/",
+      "automatic_promotion": false
+    }
   ],
   "known_exclusions": [
     {"path": "audit-report.json", "reason": "application audit output, not Same-Date source evidence"},

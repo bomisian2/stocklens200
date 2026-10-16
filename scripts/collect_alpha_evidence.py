@@ -29,7 +29,12 @@ def main() -> int:
     parser.add_argument("--confirm-personal-noncommercial", action="store_true")
     args = parser.parse_args()
     if args.show_plan and not args.execute:
-        print(json.dumps({"requests": exact_request_plan(), "maximum_calls": MAX_CALLS}, ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "logical_operations": exact_request_plan(),
+            "maximum_actual_http_requests": MAX_CALLS,
+            "automatic_retries": 0,
+            "execution_approved": False,
+        }, ensure_ascii=False, indent=2))
         return 0
     if not args.execute:
         parser.error("use --show-plan for a zero-call preview or --execute for an approved run")
@@ -50,8 +55,12 @@ def main() -> int:
         return 2
     print(json.dumps({
         "run_id": report["run_id"],
-        "calls_made": report["calls_made"],
+        "calls_attempted": report["calls_attempted"],
+        "calls_completed": report["calls_completed"],
+        "actual_http_request_budget": report["approved_actual_http_request_budget"],
         "automatic_retries": report["automatic_retries"],
+        "run_state": report["run_state"],
+        "failure_code": report["failure_code"],
         "parser_attempted": report["parser_attempted"],
         "decision_created": report["decision_created"],
     }, ensure_ascii=False))
