@@ -415,7 +415,7 @@ def _evidence_source_set(
         path = _resolved_child(private_root, str(spec["path"]), label=f"artifact {spec['artifact_id']}")
         if path.is_file():
             candidates[path.resolve(strict=True)] = f"private_data/{path.relative_to(private_root).as_posix()}"
-    for relative_root in (Path("raw"), Path("rights"), Path("normalized/financials")):
+    for relative_root in (Path("raw"), Path("rights"), Path("normalized/financials"), Path("decision")):
         directory = private_root / relative_root
         if not directory.is_dir():
             continue
@@ -762,6 +762,18 @@ def _discover_private_provider_artifacts(
     }
     results: list[dict[str, Any]] = []
     base = private_root.resolve(strict=True)
+    adjudications: dict[str, dict[str, Any]] = {}
+    decision_root = private_root / "decision"
+    if decision_root.is_dir():
+        for path in decision_root.glob("alpha-vantage-adjudication-*.json"):
+            value = _read_json(path)
+            run_id = str(value.get("run_id") or "")
+            if run_id and value.get("adjudication_version") == "alpha-vantage-collection-adjudication-p4.3-v1":
+                adjudications[run_id] = {
+                    "value": value,
+                    "path": path,
+                    "source_hash": _sha256(path),
+                }
     for relative_root in (Path("raw/alpha_vantage"), Path("raw/nasdaq_consensus")):
         directory = private_root / relative_root
         if not directory.is_dir():
@@ -782,18 +794,69 @@ def _discover_private_provider_artifacts(
                 target_roles = ["daily_price"]
             elif "EARNINGS_ESTIMATES.RESPONSE.RAW" in filename:
                 target_roles = ["forward_eps"]
+            is_raw = path.name.lower().endswith(".response.raw")
+            classification = "supporting_only" if not is_raw else "discovered_unverified"
+            reason = (
+                "dynamic provider run metadata; never promoted automatically"
+                if not is_raw else
+                "provider bytes were discovered but rights and parser eligibility are not approved"
+            )
+            valid_provider_dataset: bool | None = None
+            adjudication_status: str | None = None
+            adjudication_hash: str | None = None
+            counts_toward_required = False
+            if is_raw:
+                capture_path = path.with_suffix(path.suffix + ".manifest.json")
+                capture = _read_json(capture_path) if capture_path.is_file() else None
+                integrity_ok = bool(
+                    isinstance(capture, dict)
+                    and str(capture.get("response_sha256") or "").upper() == _sha256(path)
+                    and capture.get("byte_length") == path.stat().st_size
+                )
+                valid_provider_dataset = bool(
+                    integrity_ok and isinstance(capture, dict)
+                    and capture.get("valid_provider_dataset") is True
+                    and capture.get("capture_state") == "captured"
+                )
+                run_id = path.parent.name
+                adjudication = adjudications.get(run_id)
+                if adjudication:
+                    ledger_path = path.parent / "collection-run.json"
+                    linked_ledger = (adjudication["value"].get("collection_run") or {})
+                    ledger_ok = bool(
+                        ledger_path.is_file()
+                        and str(linked_ledger.get("source_hash") or "").upper() == _sha256(ledger_path)
+                    )
+                    matching = [
+                        row for row in adjudication["value"].get("requests", [])
+                        if isinstance(row, dict)
+                        and row.get("source_relative_path") == relative
+                        and str(row.get("source_hash") or "").upper() == _sha256(path)
+                    ]
+                    if ledger_ok and len(matching) == 1:
+                        adjudication_status = str(matching[0].get("adjudication") or "")
+                        adjudication_hash = adjudication["source_hash"]
+                if adjudication_status == "invalid_provider_dataset" or not valid_provider_dataset:
+                    classification = "invalid_provider_dataset"
+                    reason = "provider response is an invalid dataset; adjudicated restriction is rate-or-plan related"
+                else:
+                    counts_toward_required = bool(target_roles)
             results.append({
                 "relative_path": relative,
                 "path": str(resolved),
                 "source_hash": _sha256(path),
                 "bytes": path.stat().st_size,
-                "classification": "discovered_unverified",
-                "provider_native_raw_exists": path.name.lower().endswith(".response.raw"),
+                "classification": classification,
+                "provider_native_raw_exists": is_raw,
                 "ticker": ticker,
                 "target_roles": target_roles,
+                "valid_provider_dataset": valid_provider_dataset,
+                "counts_toward_same_date_required_raw": counts_toward_required,
+                "adjudication": adjudication_status,
+                "adjudication_source_hash": adjudication_hash,
                 "parser_eligible": False,
                 "promotion_eligible": False,
-                "reason": "provider artifact was discovered but is not declared and verified by the manifest",
+                "reason": reason,
             })
     return results
 
@@ -859,7 +922,9 @@ def build_p4_evidence_inventory(
     ]
     discovered_target_native = [
         row for row in discovered_provider
-        if row.get("provider_native_raw_exists") is True and row.get("target_roles")
+        if row.get("provider_native_raw_exists") is True
+        and row.get("target_roles")
+        and row.get("counts_toward_same_date_required_raw") is True
     ]
     target_native = [*declared_target_native, *discovered_target_native]
     parser_candidates = [row for row in target_native if row.get("parser_eligible") is True]
@@ -907,6 +972,9 @@ def build_p4_evidence_inventory(
         "same_date_target_provider_native_raw_count": len(target_native),
         "supporting_provider_native_raw_count": len(supporting_native),
         "provider_parser_eligible_count": len(parser_candidates),
+        "invalid_provider_dataset_count": sum(
+            row.get("classification") == "invalid_provider_dataset" for row in discovered_provider
+        ),
         "provider_parsers_implemented": [], "status": "blocked",
         "block_stage": "provider_native_evidence_inventory",
         "block_reason": "required Same-Date target provider-native bytes and rights evidence are not complete",

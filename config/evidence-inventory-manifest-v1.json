@@ -57,6 +57,7 @@
     {"path": "crash-opportunity-snapshot.json", "reason": "separate crash-study output"},
     {"path": "crash-price-snapshot.json", "reason": "separate crash-study price output"},
     {"path": "event-snapshot.json", "reason": "general event display data outside P4 evidence roles"},
+    {"path": "earnings-quality-evidence.json", "reason": "separate earnings-quality research output; not provider-native Same-Date evidence"},
     {"path": "industry-map.json", "reason": "static industry mapping, not dated decision evidence"},
     {"path": "refresh-errors.json", "reason": "pipeline diagnostics, not source evidence"},
     {"path": "short-signal-archive.json", "reason": "separate short-signal research output"},

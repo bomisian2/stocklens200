@@ -430,6 +430,81 @@ def test_volume_breakout_study_is_explicitly_excluded(tmp_path: Path) -> None:
     assert any(Path(row["path"]).name == "volume-breakout-study.json" for row in report["explicitly_excluded_artifacts"])
 
 
+def test_earnings_quality_evidence_is_explicitly_excluded(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    _write_json(top10_root / "earnings-quality-evidence.json", {"generatedAt": "2026-10-16T07:23:59Z"})
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    assert report["unclassified_artifact_count"] == 0
+    excluded = next(
+        row for row in report["explicitly_excluded_artifacts"]
+        if Path(row["path"]).name == "earnings-quality-evidence.json"
+    )
+    assert "earnings-quality" in excluded["reason"]
+
+
+def test_invalid_dynamic_provider_envelopes_do_not_count_as_required_raw(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    run_root = private_root / "raw/alpha_vantage/run-one"
+    run_root.mkdir(parents=True)
+    rows = []
+    for ticker, function, valid in (
+        ("AVGO", "TIME_SERIES_DAILY", True),
+        ("NVDA", "TIME_SERIES_DAILY", False),
+        ("AVGO", "EARNINGS_ESTIMATES", False),
+        ("NVDA", "EARNINGS_ESTIMATES", False),
+    ):
+        name = f"{ticker}_{function}.response.raw"
+        raw = run_root / name
+        payload = (
+            json.dumps({
+                "Meta Data": {"2. Symbol": ticker},
+                "Time Series (Daily)": {
+                    "2026-10-15": {
+                        "1. open": "1", "2. high": "2", "3. low": "1",
+                        "4. close": "2", "5. volume": "100",
+                    }
+                },
+            }).encode()
+            if valid else b'{"Information":"not persisted in inventory"}'
+        )
+        raw.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest().upper()
+        capture = {
+            "response_sha256": digest, "byte_length": len(payload),
+            "capture_state": "captured" if valid else "invalid_provider_dataset",
+            "valid_provider_dataset": valid,
+        }
+        _write_json(raw.with_suffix(raw.suffix + ".manifest.json"), capture)
+        request_id = f"{ticker.lower()}-{'daily' if function == 'TIME_SERIES_DAILY' else 'estimates'}"
+        rows.append({
+            "request_id": request_id, "source_relative_path": raw.relative_to(private_root).as_posix(),
+            "source_hash": digest,
+            "adjudication": "captured_unadjusted_daily" if valid else "invalid_provider_dataset",
+        })
+    _write_json(run_root / "collection-run.json", {"run_id": "run-one"})
+    ledger_hash = hashlib.sha256((run_root / "collection-run.json").read_bytes()).hexdigest().upper()
+    _write_json(private_root / "decision/alpha-vantage-adjudication-run-one.json", {
+        "adjudication_version": "alpha-vantage-collection-adjudication-p4.3-v1",
+        "run_id": "run-one", "collection_run": {"source_hash": ledger_hash}, "requests": rows,
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T14:00:00Z",
+    )
+    assert report["same_date_target_provider_native_raw_count"] == 1
+    assert report["invalid_provider_dataset_count"] == 3
+    assert report["provider_parser_eligible_count"] == 0
+    found = {
+        row["relative_path"]: row for row in report["discovered_provider_native_evidence"]
+        if row["provider_native_raw_exists"]
+    }
+    assert found["raw/alpha_vantage/run-one/AVGO_TIME_SERIES_DAILY.response.raw"]["classification"] == "discovered_unverified"
+    assert found["raw/alpha_vantage/run-one/NVDA_TIME_SERIES_DAILY.response.raw"]["classification"] == "invalid_provider_dataset"
+
+
 def test_record_timestamp_counts_future_and_missing_target_records(tmp_path: Path) -> None:
     _, private_root, top10_root = _build(tmp_path)
     _write_json(top10_root / "top100-consensus-history.json", {
