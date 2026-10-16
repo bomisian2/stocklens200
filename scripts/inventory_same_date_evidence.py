@@ -11,25 +11,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stocklens.personal.evidence_inventory import (  # noqa: E402
     EvidenceInventoryError,
     build_p4_evidence_inventory,
+    resolve_repository_private_data,
+    validate_inventory_source_set,
     write_p4_inventory,
 )
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Inventory local Same-Date evidence without network access or promotion"
     )
-    parser.add_argument("--private-data-root", required=True)
     parser.add_argument("--top10-data-root", required=True)
     parser.add_argument("--inspected-at", required=True)
+    parser.add_argument("--decision-time")
     args = parser.parse_args()
     try:
+        private_data_root = resolve_repository_private_data(REPOSITORY_ROOT)
         report = build_p4_evidence_inventory(
-            private_data_root=args.private_data_root,
+            private_data_root=private_data_root,
             top10_data_root=args.top10_data_root,
             inspected_at=args.inspected_at,
+            decision_time=args.decision_time,
         )
-        output = write_p4_inventory(report, private_data_root=args.private_data_root)
+        freshness = validate_inventory_source_set(report, args.top10_data_root)
+        if freshness["inventory_status"] != "current":
+            raise EvidenceInventoryError("Top10 source set changed before inventory write")
+        output = write_p4_inventory(report, private_data_root=private_data_root)
     except (OSError, EvidenceInventoryError) as exc:
         print(f"same-date evidence inventory failed: {exc}", file=sys.stderr)
         return 2
@@ -42,6 +52,8 @@ def main() -> int:
         "inspected_artifact_count": report["inspected_artifact_count"],
         "missing_artifact_count": report["missing_artifact_count"],
         "unclassified_artifact_count": report["unclassified_artifact_count"],
+        "source_set_hash": report["source_set_hash"],
+        "inventory_status": report["inventory_status"],
         "network_calls_observed_in_this_run": report["network_calls_observed_in_this_run"],
         "decisions_created_in_this_run": report["decisions_created_in_this_run"],
     }, ensure_ascii=False))

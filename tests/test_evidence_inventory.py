@@ -12,6 +12,8 @@ from stocklens.personal.evidence_inventory import (
     DEFAULT_OUTPUT_NAME,
     EvidenceInventoryError,
     build_p4_evidence_inventory,
+    resolve_repository_private_data,
+    validate_inventory_source_set,
     write_p4_inventory,
 )
 
@@ -69,9 +71,10 @@ def test_inventory_remains_blocked_and_reports_execution_not_global_history(tmp_
 def test_manifest_completeness_and_unknown_file_detection(tmp_path: Path) -> None:
     report, _, top10_root = _build(tmp_path)
     assert report["manifest_version"] == "evidence-inventory-manifest-v1"
-    assert report["expected_artifact_count"] == 22
+    assert report["expected_artifact_count"] == 34
     assert report["inspected_artifact_count"] == 7
-    assert report["missing_artifact_count"] == 15
+    assert report["missing_artifact_count"] == 25
+    assert report["optional_missing_artifact_count"] == 2
     _write_json(top10_root / "new-forward-eps-source.json", {"generatedAt": "2026-10-15T20:00:00Z"})
     refreshed = build_p4_evidence_inventory(
         private_data_root=tmp_path / "private_data", top10_data_root=top10_root,
@@ -190,7 +193,53 @@ def test_issuer_wording_and_raw_count_follow_actual_hash_link(tmp_path: Path) ->
     assert report["provider_native_raw_count"] == 2
     assert rows["AVGO"]["official_issuer_origin_independently_verified"] is False
     assert rows["AVGO"]["source"] == "AVGO issuer-release supporting evidence distributed by PR Newswire"
-    assert rows["NVDA"]["official_issuer_origin_independently_verified"] is True
+    assert rows["NVDA"]["official_issuer_origin_independently_verified"] is False
+
+
+def test_forged_distribution_text_cannot_verify_official_issuer_origin(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    raw = private_root / "raw" / "NVDA_report.pdf"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"issuer bytes")
+    _write_json(private_root / "normalized" / "financials" / "NVDA.json", {
+        "documents": [{
+            "distribution": "NVIDIA official investor relations",
+            "source_url": "https://attacker.example/nvda",
+            "final_url": "https://attacker.example/nvda",
+            "period_end": "2026-07-26",
+            "published_at": "2026-08-26T16:20:00-04:00",
+            "sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        }],
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    evidence = report["supporting_provider_native_evidence"][0]
+    assert evidence["official_issuer_origin_independently_verified"] is False
+
+
+def test_verified_official_issuer_requires_source_and_final_official_domains(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    raw = private_root / "raw" / "NVDA_report.pdf"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"issuer bytes")
+    _write_json(private_root / "normalized" / "financials" / "NVDA.json", {
+        "documents": [{
+            "distribution": "arbitrary display text",
+            "source_url": "https://investor.nvidia.com/financial-info/default.aspx",
+            "final_url": "https://investor.nvidia.com/financial-info/default.aspx",
+            "period_end": "2026-07-26",
+            "published_at": "2026-08-26T16:20:00-04:00",
+            "sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        }],
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    evidence = report["supporting_provider_native_evidence"][0]
+    assert evidence["official_issuer_origin_independently_verified"] is True
 
 
 def test_normal_private_output_succeeds(tmp_path: Path) -> None:
@@ -256,3 +305,181 @@ def test_invalid_inspection_timestamp_is_blocked(tmp_path: Path) -> None:
         build_p4_evidence_inventory(
             private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16",
         )
+
+
+@pytest.mark.parametrize("bad_path", ["../escape.json", "/absolute.json", "C:/escape.json"])
+def test_manifest_artifact_path_escape_is_blocked(tmp_path: Path, bad_path: str) -> None:
+    private_root, top10_root = _build_roots(tmp_path)
+    manifest = json.loads(Path("config/evidence-inventory-manifest-v1.json").read_text(encoding="utf-8"))
+    manifest["artifacts"][0]["path"] = bad_path
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, manifest)
+    with pytest.raises(EvidenceInventoryError, match="must not be absolute|portable relative"):
+        build_p4_evidence_inventory(
+            private_data_root=private_root,
+            top10_data_root=top10_root,
+            inspected_at="2026-10-16T08:00:00Z",
+            inventory_manifest_path=manifest_path,
+        )
+
+
+def test_known_exclusion_path_escape_is_blocked(tmp_path: Path) -> None:
+    private_root, top10_root = _build_roots(tmp_path)
+    manifest = json.loads(Path("config/evidence-inventory-manifest-v1.json").read_text(encoding="utf-8"))
+    manifest["known_exclusions"][0]["path"] = "../escape.json"
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, manifest)
+    with pytest.raises(EvidenceInventoryError, match="must not be absolute"):
+        build_p4_evidence_inventory(
+            private_data_root=private_root,
+            top10_data_root=top10_root,
+            inspected_at="2026-10-16T08:00:00Z",
+            inventory_manifest_path=manifest_path,
+        )
+
+
+def test_manifest_artifact_symlink_escape_is_blocked(tmp_path: Path) -> None:
+    private_root, top10_root = _build_roots(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "terms.html").write_text("terms", encoding="utf-8")
+    try:
+        os.symlink(outside, private_root / "escape", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    manifest = json.loads(Path("config/evidence-inventory-manifest-v1.json").read_text(encoding="utf-8"))
+    manifest["artifacts"][0]["path"] = "escape/terms.html"
+    manifest_path = tmp_path / "manifest.json"
+    _write_json(manifest_path, manifest)
+    with pytest.raises(EvidenceInventoryError, match="resolves outside"):
+        build_p4_evidence_inventory(
+            private_data_root=private_root,
+            top10_data_root=top10_root,
+            inspected_at="2026-10-16T08:00:00Z",
+            inventory_manifest_path=manifest_path,
+        )
+
+
+def test_source_set_hash_detects_added_deleted_or_changed_files(tmp_path: Path) -> None:
+    report, _, top10_root = _build(tmp_path)
+    assert validate_inventory_source_set(report, top10_root)["inventory_status"] == "current"
+    _write_json(top10_root / "volume-breakout-study.json", {"generatedAt": "2026-10-16T07:23:59Z"})
+    stale = validate_inventory_source_set(report, top10_root)
+    assert stale["inventory_status"] == "stale"
+    assert stale["source_set_hash"] != report["source_set_hash"]
+
+
+def test_volume_breakout_study_is_explicitly_excluded(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    _write_json(top10_root / "volume-breakout-study.json", {"generatedAt": "2026-10-16T07:23:59Z"})
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root,
+        top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    assert report["unclassified_artifact_count"] == 0
+    assert any(Path(row["path"]).name == "volume-breakout-study.json" for row in report["explicitly_excluded_artifacts"])
+
+
+def test_record_timestamp_counts_future_and_missing_target_records(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    _write_json(top10_root / "top100-consensus-history.json", {
+        "generatedAt": "2026-10-15T22:00:00Z",
+        "observations": [
+            {"ticker": "AVGO", "collectedAt": "2026-10-17T00:00:00Z"},
+            {"ticker": "NVDA", "collectedAt": None},
+        ],
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root,
+        top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+        decision_time="2026-10-16T07:00:00Z",
+    )
+    row = next(item for item in report["artifacts"] if item["artifact_id"] == "top10-consensus-history")
+    validation = row["record_timestamp_validation"]
+    assert validation["future_timestamp_count"] == 1
+    assert validation["missing_timestamp_count"] == 1
+    assert validation["affected_tickers"] == ["AVGO", "NVDA"]
+
+
+def test_provider_raw_is_discovered_but_not_parser_candidate_without_rights(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    raw = private_root / "raw" / "alpha_vantage" / "AVGO_TIME_SERIES_DAILY.response.raw"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b'{"Time Series (Daily)": {}}')
+    _write_json(raw.with_suffix(raw.suffix + ".manifest.json"), {
+        "provider": "Alpha Vantage",
+        "function": "TIME_SERIES_DAILY",
+        "ticker": "AVGO",
+        "captured_at": "2026-10-15T20:00:00Z",
+        "http_status": 200,
+        "final_url": "https://www.alphavantage.co/query",
+        "content_type": "application/json",
+        "byte_length": len(raw.read_bytes()),
+        "response_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        "capture_state": "captured",
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    row = next(item for item in report["artifacts"] if item["artifact_id"] == "alpha-avgo-daily-raw")
+    assert row["classification"] == "discovered_unverified"
+    assert row["provider_native_raw_exists"] is True
+    assert row["parser_eligible"] is False
+    assert report["same_date_target_provider_native_raw_count"] == 1
+    assert report["provider_parser_eligible_count"] == 0
+
+
+def test_provider_raw_becomes_parser_candidate_only_after_all_checks(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    raw = private_root / "raw" / "alpha_vantage" / "AVGO_TIME_SERIES_DAILY.response.raw"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b'{"Time Series (Daily)": {}}')
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    _write_json(raw.with_suffix(raw.suffix + ".manifest.json"), {
+        "provider": "Alpha Vantage", "function": "TIME_SERIES_DAILY", "ticker": "AVGO",
+        "captured_at": "2026-10-15T20:00:00Z", "http_status": 200,
+        "final_url": "https://www.alphavantage.co/query", "content_type": "application/json",
+        "byte_length": len(raw.read_bytes()), "response_sha256": digest, "capture_state": "captured",
+    })
+    _write_json(private_root / "rights" / "provider-terms-manifest.json", {
+        "personal_noncommercial_confirmed": True,
+        "local_storage_permission": "allowed",
+        "derived_analysis_permission": "allowed",
+        "local_display_permission": "allowed",
+        "linked_response_hashes": [digest],
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
+    )
+    row = next(item for item in report["artifacts"] if item["artifact_id"] == "alpha-avgo-daily-raw")
+    assert row["classification"] == "parser_candidate"
+    assert row["parser_eligible"] is True
+    assert report["provider_parser_eligible_count"] == 1
+
+
+def test_private_root_name_is_fail_closed(tmp_path: Path) -> None:
+    wrong_root = tmp_path / "not-private"
+    wrong_root.mkdir()
+    top10 = tmp_path / "top10"
+    top10.mkdir()
+    with pytest.raises(EvidenceInventoryError, match="named private_data"):
+        build_p4_evidence_inventory(
+            private_data_root=wrong_root,
+            top10_data_root=top10,
+            inspected_at="2026-10-16T08:00:00Z",
+        )
+
+
+def test_repository_private_root_rejects_non_repository_external_root(tmp_path: Path) -> None:
+    with pytest.raises(EvidenceInventoryError, match="verified Git repository"):
+        resolve_repository_private_data(tmp_path, require_exists=False)
+
+
+def test_inventory_cli_has_no_private_data_root_override() -> None:
+    source = Path("scripts/inventory_same_date_evidence.py").read_text(encoding="utf-8")
+    assert "--private-data-root" not in source
+    assert "resolve_repository_private_data(REPOSITORY_ROOT)" in source
