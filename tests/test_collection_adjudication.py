@@ -61,11 +61,19 @@ def _terms_pdf(*, include_clauses: bool = True) -> bytes:
     writer = PdfWriter()
     _pdf_page(
         writer,
-        "TERMS OF SERVICE\nAlpha Vantage personal, non-commercial use"
-        + (" and use restrictions" if include_clauses else ""),
+        "TERMS OF SERVICE\nAlpha Vantage\n2. Grant of License.\n"
+        + ("For personal, non-commercial use." if include_clauses else "General license terms."),
     )
-    _pdf_page(writer, "Alpha Vantage assignment and transfer clause" if include_clauses else "Alpha Vantage")
-    _pdf_page(writer, "Alpha Vantage termination and prohibited use" if include_clauses else "Alpha Vantage")
+    _pdf_page(
+        writer,
+        "Alpha Vantage\n4. Use Restrictions.\n15. Assignment."
+        if include_clauses else "Alpha Vantage",
+    )
+    _pdf_page(
+        writer,
+        "Alpha Vantage\n7. Termination."
+        if include_clauses else "Alpha Vantage",
+    )
     output = io.BytesIO()
     writer.write(output)
     return output.getvalue()
@@ -170,6 +178,7 @@ def test_avgo_daily_limits_and_terms_permissions_are_fail_closed(
     assert len(terms["terms_document"]["page_text_sha256"]) == 3
     assert terms["terms_document"]["document_title"] == "TERMS OF SERVICE"
     assert terms["terms_document"]["document_title_verified"] is True
+    assert terms["clause_detection_version"] == "alpha-vantage-terms-heading-context-v1"
     assert terms["reviewed_by"] is terms["reviewed_at"] is None
     assert terms["scope_assessments"]["local_storage"]["status"] == "manual_review_required"
     assert terms["scope_assessments"]["public_display"]["status"] == "not_authorized"
@@ -186,6 +195,26 @@ def test_terms_pdf_uses_actual_pages_hashes_and_clauses(tmp_path: Path) -> None:
     missing = validate_terms_bytes(_terms_pdf(include_clauses=False), "application/pdf")
     assert missing["valid_provider_dataset"] is False
     assert missing["terms_inspection"]["clauses"]["termination"]["status"] == "missing"
+
+
+def test_terms_clause_detection_rejects_incidental_disclaimer_words() -> None:
+    writer = PdfWriter()
+    _pdf_page(
+        writer,
+        "TERMS OF SERVICE\nAlpha Vantage\n2. Grant of License.\n"
+        "For personal, non-commercial use.",
+    )
+    _pdf_page(
+        writer,
+        "Alpha Vantage\nExcept where prohibited by law.\nSuccessors and assigns may benefit.",
+    )
+    output = io.BytesIO()
+    writer.write(output)
+    inspection = validate_terms_bytes(output.getvalue(), "application/pdf")["terms_inspection"]
+    assert inspection["clause_detection_version"] == "alpha-vantage-terms-heading-context-v1"
+    assert inspection["clauses"]["use_restrictions"]["status"] == "missing"
+    assert inspection["clauses"]["assignment_or_transfer"]["status"] == "missing"
+    assert inspection["clauses"]["termination"]["status"] == "missing"
 
 
 @pytest.mark.parametrize(

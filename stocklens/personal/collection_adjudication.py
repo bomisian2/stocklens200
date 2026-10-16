@@ -257,6 +257,7 @@ def build_terms_review_packet(
         "provider": "Alpha Vantage",
         "run_id": run_id,
         "generated_at": _iso_timestamp(generated_at),
+        "clause_detection_version": inspection["clause_detection_version"],
         "terms_document": {
             "relative_path": f"raw/alpha_vantage/{run_id}/{terms_path.name}",
             "pdf_sha256": _sha256(terms_path),

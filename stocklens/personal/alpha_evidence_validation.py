@@ -21,6 +21,7 @@ ERROR_ENVELOPE_KEYS = ("Note", "Information", "Error Message")
 JSON_CONTENT_TYPES = {"application/json", "text/json"}
 TERMS_CONTENT_TYPES = {"application/pdf"}
 PROVIDER_RESTRICTION_RULE_VERSION = "alpha-vantage-error-semantics-v1"
+TERMS_CLAUSE_DETECTION_VERSION = "alpha-vantage-terms-heading-context-v1"
 
 
 def _normalized_text(value: str) -> str:
@@ -29,6 +30,13 @@ def _normalized_text(value: str) -> str:
 
 def _matching_pages(texts: list[str], predicate: Any) -> list[int]:
     return [index + 1 for index, text in enumerate(texts) if predicate(text)]
+
+
+def _section_heading(text: str, title: str) -> bool:
+    """Match a numbered terms section title, not incidental disclaimer prose."""
+
+    escaped = re.escape(title.lower())
+    return bool(re.search(rf"(?:^|\s)\d+\.\s*{escaped}\.(?:\s|$)", text))
 
 
 def inspect_terms_pdf(payload: bytes) -> dict[str, Any]:
@@ -49,6 +57,7 @@ def inspect_terms_pdf(payload: bytes) -> dict[str, Any]:
             "document_title_verified": False,
             "provider_identifier_verified": False,
             "provider_identifier_pages": [],
+            "clause_detection_version": TERMS_CLAUSE_DETECTION_VERSION,
             "clauses": {},
         }
 
@@ -65,19 +74,19 @@ def inspect_terms_pdf(payload: bytes) -> dict[str, Any]:
     clause_pages = {
         "personal_noncommercial_use": _matching_pages(
             texts,
-            lambda text: "personal" in text and "non-commercial use" in text,
+            lambda text: (
+                _section_heading(text, "grant of license")
+                and bool(re.search(r"personal,?\s+non-commercial\s+use", text))
+            ),
         ),
         "termination": _matching_pages(
-            texts,
-            lambda text: "termination" in text or "terminate" in text,
+            texts, lambda text: _section_heading(text, "termination"),
         ),
         "assignment_or_transfer": _matching_pages(
-            texts,
-            lambda text: "assign" in text or "transfer" in text,
+            texts, lambda text: _section_heading(text, "assignment"),
         ),
         "use_restrictions": _matching_pages(
-            texts,
-            lambda text: "restriction" in text or "prohibit" in text or "may not" in text,
+            texts, lambda text: _section_heading(text, "use restrictions"),
         ),
     }
     clauses = {
@@ -96,6 +105,7 @@ def inspect_terms_pdf(payload: bytes) -> dict[str, Any]:
         "document_title_verified": title_verified,
         "provider_identifier_verified": bool(provider_pages),
         "provider_identifier_pages": provider_pages,
+        "clause_detection_version": TERMS_CLAUSE_DETECTION_VERSION,
         "clauses": clauses,
     }
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from scripts.check_provider_rights import validate_provider_rights
+from scripts import run_streamlit_apptests as app_runner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,9 +31,51 @@ def test_streamlit_runner_pins_python_and_uses_process_timeout() -> None:
     runner = (ROOT / "scripts" / "run_streamlit_apptests.py").read_text(encoding="utf-8")
     assert "SUPPORTED_PYTHON = (3, 12)" in runner
     assert "subprocess.run" in runner
-    assert "timeout=args.timeout_seconds" in runner
+    assert "deadline = time.monotonic() + args.timeout_seconds" in runner
+    assert "deadline - time.monotonic()" in runner
     assert "TimeoutExpired" in runner
+    assert "EXPECTED_APPTEST_COUNT = 6" in runner
+    assert '"--collect-only"' in runner
     assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.12"
+
+
+@pytest.mark.parametrize("collected_count", [0, 5, 7])
+def test_streamlit_runner_returns_two_when_collection_count_is_not_six(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    collected_count: int,
+) -> None:
+    nodes = "\n".join(f"tests/test_app.py::test_{index}" for index in range(collected_count))
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=nodes, stderr="")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_streamlit_apptests.py", "--timeout-seconds", "180"])
+    monkeypatch.setattr(app_runner.subprocess, "run", fake_run)
+    assert app_runner.main() == 2
+    assert len(calls) == 1
+
+
+def test_streamlit_runner_runs_tests_only_after_exactly_six_unique_nodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nodes = "\n".join(f"tests/test_app.py::test_{index}" for index in range(6))
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "--collect-only" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=nodes, stderr="")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_streamlit_apptests.py", "--timeout-seconds", "180"])
+    monkeypatch.setattr(app_runner.subprocess, "run", fake_run)
+    assert app_runner.main() == 0
+    assert len(calls) == 2
 
 
 def test_provider_diagnostic_is_manual_rights_gated_and_not_scheduled() -> None:

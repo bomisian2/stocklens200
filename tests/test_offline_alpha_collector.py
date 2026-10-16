@@ -36,9 +36,12 @@ def _pdf_page(writer: PdfWriter, lines: list[str]) -> None:
 
 def _terms_pdf() -> bytes:
     writer = PdfWriter()
-    _pdf_page(writer, ["TERMS OF SERVICE", "Alpha Vantage personal, non-commercial use and use restrictions"])
-    _pdf_page(writer, ["Alpha Vantage assignment and transfer clause"])
-    _pdf_page(writer, ["Alpha Vantage termination and prohibited use"])
+    _pdf_page(writer, [
+        "TERMS OF SERVICE", "Alpha Vantage", "2. Grant of License.",
+        "For personal, non-commercial use.",
+    ])
+    _pdf_page(writer, ["Alpha Vantage", "4. Use Restrictions.", "15. Assignment."])
+    _pdf_page(writer, ["Alpha Vantage", "7. Termination."])
     output = io.BytesIO()
     writer.write(output)
     return output.getvalue()
