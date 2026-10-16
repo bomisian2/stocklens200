@@ -20,27 +20,42 @@ Run the read-only inventory locally:
 .\.venv-personal\Scripts\python.exe scripts\inventory_same_date_evidence.py `
   --private-data-root private_data `
   --top10-data-root "<local Top10 data directory>" `
-  --inspected-at "<timezone-aware ISO timestamp>" `
-  --output private_data\decision\evidence-inventory-p4.json
+  --inspected-at "<timezone-aware ISO timestamp>"
 ```
 
-The output stays below `private_data/`, which is ignored by Git. It records the
+The output path is fixed to
+`private_data/decision/evidence-inventory-p4.json`; the command has no output
+path option. The writer rejects absolute or relative path escapes, resolved
+symlink/junction escapes, and collisions with inspected inputs. The output
+stays below `private_data/`, which is ignored by Git. It records the
 exact current file hash, source and time metadata, evidence class, point-in-time
 status, rights status, and the reason parsing or promotion remains blocked.
 
+The tracked `config/evidence-inventory-manifest-v1.json` declares every expected
+artifact and every known local Top10 exclusion. Any undeclared file is reported
+as `unclassified`; a missing, malformed, unreadable, future-dated, hash-mismatched,
+or unclassified artifact keeps `inventory_complete=false`.
+
 ## Evidence classes
 
-- `provider_native`: exact provider response bytes are preserved. This label is
-  not inferred from a filename, HTTP success, or a normalized dataset.
 - `normalized_only`: real observations remain, but provider bytes cannot be
   replayed byte-for-byte.
 - `derived_only`: values were computed by another application from upstream
   inputs whose complete lineage is not locally replayable.
+- `supporting_only`: hash-linked issuer material exists but does not satisfy a
+  Same-Date price, consensus, peer-multiple, acceptance-time, regime, or rights
+  role. NVIDIA is identified as official investor-relations evidence. The two
+  AVGO files are identified more narrowly as issuer-release supporting evidence
+  distributed by PR Newswire; independent official-issuer-origin verification
+  remains false.
 - `missing`: no usable local evidence was found for the target.
+- `invalid_integrity`, `malformed`, and `unreadable`: bytes exist but cannot be
+  accepted as a normal artifact. These states are never treated as missing or
+  promoted.
 
-No parser is implemented when the inventory class is anything other than
-`provider_native`. Existing generic synthetic-fixture parsing is not evidence
-that an actual provider format is supported.
+No provider parser or candidate registry is implemented by P4.1. Existing
+generic synthetic-fixture parsing is not evidence that an actual provider
+format is supported.
 
 ## Current P4 acquisition gaps
 

@@ -1,9 +1,4 @@
-"""Read-only inventory for Same-Date P4 local evidence onboarding.
-
-The inventory deliberately does not normalize provider data, build candidate
-registries, approve evidence, or create a decision.  Its job is to establish
-what bytes are actually preserved before a provider-specific parser is written.
-"""
+"""Fail-closed, read-only inventory for Same-Date P4.1 local evidence."""
 
 from __future__ import annotations
 
@@ -12,280 +7,256 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-
-INVENTORY_VERSION = "same-date-evidence-inventory-p4-v1"
+INVENTORY_VERSION = "same-date-evidence-inventory-p4.1-v1"
+MANIFEST_VERSION = "evidence-inventory-manifest-v1"
+DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "config" / "evidence-inventory-manifest-v1.json"
+DEFAULT_OUTPUT_NAME = "evidence-inventory-p4.json"
 TARGET_TICKERS = ("AVGO", "NVDA")
-EVIDENCE_CLASSES = {"provider_native", "normalized_only", "derived_only", "missing"}
+EVIDENCE_CLASSES = {
+    "normalized_only", "derived_only", "supporting_only", "missing",
+    "unclassified", "invalid_integrity", "malformed", "unreadable",
+}
 
 
 class EvidenceInventoryError(ValueError):
-    """Raised when local evidence metadata is malformed."""
+    """Raised when the inventory cannot safely inspect or write evidence."""
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
+def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except UnicodeDecodeError as exc:
+        raise EvidenceInventoryError(f"unreadable JSON: {path}") from exc
+    except json.JSONDecodeError as exc:
         raise EvidenceInventoryError(f"invalid JSON: {path}") from exc
     if not isinstance(value, dict):
         raise EvidenceInventoryError(f"JSON root must be an object: {path}")
     return value
 
 
-def _file_record(path: Path, *, role: str, source: str) -> dict[str, Any]:
-    return {
-        "role": role,
-        "path": str(path.resolve()),
-        "source": source,
-        "source_hash": _sha256(path),
-        "bytes": path.stat().st_size,
-    }
-
-
-def _iso_timestamp(value: Any) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
+def _parse_timestamp(value: Any) -> tuple[str | None, str | None, datetime | None]:
+    if value in (None, ""):
+        return None, None, None
+    if not isinstance(value, str):
+        return None, "invalid_timestamp", None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return None, "invalid_timestamp", None
     if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return None, "timezone_missing", None
+    utc = parsed.astimezone(timezone.utc)
+    return utc.isoformat().replace("+00:00", "Z"), None, utc
 
 
-def _csv_summary(path: Path) -> dict[str, Any]:
+def _load_manifest(path: Path) -> dict[str, Any]:
+    manifest = _read_json(path)
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        raise EvidenceInventoryError("unsupported evidence inventory manifest version")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise EvidenceInventoryError("inventory manifest artifacts must be a non-empty list")
+    ids: set[str] = set()
+    paths: set[tuple[str, str]] = set()
+    for row in artifacts:
+        if not isinstance(row, dict):
+            raise EvidenceInventoryError("inventory manifest artifact must be an object")
+        artifact_id = row.get("artifact_id")
+        key = (str(row.get("root")), str(row.get("path")))
+        if not isinstance(artifact_id, str) or not artifact_id or artifact_id in ids:
+            raise EvidenceInventoryError("inventory manifest artifact_id is missing or duplicated")
+        if key in paths or row.get("root") not in {"private_data", "top10_data"}:
+            raise EvidenceInventoryError("inventory manifest path is duplicated or has an invalid root")
+        if row.get("classification") not in EVIDENCE_CLASSES:
+            raise EvidenceInventoryError("inventory manifest has an invalid classification")
+        ids.add(artifact_id)
+        paths.add(key)
+    return manifest
+
+
+def _file_record(path: Path, *, role: str, source: str) -> dict[str, Any]:
+    return {"role": role, "path": str(path.resolve()), "source": source,
+            "source_hash": _sha256(path), "bytes": path.stat().st_size}
+
+
+def _inspect_artifact(
+    spec: dict[str, Any], *, roots: dict[str, Path], inspected_dt: datetime,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    path = roots[str(spec["root"])] / str(spec["path"])
+    base = {
+        "artifact_id": spec["artifact_id"], "root": spec["root"],
+        "relative_path": spec["path"], "path": str(path.resolve(strict=False)),
+        "expected_format": spec["format"], "purpose": spec["purpose"],
+        "required": bool(spec.get("required")),
+        "declared_classification": spec["classification"],
+        "provider_native_raw_exists": False, "parser_eligible": False,
+        "promotion_eligible": False,
+    }
     if not path.is_file():
-        return {"rows": 0, "first_date": None, "last_date": None, "columns": []}
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    dates = [str(row.get("date")) for row in rows if row.get("date")]
-    return {
-        "rows": len(rows),
-        "first_date": min(dates) if dates else None,
-        "last_date": max(dates) if dates else None,
-        "columns": list(rows[0]) if rows else [],
+        return {**base, "exists": False, "inspection_status": "missing",
+                "classification": "missing", "source_hash": None,
+                "reason": "declared artifact is not present"}, None
+    actual_format = path.suffix.lower().lstrip(".")
+    if actual_format != spec["format"]:
+        return {**base, "exists": True, "inspection_status": "malformed",
+                "classification": "malformed", "source_hash": _sha256(path),
+                "reason": "file extension does not match the declared format"}, None
+    try:
+        source_hash = _sha256(path)
+        rows: list[dict[str, str]] = []
+        if actual_format == "json":
+            value = _read_json(path)
+            generated_raw = value.get("generatedAt") or value.get("captured_at")
+        elif actual_format == "csv":
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            value, generated_raw = None, None
+        else:
+            raise EvidenceInventoryError(f"unsupported declared format: {actual_format}")
+    except EvidenceInventoryError as exc:
+        status = "unreadable" if str(exc).startswith("unreadable") else "malformed"
+        return {**base, "exists": True, "inspection_status": status,
+                "classification": status, "source_hash": _sha256(path),
+                "reason": str(exc)}, None
+    except OSError as exc:
+        return {**base, "exists": True, "inspection_status": "unreadable",
+                "classification": "unreadable", "source_hash": None,
+                "reason": f"unreadable file: {exc.__class__.__name__}"}, None
+    generated_at, timestamp_error, generated_dt = _parse_timestamp(generated_raw)
+    temporal_status, classification = "not_declared", str(spec["classification"])
+    reason = "declared local artifact inspected; no promotion is performed"
+    if timestamp_error:
+        temporal_status, classification = timestamp_error, "malformed"
+        reason = "declared timestamp is invalid or timezone-less"
+    elif generated_dt is not None and generated_dt > inspected_dt:
+        temporal_status, classification = "future_timestamp", "malformed"
+        reason = "artifact timestamp is later than inspected_at"
+    elif generated_dt is not None:
+        temporal_status = "valid"
+    record = {
+        **base, "exists": True,
+        "inspection_status": temporal_status if temporal_status in {
+            "future_timestamp", "timezone_missing", "invalid_timestamp"
+        } else "inspected",
+        "classification": classification, "source_hash": source_hash,
+        "bytes": path.stat().st_size, "generated_at": generated_at,
+        "temporal_status": temporal_status, "reason": reason,
     }
+    if actual_format == "csv":
+        dates = [str(row.get("date")) for row in rows if row.get("date")]
+        record.update({"rows": len(rows), "first_date": min(dates) if dates else None,
+                       "last_date": max(dates) if dates else None})
+    return record, value
 
 
-def _alpha_market_candidate(private_root: Path, ticker: str) -> dict[str, Any]:
-    market_root = private_root / "market"
-    data_path = market_root / f"{ticker}.csv"
-    manifest_path = market_root / f"{ticker}.manifest.json"
-    manifest = _read_json(manifest_path)
-    if manifest is None or not data_path.is_file():
-        return _missing_target(
-            f"alpha-vantage-{ticker.lower()}-daily",
-            "Alpha Vantage local CSV or manifest is missing",
-            "preserve a permitted provider-native response before normalization; do not reconstruct it from CSV",
-        )
-    summary = _csv_summary(data_path)
-    data_hash = _sha256(data_path)
-    declared_hash = str(manifest.get("sha256") or "").upper()
-    hash_match = len(declared_hash) == 64 and declared_hash == data_hash
-    captured_at = _iso_timestamp(manifest.get("collected_at_utc"))
-    return {
-        "candidate_id": f"alpha-vantage-{ticker.lower()}-daily",
-        "classification": "normalized_only",
-        "provider_native_raw_exists": False,
-        "normalized_only": True,
-        "source": "Alpha Vantage TIME_SERIES_DAILY local normalized CSV",
-        "source_hash": data_hash,
-        "as_of": manifest.get("market_date") or summary["last_date"],
-        "available_at": captured_at,
-        "captured_at_exact": captured_at is not None,
-        "provider_timestamp": None,
-        "provider_date": manifest.get("provider_market_date"),
-        "revision_vintage": None,
-        "pit_status": "capture_time_only",
-        "rights_status": "local_only_manifest_claim_unverified_document",
-        "parser_eligible": False,
-        "parser_block_reason": "provider response bytes were not preserved",
-        "price_policy": manifest.get("price_policy"),
-        "adjusted": bool(manifest.get("adjusted_prices_available")),
-        "manifest_hash_matches_data": hash_match,
-        "rows": summary["rows"],
-        "history_start": summary["first_date"],
-        "history_end": summary["last_date"],
-        "columns": summary["columns"],
-        "files": [
-            _file_record(data_path, role="normalized_data", source="Alpha Vantage"),
-            _file_record(manifest_path, role="local_manifest", source="StockLens"),
-        ],
-        "reason": (
-            "actual local observations exist, but only normalized CSV and a StockLens manifest remain"
-        ),
-    }
+def _target_rows(value: Any, ticker: str) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict) and row.get("ticker") == ticker]
+    if isinstance(value, dict):
+        direct = value.get(ticker)
+        if isinstance(direct, list):
+            return [row for row in direct if isinstance(row, dict)]
+        if isinstance(direct, dict):
+            return [direct]
+        return [row for row in value.values() if isinstance(row, dict) and row.get("ticker") == ticker]
+    return []
 
 
-def _top10_candidate(
-    top10_root: Path,
-    *,
-    candidate_id: str,
-    filename: str,
-    source: str,
-    classification: str,
-    as_of: str | None = None,
-    details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if classification not in EVIDENCE_CLASSES - {"provider_native"}:
-        raise EvidenceInventoryError("Top10 local artifacts cannot be labelled provider_native")
-    path = top10_root / filename
-    value = _read_json(path)
-    if value is None:
-        return {
-            "candidate_id": candidate_id,
-            "classification": "missing",
-            "provider_native_raw_exists": False,
-            "files": [],
-            "reason": f"local {filename} is missing",
+def _count_acceptance_timestamps(value: Any) -> int:
+    names = {"accepted", "acceptedat", "acceptance", "acceptancedatetime", "acceptance_datetime"}
+    if isinstance(value, dict):
+        return sum((1 if str(key).lower() in names and _parse_timestamp(item)[0] else 0)
+                   + _count_acceptance_timestamps(item) for key, item in value.items())
+    if isinstance(value, list):
+        return sum(_count_acceptance_timestamps(item) for item in value)
+    return 0
+
+
+def _add_details(artifact: dict[str, Any], value: dict[str, Any] | None) -> None:
+    if value is None or artifact["classification"] in {"malformed", "unreadable"}:
+        return
+    artifact_id = artifact["artifact_id"]
+    if artifact_id == "top10-consensus-history":
+        observations = value.get("observations")
+        artifact["target_records"] = {ticker: len(_target_rows(observations, ticker)) for ticker in TARGET_TICKERS}
+        artifact["accounting_basis"] = {
+            ticker: sorted({str(row.get("accountingBasis")) for row in _target_rows(observations, ticker)
+                            if row.get("accountingBasis")}) for ticker in TARGET_TICKERS
         }
-    generated_at = _iso_timestamp(value.get("generatedAt"))
-    return {
-        "candidate_id": candidate_id,
-        "classification": classification,
-        "provider_native_raw_exists": False,
-        "normalized_only": classification == "normalized_only",
-        "source": source,
-        "source_hash": _sha256(path),
-        "as_of": as_of or value.get("asOfDate"),
-        "available_at": generated_at,
-        "captured_at_exact": False,
-        "provider_timestamp": None,
-        "revision_vintage": None,
-        "pit_status": "unverified_without_provider_raw",
-        "rights_status": "unverified_no_preserved_terms_document",
-        "parser_eligible": False,
-        "parser_block_reason": "file is a cross-project normalized or derived artifact, not provider-native bytes",
-        "files": [_file_record(path, role="cross_project_artifact", source=source)],
-        "reason": "provider response bytes and a hash-linked rights document were not preserved",
-        **(details or {}),
-    }
+    elif artifact_id == "top10-valuation-history":
+        records = value.get("records")
+        detail: dict[str, Any] = {}
+        for ticker in TARGET_TICKERS:
+            rows = _target_rows(records, ticker)
+            latest = rows[-1] if rows else {}
+            detail[ticker] = {"rows": len(rows),
+                              "strict_eligible_rows": sum(row.get("strictEligible") is True for row in rows),
+                              "latest_point_in_time_verified": latest.get("pointInTimeVerified")}
+        artifact["target_records"] = detail
+    elif artifact_id == "top10-guidance-events":
+        artifact["target_records"] = {
+            ticker: len(_target_rows(value.get("events"), ticker)) for ticker in TARGET_TICKERS
+        }
+    elif artifact_id == "top10-sec-quarterly":
+        records = value.get("records")
+        detail = {}
+        for ticker in TARGET_TICKERS:
+            rows = _target_rows(records, ticker)
+            detail[ticker] = {
+                "records": len(rows),
+                "records_with_acceptance_timestamp": sum(_count_acceptance_timestamps(row) > 0 for row in rows),
+                "acceptance_timestamp_count": sum(_count_acceptance_timestamps(row) for row in rows),
+            }
+        artifact["target_records"] = detail
 
 
-def _price_history_details(path: Path) -> dict[str, Any]:
-    value = _read_json(path)
-    if value is None:
-        return {}
-    records = value.get("records")
-    output: dict[str, Any] = {"ticker_rows": {}, "adjustment_policy": None, "as_of": None}
-    if not isinstance(records, dict):
-        return output
+def _apply_alpha_integrity(
+    artifacts: list[dict[str, Any]], values: dict[str, dict[str, Any] | None], inspected_dt: datetime,
+) -> None:
+    by_id = {row["artifact_id"]: row for row in artifacts}
     for ticker in TARGET_TICKERS:
-        rows = records.get(ticker)
-        if not isinstance(rows, list):
-            output["ticker_rows"][ticker] = {"rows": 0, "first": None, "last": None}
+        data = by_id[f"alpha-{ticker.lower()}-daily-data"]
+        manifest = by_id[f"alpha-{ticker.lower()}-daily-manifest"]
+        value = values.get(manifest["artifact_id"])
+        if not data["exists"] or not manifest["exists"] or not isinstance(value, dict):
             continue
-        dates = [str(row.get("date")) for row in rows if isinstance(row, dict) and row.get("date")]
-        output["ticker_rows"][ticker] = {
-            "rows": len(rows),
-            "first": min(dates) if dates else None,
-            "last": max(dates) if dates else None,
-            "fields": sorted(rows[0]) if rows and isinstance(rows[0], dict) else [],
-        }
-    last_dates = [
-        row["last"] for row in output["ticker_rows"].values() if row.get("last")
-    ]
-    output["as_of"] = max(last_dates) if last_dates else None
-    fields = {
-        field
-        for row in output["ticker_rows"].values()
-        for field in row.get("fields", [])
-    }
-    output["adjustment_policy"] = (
-        "adjusted_field_claim_not_replayable_without_raw"
-        if "adjusted_close" in fields
-        else "missing_or_unverified"
-    )
-    return output
+        declared = str(value.get("sha256") or "").upper()
+        actual = str(data.get("source_hash") or "").upper()
+        captured_at, timestamp_error, captured_dt = _parse_timestamp(value.get("collected_at_utc"))
+        integrity_ok = len(declared) == 64 and declared == actual
+        data.update({"manifest_hash_matches_data": integrity_ok, "captured_at": captured_at,
+                     "provider_date": value.get("provider_market_date"),
+                     "adjusted": bool(value.get("adjusted_prices_available"))})
+        if not integrity_ok:
+            for row in (data, manifest):
+                row.update({"classification": "invalid_integrity", "inspection_status": "invalid_integrity",
+                            "reason": "manifest SHA-256 does not match current CSV bytes"})
+        elif timestamp_error:
+            manifest.update({"classification": "malformed", "inspection_status": timestamp_error,
+                             "reason": "capture timestamp is invalid or timezone-less"})
+        elif captured_dt is not None and captured_dt > inspected_dt:
+            manifest.update({"classification": "malformed", "inspection_status": "future_timestamp",
+                             "reason": "capture timestamp is later than inspected_at"})
 
 
-def _consensus_details(path: Path) -> dict[str, Any]:
-    value = _read_json(path)
-    if value is None:
-        return {}
-    records = value.get("records")
-    selected: dict[str, Any] = {}
-    if isinstance(records, dict):
-        for ticker in TARGET_TICKERS:
-            row = records.get(ticker)
-            if isinstance(row, dict):
-                selected[ticker] = {
-                    "collected_at": _iso_timestamp(row.get("collectedAt")),
-                    "fiscal_end": row.get("fiscalEnd"),
-                    "next_fiscal_end": row.get("nextFiscalEnd"),
-                    "analyst_count": row.get("analystCount"),
-                    "accounting_basis": None,
-                    "currency": None,
-                    "unit": None,
-                }
-    return {"records": selected, "basis_status": "unknown_gaap_non_gaap_and_unit"}
-
-
-def _decision_ledger_details(path: Path) -> dict[str, Any]:
-    value = _read_json(path)
-    if value is None:
-        return {}
-    rows = value.get("records")
-    latest: dict[str, dict[str, Any]] = {}
-    if isinstance(rows, list):
-        for ticker in TARGET_TICKERS:
-            ticker_rows = [
-                row for row in rows
-                if isinstance(row, dict) and row.get("ticker") == ticker and row.get("date")
-            ]
-            if ticker_rows:
-                row = sorted(ticker_rows, key=lambda item: str(item["date"]))[-1]
-                inputs = row.get("inputs") if isinstance(row.get("inputs"), dict) else {}
-                latest[ticker] = {
-                    "date": row.get("date"),
-                    "price_as_of": inputs.get("priceAsOf"),
-                    "eps_as_of": inputs.get("epsAsOf"),
-                    "forward_pe_present": inputs.get("forwardPe") is not None,
-                }
-    dates = [str(row["date"]) for row in latest.values() if row.get("date")]
-    return {"latest_records": latest, "as_of": max(dates) if dates else None}
-
-
-def _missing_target(candidate_id: str, reason: str, acquisition_path: str) -> dict[str, Any]:
-    return {
-        "candidate_id": candidate_id,
-        "classification": "missing",
-        "provider_native_raw_exists": False,
-        "normalized_only": False,
-        "source": None,
-        "source_hash": None,
-        "as_of": None,
-        "available_at": None,
-        "captured_at_exact": False,
-        "provider_timestamp": None,
-        "revision_vintage": None,
-        "pit_status": "missing",
-        "rights_status": "missing",
-        "parser_eligible": False,
-        "parser_block_reason": reason,
-        "files": [],
-        "reason": reason,
-        "acquisition_path": acquisition_path,
-    }
-
-
-def _issuer_supporting_evidence(private_root: Path) -> list[dict[str, Any]]:
-    """List issuer-native files that do not satisfy a Same-Date target role."""
-
+def _issuer_supporting_evidence(private_root: Path, inspected_dt: datetime) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    raw_root = private_root / "raw"
     for ticker in TARGET_TICKERS:
         normalized_path = private_root / "normalized" / "financials" / f"{ticker}.json"
-        normalized = _read_json(normalized_path)
-        if normalized is None:
+        if not normalized_path.is_file():
+            continue
+        try:
+            normalized = _read_json(normalized_path)
+        except EvidenceInventoryError as exc:
+            results.append({"ticker": ticker, "classification": "malformed", "reason": str(exc),
+                            "provider_native_raw_exists": False})
             continue
         documents = normalized.get("documents")
         if not isinstance(documents, list):
@@ -293,180 +264,155 @@ def _issuer_supporting_evidence(private_root: Path) -> list[dict[str, Any]]:
         for document in documents:
             if not isinstance(document, dict):
                 continue
-            declared_hash = str(document.get("sha256") or "").upper()
-            matching_files = [
-                path
-                for path in (private_root / "raw").glob(f"{ticker}_*")
-                if _sha256(path) == declared_hash
-            ]
-            if len(matching_files) != 1:
-                continue
-            raw_path = matching_files[0]
-            results.append({
+            declared = str(document.get("sha256") or "").upper()
+            candidates = list(raw_root.glob(f"{ticker}_*")) if raw_root.is_dir() else []
+            matching = [path for path in candidates if _sha256(path) == declared]
+            published, timestamp_error, published_dt = _parse_timestamp(document.get("published_at"))
+            integrity_ok = len(matching) == 1 and len(declared) == 64
+            temporal = timestamp_error or ("future_timestamp" if published_dt and published_dt > inspected_dt else "valid")
+            distribution = str(document.get("distribution") or "")
+            official_verified = ticker == "NVDA" and "official investor" in distribution.lower()
+            source_label = ("AVGO issuer-release supporting evidence distributed by PR Newswire"
+                            if ticker == "AVGO" else
+                            "NVIDIA official investor-relations evidence" if official_verified else distribution)
+            row: dict[str, Any] = {
                 "ticker": ticker,
-                "classification": "provider_native",
-                "provider_native_raw_exists": True,
-                "source": document.get("distribution"),
-                "source_hash": declared_hash,
-                "as_of": document.get("period_end"),
-                "available_at": _iso_timestamp(document.get("published_at")),
-                "provider_timestamp": _iso_timestamp(document.get("published_at")),
-                "revision_vintage": None,
-                "rights_status": "local_personal_only_no_redistribution_claim",
-                "same_date_target_roles_satisfied": [],
-                "reason": (
-                    "issuer financial document is genuine supporting evidence, but it is not "
-                    "a PIT consensus, price, peer-multiple, acceptance-time, regime, or rights artifact"
-                ),
-                "file": _file_record(
-                    raw_path,
-                    role="issuer_financial_raw",
-                    source=str(document.get("distribution") or "issuer"),
-                ),
-            })
+                "classification": "supporting_only" if integrity_ok and temporal == "valid" else
+                                  ("invalid_integrity" if not integrity_ok else "malformed"),
+                "provider_native_raw_exists": integrity_ok, "source": source_label,
+                "official_issuer_origin_independently_verified": official_verified,
+                "source_hash": declared or None, "as_of": document.get("period_end"),
+                "available_at": published, "temporal_status": temporal,
+                "same_date_target_roles_satisfied": [], "promotion_eligible": False,
+                "reason": "supporting issuer evidence only; it does not satisfy a Same-Date target role",
+            }
+            if integrity_ok:
+                row["file"] = _file_record(matching[0], role="issuer_financial_raw", source=source_label)
+            else:
+                row["reason"] = "declared source hash does not identify exactly one current raw file"
+            results.append(row)
     return results
 
 
+def _classify_top10_directory(
+    top10_root: Path, manifest: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    declared = {str(row["path"]) for row in manifest["artifacts"] if row["root"] == "top10_data"}
+    exclusions = {str(row["path"]): str(row["reason"]) for row in manifest.get("known_exclusions", [])
+                  if isinstance(row, dict)}
+    unclassified: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    if not top10_root.is_dir():
+        return unclassified, excluded
+    for path in sorted(item for item in top10_root.iterdir() if item.is_file()):
+        if path.name in declared:
+            continue
+        record = {"path": str(path.resolve()), "source_hash": _sha256(path)}
+        if path.name in exclusions:
+            excluded.append({**record, "reason": exclusions[path.name]})
+        else:
+            unclassified.append({**record, "classification": "unclassified", "promotion_eligible": False,
+                                 "reason": "not declared or explicitly excluded by the inventory manifest"})
+    return unclassified, excluded
+
+
 def build_p4_evidence_inventory(
-    *,
-    private_data_root: str | Path,
-    top10_data_root: str | Path,
-    inspected_at: str,
+    *, private_data_root: str | Path, top10_data_root: str | Path, inspected_at: str,
+    inventory_manifest_path: str | Path = DEFAULT_MANIFEST,
 ) -> dict[str, Any]:
     """Inventory exact local evidence without network access or promotion."""
 
-    inspected = _iso_timestamp(inspected_at)
-    if inspected is None:
+    inspected, error, inspected_dt = _parse_timestamp(inspected_at)
+    if error or inspected_dt is None:
         raise EvidenceInventoryError("inspected_at must be a timezone-aware ISO timestamp")
-    private_root = Path(private_data_root)
-    top10_root = Path(top10_data_root)
-
-    alpha_avgo = _alpha_market_candidate(private_root, "AVGO")
-    alpha_nvda = _alpha_market_candidate(private_root, "NVDA")
-    price_path = top10_root / "price-history.json"
-    consensus_path = top10_root / "top100-consensus.json"
-    ledger_path = top10_root / "decision-ledger.json"
-    sec_path = top10_root / "sec-quarterly-ledger.json"
-    macro_path = top10_root / "macro-snapshot.json"
-    price_details = _price_history_details(price_path)
-    ledger_details = _decision_ledger_details(ledger_path)
-
-    candidates = [
-        alpha_avgo,
-        alpha_nvda,
-        _top10_candidate(
-            top10_root,
-            candidate_id="top10-avgo-nvda-latest-price",
-            filename="decision-ledger.json",
-            source="Nasdaq Top10 derived decision ledger price",
-            classification="derived_only",
-            as_of=ledger_details.get("as_of"),
-            details=ledger_details,
-        ),
-        _top10_candidate(
-            top10_root,
-            candidate_id="top10-avgo-nvda-price-history",
-            filename="price-history.json",
-            source="Nasdaq Top10 normalized Yahoo price history",
-            classification="normalized_only",
-            as_of=price_details.get("as_of"),
-            details=price_details,
-        ),
-        _top10_candidate(
-            top10_root,
-            candidate_id="top10-avgo-nvda-forward-eps",
-            filename="top100-consensus.json",
-            source="Nasdaq Top10 normalized Nasdaq Analyst Research consensus",
-            classification="normalized_only",
-            details=_consensus_details(consensus_path),
-        ),
-        _top10_candidate(
-            top10_root,
-            candidate_id="top10-company-forward-per-ledger",
-            filename="decision-ledger.json",
-            source="Nasdaq Top10 derived decision ledger",
-            classification="derived_only",
-            as_of=ledger_details.get("as_of"),
-            details={
-                **ledger_details,
-                "basis_status": "forward PE values lack a hash-linked underlying EPS basis",
-            },
-        ),
-        _missing_target(
-            "independent-qqq-soxx-peer-forward-multiples",
-            "no independent same-basis QQQ, SOXX, and peer Forward multiple ledger was found",
-            "preserve provider-native bytes plus basis, constituent, weighting, timestamp, and rights metadata",
-        ),
-        _top10_candidate(
-            top10_root,
-            candidate_id="target-sec-acceptance-ledger",
-            filename="sec-quarterly-ledger.json",
-            source="Nasdaq Top10 normalized SEC quarterly ledger",
-            classification="missing",
-            details={
-                "target_records": {"AVGO": 0, "NVDA": 0},
-                "acceptance_rule_status": "missing_for_targets",
-                "reason": "local SEC ledger exists but contains no AVGO or NVDA target record",
-            },
-        ),
-        _top10_candidate(
-            top10_root,
-            candidate_id="top10-market-regime-proxy",
-            filename="macro-snapshot.json",
-            source="Nasdaq Top10 derived Yahoo market proxy",
-            classification="derived_only",
-            details={"official_macro": False, "proxy_label": "cross_project_market_proxy"},
-        ),
-        _missing_target(
-            "usage-rights-documents",
-            "no provider terms document bytes with SHA-256 and review metadata were found",
-            "save the applicable terms document and review record without copying restricted market data into Git",
-        ),
-    ]
-
-    parser_eligible = [row for row in candidates if row.get("parser_eligible") is True]
-    native = [row for row in candidates if row.get("provider_native_raw_exists") is True]
-    supporting_native = _issuer_supporting_evidence(private_root)
-    missing = [row["candidate_id"] for row in candidates if row["classification"] == "missing"]
-    blocked = [
-        row["candidate_id"]
-        for row in candidates
-        if row["classification"] != "missing" and row.get("parser_eligible") is not True
-    ]
+    private_root, top10_root = Path(private_data_root), Path(top10_data_root)
+    manifest_path = Path(inventory_manifest_path)
+    manifest = _load_manifest(manifest_path)
+    roots = {"private_data": private_root, "top10_data": top10_root}
+    artifacts: list[dict[str, Any]] = []
+    values: dict[str, dict[str, Any] | None] = {}
+    for spec in manifest["artifacts"]:
+        artifact, value = _inspect_artifact(spec, roots=roots, inspected_dt=inspected_dt)
+        _add_details(artifact, value)
+        artifacts.append(artifact)
+        values[artifact["artifact_id"]] = value
+    _apply_alpha_integrity(artifacts, values, inspected_dt)
+    unclassified, excluded = _classify_top10_directory(top10_root, manifest)
+    supporting = _issuer_supporting_evidence(private_root, inspected_dt)
+    missing = [row for row in artifacts if row["inspection_status"] == "missing"]
+    invalid_states = {"malformed", "unreadable", "invalid_integrity", "future_timestamp",
+                      "timezone_missing", "invalid_timestamp"}
+    invalid = [row for row in artifacts if row["classification"] in invalid_states
+               or row["inspection_status"] in invalid_states]
+    native = [row for row in supporting if row.get("provider_native_raw_exists") is True]
+    source_paths = [str(manifest_path.resolve())] + [row["path"] for row in artifacts if row.get("exists")]
+    source_paths += [str(row["file"]["path"]) for row in supporting if isinstance(row.get("file"), dict)]
     return {
-        "inventory_version": INVENTORY_VERSION,
-        "inspected_at": inspected,
-        "target_tickers": list(TARGET_TICKERS),
-        "network_calls": 0,
-        "candidate_generation_attempted": False,
-        "approval_requested": False,
-        "v1_1_snapshot_created": False,
-        "decision_created": False,
-        "operational_eligible": False,
-        "provider_native_raw_count": len(native),
-        "same_date_target_provider_native_raw_count": len(native),
-        "supporting_provider_native_raw_count": len(supporting_native),
-        "provider_parser_eligible_count": len(parser_eligible),
-        "provider_parsers_implemented": [],
-        "status": "blocked",
+        "inventory_version": INVENTORY_VERSION, "manifest_version": manifest["manifest_version"],
+        "manifest_path": str(manifest_path.resolve()), "manifest_hash": _sha256(manifest_path),
+        "inspected_at": inspected, "target_tickers": list(TARGET_TICKERS),
+        "expected_artifact_count": len(artifacts),
+        "inspected_artifact_count": sum(row.get("exists") is True for row in artifacts),
+        "missing_artifact_count": len(missing), "unclassified_artifact_count": len(unclassified),
+        "invalid_artifact_count": len(invalid),
+        "inventory_complete": not missing and not unclassified and not invalid,
+        "network_capability_present": False, "network_calls_observed_in_this_run": 0,
+        "actions_performed": ["read_local_metadata", "hash_local_files", "classify_local_artifacts"],
+        "decisions_created_in_this_run": 0, "promotion_attempted": False,
+        "candidate_generation_attempted": False, "approval_requested": False,
+        "v1_1_snapshot_created": False, "operational_eligible": False,
+        "provider_native_raw_count": len(native), "same_date_target_provider_native_raw_count": 0,
+        "supporting_provider_native_raw_count": len(native), "provider_parser_eligible_count": 0,
+        "provider_parsers_implemented": [], "status": "blocked",
         "block_stage": "provider_native_evidence_inventory",
-        "block_reason": (
-            "no required Same-Date target has preserved provider-native bytes with hash-linked rights evidence"
-        ),
-        "candidates": candidates,
-        "supporting_provider_native_evidence": supporting_native,
-        "missing_targets": missing,
-        "blocked_local_targets": blocked,
-        "qa_handoff_ready": False,
+        "block_reason": "required Same-Date target provider-native bytes and rights evidence are not complete",
+        "artifacts": artifacts, "supporting_provider_native_evidence": supporting,
+        "unclassified_relevant_artifacts": unclassified, "explicitly_excluded_artifacts": excluded,
+        "missing_targets": [row["artifact_id"] for row in missing],
+        "invalid_targets": [row["artifact_id"] for row in invalid],
+        "inspected_source_paths": sorted(set(source_paths)), "qa_handoff_ready": False,
     }
 
 
-def write_p4_inventory(report: dict[str, Any], output_path: str | Path) -> Path:
-    """Write a private inventory atomically without modifying source evidence."""
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
-    destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(destination)
-    return destination
+
+def write_p4_inventory(
+    report: dict[str, Any], *, private_data_root: str | Path,
+    output_path: str | Path | None = None, protected_paths: Iterable[str | Path] = (),
+) -> Path:
+    """Atomically write only the fixed private output and never overwrite evidence."""
+
+    root = Path(private_data_root).resolve(strict=True)
+    decision_raw = root / "decision"
+    if decision_raw.exists() and not _is_within(decision_raw.resolve(strict=True), root):
+        raise EvidenceInventoryError("private decision directory resolves outside private_data")
+    allowed = (decision_raw / DEFAULT_OUTPUT_NAME).resolve(strict=False)
+    requested = allowed if output_path is None else Path(output_path).resolve(strict=False)
+    if requested != allowed or not _is_within(requested, root):
+        raise EvidenceInventoryError("inventory output must be private_data/decision/evidence-inventory-p4.json")
+    temporary = requested.with_suffix(requested.suffix + ".tmp")
+    protected = {Path(item).resolve(strict=False) for item in protected_paths}
+    protected.update(Path(item).resolve(strict=False) for item in report.get("inspected_source_paths", []))
+    if requested in protected or temporary in protected:
+        raise EvidenceInventoryError("inventory output or temporary path collides with inspected evidence")
+    actions = report.setdefault("actions_performed", [])
+    if "write_private_inventory" not in actions:
+        actions.append("write_private_inventory")
+    payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    decision_raw.mkdir(parents=True, exist_ok=True)
+    if not _is_within(decision_raw.resolve(strict=True), root):
+        raise EvidenceInventoryError("private decision directory resolves outside private_data")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(requested)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    return requested

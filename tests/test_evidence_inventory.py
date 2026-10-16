@@ -3,11 +3,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from stocklens.personal.evidence_inventory import (
+    DEFAULT_OUTPUT_NAME,
     EvidenceInventoryError,
     build_p4_evidence_inventory,
     write_p4_inventory,
@@ -24,179 +26,233 @@ def _write_csv(path: Path) -> str:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["date", "open", "high", "low", "close", "volume"])
         writer.writeheader()
-        writer.writerow({
-            "date": "2026-10-12",
-            "open": "100",
-            "high": "102",
-            "low": "99",
-            "close": "101",
-            "volume": "1000",
-        })
+        writer.writerow({"date": "2026-10-12", "open": "100", "high": "102", "low": "99", "close": "101", "volume": "1000"})
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _build_roots(tmp_path: Path) -> tuple[Path, Path]:
-    private_root = tmp_path / "private_data"
-    top10_root = tmp_path / "top10"
+    private_root, top10_root = tmp_path / "private_data", tmp_path / "top10"
+    private_root.mkdir()
     csv_hash = _write_csv(private_root / "market" / "AVGO.csv")
     _write_json(private_root / "market" / "AVGO.manifest.json", {
-        "ticker": "AVGO",
-        "provider": "Alpha Vantage",
-        "dataset": "TIME_SERIES_DAILY",
-        "collected_at_utc": "2026-10-13T12:02:37Z",
-        "market_date": "2026-10-12",
-        "provider_market_date": "2026-10-12",
-        "price_policy": "raw_as_traded_unadjusted",
-        "adjusted_prices_available": False,
+        "collected_at_utc": "2026-10-13T12:02:37Z", "market_date": "2026-10-12",
+        "provider_market_date": "2026-10-12", "adjusted_prices_available": False,
         "sha256": csv_hash,
     })
-    _write_json(top10_root / "price-history.json", {
-        "generatedAt": "2026-10-15T22:30:26Z",
-        "methodology": "Yahoo Finance 5-year confirmed daily data compressed monthly",
-        "records": {
-            "AVGO": [{"date": "2026-10-15", "close": 344.33}],
-            "NVDA": [{"date": "2026-10-15", "close": 217.23}],
-        },
-    })
-    _write_json(top10_root / "top100-consensus.json", {
-        "generatedAt": "2026-10-15T22:31:59Z",
-        "source": "Nasdaq Analyst Research earnings forecast API",
-        "records": {
-            ticker: {
-                "ticker": ticker,
-                "collectedAt": "2026-10-15T22:31:59Z",
-                "fiscalEnd": "Oct 2026",
-                "nextFiscalEnd": "Oct 2027",
-                "analystCount": 10,
-            }
-            for ticker in ("AVGO", "NVDA")
-        },
-    })
-    _write_json(top10_root / "decision-ledger.json", {
-        "generatedAt": "2026-10-15T22:48:28Z",
-        "asOfDate": "2026-10-15",
-        "records": [],
-    })
-    _write_json(top10_root / "sec-quarterly-ledger.json", {
-        "generatedAt": "2026-10-16T01:10:54Z",
-        "records": {},
-    })
-    _write_json(top10_root / "macro-snapshot.json", {
-        "generatedAt": "2026-10-15T22:31:13Z",
-        "state": "neutral",
-    })
+    common = {"generatedAt": "2026-10-15T22:30:26Z"}
+    _write_json(top10_root / "price-history.json", {**common, "records": {"AVGO": [], "NVDA": []}})
+    _write_json(top10_root / "top100-consensus.json", {**common, "records": {}})
+    _write_json(top10_root / "decision-ledger.json", {**common, "records": []})
+    _write_json(top10_root / "sec-quarterly-ledger.json", {**common, "records": {}})
+    _write_json(top10_root / "macro-snapshot.json", {**common, "state": "neutral"})
     return private_root, top10_root
 
 
-def test_inventory_is_read_only_and_blocks_without_provider_native_raw(tmp_path: Path) -> None:
+def _build(tmp_path: Path, inspected_at: str = "2026-10-16T08:00:00Z") -> tuple[dict, Path, Path]:
     private_root, top10_root = _build_roots(tmp_path)
-    report = build_p4_evidence_inventory(
-        private_data_root=private_root,
-        top10_data_root=top10_root,
-        inspected_at="2026-10-16T08:00:00+09:00",
-    )
+    return build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at=inspected_at,
+    ), private_root, top10_root
+
+
+def test_inventory_remains_blocked_and_reports_execution_not_global_history(tmp_path: Path) -> None:
+    report, _, _ = _build(tmp_path)
     assert report["status"] == "blocked"
-    assert report["block_stage"] == "provider_native_evidence_inventory"
-    assert report["provider_native_raw_count"] == 0
-    assert report["provider_parser_eligible_count"] == 0
-    assert report["provider_parsers_implemented"] == []
-    assert report["candidate_generation_attempted"] is False
-    assert report["approval_requested"] is False
-    assert report["v1_1_snapshot_created"] is False
-    assert report["decision_created"] is False
-    assert report["network_calls"] == 0
+    assert report["inventory_complete"] is False
+    assert report["network_capability_present"] is False
+    assert report["network_calls_observed_in_this_run"] == 0
+    assert report["decisions_created_in_this_run"] == 0
+    assert report["promotion_attempted"] is False
+    assert report["operational_eligible"] is False
 
 
-def test_alpha_vantage_csv_is_actual_normalized_cache_not_provider_raw(tmp_path: Path) -> None:
-    private_root, top10_root = _build_roots(tmp_path)
-    report = build_p4_evidence_inventory(
-        private_data_root=private_root,
-        top10_data_root=top10_root,
-        inspected_at="2026-10-15T23:00:00Z",
+def test_manifest_completeness_and_unknown_file_detection(tmp_path: Path) -> None:
+    report, _, top10_root = _build(tmp_path)
+    assert report["manifest_version"] == "evidence-inventory-manifest-v1"
+    assert report["expected_artifact_count"] == 22
+    assert report["inspected_artifact_count"] == 7
+    assert report["missing_artifact_count"] == 15
+    _write_json(top10_root / "new-forward-eps-source.json", {"generatedAt": "2026-10-15T20:00:00Z"})
+    refreshed = build_p4_evidence_inventory(
+        private_data_root=tmp_path / "private_data", top10_data_root=top10_root,
+        inspected_at="2026-10-16T08:00:00Z",
     )
-    rows = {row["candidate_id"]: row for row in report["candidates"]}
-    avgo = rows["alpha-vantage-avgo-daily"]
-    assert avgo["classification"] == "normalized_only"
-    assert avgo["provider_native_raw_exists"] is False
-    assert avgo["manifest_hash_matches_data"] is True
-    assert avgo["as_of"] == "2026-10-12"
-    assert avgo["available_at"] == "2026-10-13T12:02:37Z"
-    assert avgo["provider_timestamp"] is None
-    assert avgo["adjusted"] is False
-    assert avgo["parser_eligible"] is False
+    assert refreshed["unclassified_artifact_count"] == 1
+    assert refreshed["unclassified_relevant_artifacts"][0]["classification"] == "unclassified"
 
 
-def test_cross_project_files_remain_normalized_or_derived_and_rights_fail_closed(tmp_path: Path) -> None:
-    private_root, top10_root = _build_roots(tmp_path)
-    report = build_p4_evidence_inventory(
-        private_data_root=private_root,
-        top10_data_root=top10_root,
-        inspected_at="2026-10-15T23:00:00Z",
-    )
-    rows = {row["candidate_id"]: row for row in report["candidates"]}
-    assert rows["top10-avgo-nvda-price-history"]["classification"] == "normalized_only"
-    assert rows["top10-company-forward-per-ledger"]["classification"] == "derived_only"
-    assert rows["top10-market-regime-proxy"]["classification"] == "derived_only"
-    assert rows["usage-rights-documents"]["classification"] == "missing"
-    assert rows["independent-qqq-soxx-peer-forward-multiples"]["classification"] == "missing"
-    assert all(row["provider_native_raw_exists"] is False for row in rows.values())
-
-
-def test_inventory_output_is_private_path_only_and_does_not_mutate_sources(tmp_path: Path) -> None:
-    private_root, top10_root = _build_roots(tmp_path)
-    before = hashlib.sha256((top10_root / "top100-consensus.json").read_bytes()).hexdigest()
-    report = build_p4_evidence_inventory(
-        private_data_root=private_root,
-        top10_data_root=top10_root,
-        inspected_at="2026-10-15T23:00:00Z",
-    )
-    output = write_p4_inventory(report, private_root / "decision" / "evidence-inventory-p4.json")
-    assert output.is_file()
-    assert json.loads(output.read_text(encoding="utf-8"))["decision_created"] is False
-    after = hashlib.sha256((top10_root / "top100-consensus.json").read_bytes()).hexdigest()
-    assert before == after
-
-
-def test_issuer_native_financial_document_is_supporting_not_same_date_target(tmp_path: Path) -> None:
-    private_root, top10_root = _build_roots(tmp_path)
-    raw_path = private_root / "raw" / "NVDA_q2fy2027.pdf"
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_path.write_bytes(b"%PDF-1.7\nissuer financial evidence\n")
-    raw_hash = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-    _write_json(private_root / "normalized" / "financials" / "NVDA.json", {
-        "ticker": "NVDA",
-        "documents": [{
-            "distribution": "NVIDIA official investor relations",
-            "period_end": "2026-07-26",
-            "published_at": "2026-08-26T16:20:00-04:00",
-            "sha256": raw_hash,
-        }],
+def test_known_history_guidance_and_valuation_are_dynamically_inspected(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    generated = "2026-10-15T22:00:00Z"
+    _write_json(top10_root / "top100-consensus-history.json", {
+        "generatedAt": generated,
+        "observations": [
+            {"ticker": ticker, "estimateType": kind, "accountingBasis": "adjusted/provider unknown"}
+            for ticker in ("AVGO", "NVDA") for kind in ("FY1", "FY2")
+        ],
+    })
+    _write_json(top10_root / "valuation-history.json", {
+        "generatedAt": generated,
+        "records": {ticker: [{"strictEligible": False, "pointInTimeVerified": False}] * 7 for ticker in ("AVGO", "NVDA")},
+    })
+    _write_json(top10_root / "guidance-event-ledger.json", {
+        "generatedAt": generated, "events": [{"ticker": "AVGO"}, {"ticker": "NVDA"}],
     })
     report = build_p4_evidence_inventory(
-        private_data_root=private_root,
-        top10_data_root=top10_root,
-        inspected_at="2026-10-15T23:00:00Z",
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
     )
-    assert report["same_date_target_provider_native_raw_count"] == 0
-    assert report["supporting_provider_native_raw_count"] == 1
-    supporting = report["supporting_provider_native_evidence"][0]
-    assert supporting["classification"] == "provider_native"
-    assert supporting["same_date_target_roles_satisfied"] == []
-    assert supporting["source_hash"] == raw_hash.upper()
+    rows = {row["artifact_id"]: row for row in report["artifacts"]}
+    assert rows["top10-consensus-history"]["target_records"] == {"AVGO": 2, "NVDA": 2}
+    assert rows["top10-valuation-history"]["target_records"]["AVGO"] == {
+        "rows": 7, "strict_eligible_rows": 0, "latest_point_in_time_verified": False,
+    }
+    assert rows["top10-guidance-events"]["target_records"] == {"AVGO": 1, "NVDA": 1}
 
 
-def test_invalid_inspection_timestamp_and_json_are_blocked(tmp_path: Path) -> None:
+def test_sec_counts_and_acceptance_timestamps_are_dynamic(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    _write_json(top10_root / "sec-quarterly-ledger.json", {
+        "generatedAt": "2026-10-15T22:00:00Z",
+        "records": {
+            "AVGO": [{"ticker": "AVGO", "acceptedAt": "2026-09-02T20:10:00Z"}],
+            "NVDA": {"ticker": "NVDA", "filed": "2026-08-26"},
+        },
+    })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
+    )
+    sec = next(row for row in report["artifacts"] if row["artifact_id"] == "top10-sec-quarterly")
+    assert sec["target_records"]["AVGO"] == {
+        "records": 1, "records_with_acceptance_timestamp": 1, "acceptance_timestamp_count": 1,
+    }
+    assert sec["target_records"]["NVDA"]["records"] == 1
+    assert sec["target_records"]["NVDA"]["acceptance_timestamp_count"] == 0
+
+
+def test_manifest_hash_mismatch_is_invalid_integrity(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    (private_root / "market" / "AVGO.csv").write_text("date,close\n2026-10-12,999\n", encoding="utf-8")
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
+    )
+    rows = {row["artifact_id"]: row for row in report["artifacts"]}
+    assert rows["alpha-avgo-daily-data"]["classification"] == "invalid_integrity"
+    assert rows["alpha-avgo-daily-manifest"]["classification"] == "invalid_integrity"
+    assert report["invalid_artifact_count"] >= 2
+
+
+@pytest.mark.parametrize("timestamp,status", [
+    ("2026-10-17T00:00:00Z", "future_timestamp"),
+    ("2026-10-15T22:00:00", "timezone_missing"),
+])
+def test_future_or_timezone_less_artifact_timestamp_is_blocked(
+    tmp_path: Path, timestamp: str, status: str,
+) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    _write_json(top10_root / "macro-snapshot.json", {"generatedAt": timestamp})
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
+    )
+    macro = next(row for row in report["artifacts"] if row["artifact_id"] == "top10-macro-proxy")
+    assert macro["inspection_status"] == status
+    assert report["inventory_complete"] is False
+
+
+def test_malformed_json_is_not_reported_as_missing(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    (top10_root / "macro-snapshot.json").write_text("{broken", encoding="utf-8")
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
+    )
+    macro = next(row for row in report["artifacts"] if row["artifact_id"] == "top10-macro-proxy")
+    assert macro["classification"] == "malformed"
+    assert macro["inspection_status"] == "malformed"
+
+
+def test_issuer_wording_and_raw_count_follow_actual_hash_link(tmp_path: Path) -> None:
+    _, private_root, top10_root = _build(tmp_path)
+    for ticker, distribution, suffix in (
+        ("AVGO", "PR Newswire issuer release", "html"),
+        ("NVDA", "NVIDIA official investor relations", "pdf"),
+    ):
+        raw = private_root / "raw" / f"{ticker}_report.{suffix}"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(f"{ticker} raw".encode())
+        _write_json(private_root / "normalized" / "financials" / f"{ticker}.json", {
+            "documents": [{"distribution": distribution, "period_end": "2026-07-26",
+                           "published_at": "2026-08-26T16:20:00-04:00",
+                           "sha256": hashlib.sha256(raw.read_bytes()).hexdigest()}],
+        })
+    report = build_p4_evidence_inventory(
+        private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16T08:00:00Z",
+    )
+    rows = {row["ticker"]: row for row in report["supporting_provider_native_evidence"]}
+    assert report["provider_native_raw_count"] == 2
+    assert rows["AVGO"]["official_issuer_origin_independently_verified"] is False
+    assert rows["AVGO"]["source"] == "AVGO issuer-release supporting evidence distributed by PR Newswire"
+    assert rows["NVDA"]["official_issuer_origin_independently_verified"] is True
+
+
+def test_normal_private_output_succeeds(tmp_path: Path) -> None:
+    report, private_root, _ = _build(tmp_path)
+    output = write_p4_inventory(report, private_data_root=private_root)
+    assert output == private_root / "decision" / DEFAULT_OUTPUT_NAME
+    assert json.loads(output.read_text(encoding="utf-8"))["decisions_created_in_this_run"] == 0
+
+
+@pytest.mark.parametrize("kind", ["tracked", "external_absolute", "dotdot"])
+def test_output_escape_is_blocked_and_existing_output_unchanged(tmp_path: Path, kind: str) -> None:
+    report, private_root, _ = _build(tmp_path)
+    allowed = private_root / "decision" / DEFAULT_OUTPUT_NAME
+    allowed.parent.mkdir(parents=True)
+    allowed.write_bytes(b"prior inventory")
+    if kind == "tracked":
+        requested = tmp_path / "README.md"
+    elif kind == "external_absolute":
+        requested = tmp_path.parent / "external-inventory.json"
+    else:
+        requested = private_root / "decision" / ".." / "escaped.json"
+    with pytest.raises(EvidenceInventoryError, match="must be private_data"):
+        write_p4_inventory(report, private_data_root=private_root, output_path=requested)
+    assert allowed.read_bytes() == b"prior inventory"
+
+
+def test_output_collision_with_inspected_input_is_blocked(tmp_path: Path) -> None:
+    report, private_root, _ = _build(tmp_path)
+    allowed = private_root / "decision" / DEFAULT_OUTPUT_NAME
+    allowed.parent.mkdir(parents=True)
+    allowed.write_bytes(b"source evidence")
+    with pytest.raises(EvidenceInventoryError, match="collides"):
+        write_p4_inventory(report, private_data_root=private_root, protected_paths=[allowed])
+    assert allowed.read_bytes() == b"source evidence"
+
+
+def test_temporary_output_collision_with_inspected_input_is_blocked(tmp_path: Path) -> None:
+    report, private_root, _ = _build(tmp_path)
+    allowed = private_root / "decision" / DEFAULT_OUTPUT_NAME
+    temporary = allowed.with_suffix(allowed.suffix + ".tmp")
+    with pytest.raises(EvidenceInventoryError, match="collides"):
+        write_p4_inventory(report, private_data_root=private_root, protected_paths=[temporary])
+    assert not allowed.exists()
+    assert not temporary.exists()
+
+
+def test_symlink_or_junction_output_escape_is_blocked(tmp_path: Path) -> None:
+    report, private_root, _ = _build(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        os.symlink(outside, private_root / "decision", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    with pytest.raises(EvidenceInventoryError, match="resolves outside"):
+        write_p4_inventory(report, private_data_root=private_root)
+    assert list(outside.iterdir()) == []
+
+
+def test_invalid_inspection_timestamp_is_blocked(tmp_path: Path) -> None:
     private_root, top10_root = _build_roots(tmp_path)
     with pytest.raises(EvidenceInventoryError, match="timezone-aware"):
         build_p4_evidence_inventory(
-            private_data_root=private_root,
-            top10_data_root=top10_root,
-            inspected_at="2026-10-16",
-        )
-    (top10_root / "macro-snapshot.json").write_text("{broken", encoding="utf-8")
-    with pytest.raises(EvidenceInventoryError, match="invalid JSON"):
-        build_p4_evidence_inventory(
-            private_data_root=private_root,
-            top10_data_root=top10_root,
-            inspected_at="2026-10-15T23:00:00Z",
+            private_data_root=private_root, top10_data_root=top10_root, inspected_at="2026-10-16",
         )
