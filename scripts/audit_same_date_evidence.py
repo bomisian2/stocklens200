@@ -29,6 +29,10 @@ def main() -> int:
     parser.add_argument("--decision-time", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--ready-contract-root")
+    parser.add_argument("--provenance-registry")
+    parser.add_argument("--approved-provenance-registry-sha256")
+    parser.add_argument("--usage-policy-registry")
+    parser.add_argument("--approved-usage-policy-registry-sha256")
     for role in CONTRACT_ROLES:
         flag = "--regime-contract" if role == "regime" else f"--{role.replace('_', '-')}"
         parser.add_argument(flag, dest=f"{role}_contract")
@@ -51,6 +55,10 @@ def main() -> int:
             decision_config_path=args.decision_config,
             ready_contract_paths=ready_contract_paths,
             ready_contract_root=args.ready_contract_root,
+            provenance_registry_path=args.provenance_registry,
+            approved_provenance_registry_sha256=args.approved_provenance_registry_sha256,
+            usage_policy_registry_path=args.usage_policy_registry,
+            approved_usage_policy_registry_sha256=args.approved_usage_policy_registry_sha256,
         )
         output = write_audit_report(report, args.output)
     except (OSError, DecisionEvidenceError) as exc:

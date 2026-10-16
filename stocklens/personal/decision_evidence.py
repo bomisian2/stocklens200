@@ -298,6 +298,10 @@ def audit_same_date_evidence(
     decision_config_path: str | Path | None = None,
     ready_contract_paths: dict[str, str | Path] | None = None,
     ready_contract_root: str | Path | None = None,
+    provenance_registry_path: str | Path | None = None,
+    approved_provenance_registry_sha256: str | None = None,
+    usage_policy_registry_path: str | Path | None = None,
+    approved_usage_policy_registry_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic evidence table and decision-creation gate."""
 
@@ -531,6 +535,10 @@ def audit_same_date_evidence(
         decision_time=decision_time,
         tickers=tickers,
         actual_evidence_root=ready_contract_root,
+        provenance_registry_path=provenance_registry_path,
+        approved_provenance_registry_sha256=approved_provenance_registry_sha256,
+        usage_policy_registry_path=usage_policy_registry_path,
+        approved_usage_policy_registry_sha256=approved_usage_policy_registry_sha256,
     )
     requirements = ready_contracts["requirements"]
     evidence.extend(ready_contracts["evidence"])

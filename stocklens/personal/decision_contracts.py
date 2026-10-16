@@ -21,8 +21,10 @@ from stocklens.market_calendar import (
     xnys_sessions,
 )
 
-CONTRACT_VERSION = "same-date-ready-contract-v1"
-EVIDENCE_CLASSES = {"synthetic_fixture", "actual_local_evidence"}
+CONTRACT_VERSION = "same-date-ready-contract-v2"
+EVIDENCE_CLASSES = {"synthetic_fixture", "local_evidence_candidate"}
+PROVENANCE_REGISTRY_VERSION = "same-date-provenance-registry-v1"
+USAGE_POLICY_REGISTRY_VERSION = "same-date-usage-policy-registry-v1"
 ACCOUNTING_BASES = {"gaap", "non_gaap"}
 FORECAST_HORIZONS = {"FY1", "NTM"}
 EPS_UNITS = {"currency_per_diluted_share"}
@@ -43,7 +45,6 @@ CONTRACT_ROLES = (
     "filing_timing",
     "adjusted_price_history",
     "regime",
-    "rights",
 )
 REQUIREMENT_BY_ROLE = {
     "pit_forward_eps": "verified_pit_forward_eps",
@@ -51,7 +52,6 @@ REQUIREMENT_BY_ROLE = {
     "relative_forward_multiples": "independent_qqq_soxx_peer_forward_multiples",
     "filing_timing": "sec_acceptance_or_conservative_next_session",
     "adjusted_price_history": "daily_adjusted_price_history",
-    "rights": "decision_display_rights",
 }
 
 
@@ -135,7 +135,7 @@ def _load(path: str | Path, label: str) -> tuple[Path, bytes, dict[str, Any]]:
 def _common(
     value: dict[str, Any], *, role: str, decision_at: datetime, tickers: tuple[str, ...]
 ) -> str:
-    if value.get("schema_version") != f"{role.replace('_', '-')}-v1":
+    if value.get("schema_version") != f"{role.replace('_', '-')}-v2":
         raise DecisionContractError(f"{role} schema_version is not approved")
     if value.get("contract_version") != CONTRACT_VERSION:
         raise DecisionContractError(f"{role} contract_version is not approved")
@@ -158,7 +158,7 @@ def _source_files(
     root = manifest_path.parent.resolve()
     sources: dict[str, dict[str, Any]] = {}
     evidence: list[dict[str, Any]] = []
-    expected_schema = f"{role.replace('_', '-')}-source-v1"
+    expected_schema = f"{role.replace('_', '-')}-source-v2"
     for index, item in enumerate(rows):
         row = _object(item, f"{role}.source_files[{index}]")
         relative = row.get("path")
@@ -178,7 +178,14 @@ def _source_files(
             raise DecisionContractError(f"{role}.source_files[{index}] raw schema is not approved")
         if not isinstance(parsed.get("source"), str) or not parsed["source"].strip():
             raise DecisionContractError(f"{role}.source_files[{index}] source is missing")
+        if not isinstance(parsed.get("provider"), str) or not parsed["provider"].strip():
+            raise DecisionContractError(f"{role}.source_files[{index}] provider is missing")
         available_at = _timestamp(row.get("available_at"), f"{role}.source_files[{index}].available_at")
+        captured_at = _timestamp(parsed.get("captured_at"), f"{role}.source_files[{index}].captured_at")
+        if available_at != captured_at:
+            raise DecisionContractError(
+                f"{role}.source_files[{index}].available_at does not match raw captured_at"
+            )
         if available_at > decision_at:
             raise DecisionContractError(f"{role}.source_files[{index}] is future information")
         if actual_hash in sources:
@@ -194,6 +201,7 @@ def _source_files(
             "path": str(source_path),
             "source_hash": actual_hash,
             "available_at": available_at.isoformat(),
+            "provider": parsed["provider"],
         })
     return sources, evidence
 
@@ -276,13 +284,21 @@ def _result(
     evidence: list[dict[str, Any]] | None = None,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    actual = schema_valid and classification == "actual_local_evidence"
-    status = "passed" if actual else ("fixture_validated" if schema_valid else "blocked")
-    if schema_valid and not actual:
-        reason = f"synthetic fixture validated; not actual evidence: {reason}"
+    status = (
+        "fixture_validated"
+        if schema_valid and classification == "synthetic_fixture"
+        else ("candidate_validated" if schema_valid else "blocked")
+    )
+    if schema_valid:
+        prefix = (
+            "synthetic fixture validated; not actual evidence"
+            if classification == "synthetic_fixture"
+            else "local evidence candidate validated; external approval required"
+        )
+        reason = f"{prefix}: {reason}"
     return {
         "id": requirement_id,
-        "passed": actual,
+        "passed": False,
         "schema_valid": schema_valid,
         "status": status,
         "reason": reason,
@@ -350,7 +366,7 @@ def _validate_eps(
             "accounting_basis": basis, "forecast_horizon": horizon,
             "currency": currency, "unit": unit, "as_of": as_of.isoformat(),
             "available_at": available_at.isoformat(), "source_hash": source_hash,
-            "canonical_record_hash": canonical_hash,
+            "canonical_record_hash": canonical_hash, "provider": row.get("provider"),
         }
     shared = {
         (row["accounting_basis"], row["forecast_horizon"], row["currency"], row["unit"])
@@ -372,17 +388,40 @@ def _validate_company_per(
     manifest_path, raw, value = _load(path, "company PIT Forward PER ledger")
     classification = _common(value, role="company_pit_forward_per", decision_at=decision_at, tickers=tickers)
     sources, evidence = _source_files(manifest_path, value, role="company_pit_forward_per", decision_at=decision_at)
-    raw_rows = _raw_list(sources, "company_pit_forward_per")
+    ledger_rows: list[tuple[str, datetime, dict[str, Any]]] = []
+    historical_eps: dict[tuple[str, str], tuple[dict[str, Any], datetime]] = {}
+    for source_hash, source in sources.items():
+        source_kind = source["value"].get("source_kind")
+        source_rows = source["value"].get("records")
+        if not isinstance(source_rows, list):
+            raise DecisionContractError("company_pit_forward_per raw records are missing")
+        if source_kind == "per_ledger":
+            ledger_rows.extend(
+                (source_hash, source["available_at"], _object(row, "company PER raw record"))
+                for row in source_rows
+            )
+        elif source_kind == "historical_eps_archive":
+            for raw_eps in source_rows:
+                eps_record = _object(raw_eps, "historical EPS raw record")
+                record_hash = canonical_record_hash(eps_record)
+                key = (source_hash, record_hash)
+                if key in historical_eps:
+                    raise DecisionContractError("historical EPS archive contains duplicate records")
+                historical_eps[key] = (eps_record, source["available_at"])
+        else:
+            raise DecisionContractError("company PIT PER source_kind is not approved")
+    if not ledger_rows or not historical_eps:
+        raise DecisionContractError("company PIT PER requires separate PER and historical EPS sources")
     rows = value.get("records")
-    if not isinstance(rows, list) or len(rows) != len(raw_rows):
+    if not isinstance(rows, list) or len(rows) != len(ledger_rows):
         raise DecisionContractError("company_pit_forward_per records do not match raw bytes")
     normalized: list[dict[str, Any]] = []
-    for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, rows, strict=True)):
-        eps_record = _object(raw_row.get("eps_record"), f"per[{index}].eps_record")
+    for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(ledger_rows, rows, strict=True)):
+        if "eps_record" in raw_row:
+            raise DecisionContractError("embedded historical EPS records are not approved")
         normalized.append(_exact_normalized(
             manifest_row, raw_row, source_hash=source_hash,
             label=f"company_pit_forward_per.records[{index}]",
-            extra={"underlying_eps_record_hash": canonical_record_hash(eps_record)},
         ))
     current_meta = (eps_result.get("details") or {}).get("metadata") or {}
     for ticker in tickers:
@@ -395,20 +434,38 @@ def _validate_company_per(
             observation = _session(row.get("as_of"), f"{label}.as_of")
             dates.append(observation)
             _available(row, label=label, decision_at=decision_at)
-            eps_record = _object(row.get("eps_record"), f"{label}.eps_record")
+            eps_source_hash = _hash(
+                row.get("underlying_eps_source_hash"), f"{label}.underlying_eps_source_hash"
+            )
+            eps_record_hash = _hash(
+                row.get("underlying_eps_record_hash"), f"{label}.underlying_eps_record_hash"
+            )
+            linked = historical_eps.get((eps_source_hash, eps_record_hash))
+            if linked is None:
+                raise DecisionContractError(f"{label} historical EPS source/hash link does not exist")
+            eps_record, eps_archive_captured = linked
             if eps_record.get("ticker") != ticker:
                 raise DecisionContractError(f"{label}.eps_record ticker does not match")
+            eps_as_of = _session(eps_record.get("as_of"), f"{label}.eps_record.as_of")
+            if eps_as_of > observation:
+                raise DecisionContractError(f"{label}.eps_record.as_of is later than PER observation session")
             eps_available = _timestamp(eps_record.get("available_at"), f"{label}.eps_record.available_at")
-            source_available = _timestamp(row.get("eps_source_available_at"), f"{label}.eps_source_available_at")
+            source_available = _timestamp(
+                eps_record.get("source_available_at"), f"{label}.eps_record.source_available_at"
+            )
             session_open, _ = xnys_session_bounds(observation)
             if not source_available <= eps_available < session_open:
                 raise DecisionContractError(f"{label} violates EPS source <= EPS record < PER observation session")
+            if eps_archive_captured < eps_available:
+                raise DecisionContractError(f"{label} historical EPS archive predates its record availability")
             current = current_meta.get(ticker) or {}
-            for field in ("accounting_basis", "forecast_horizon", "currency"):
+            for field in ("accounting_basis", "forecast_horizon", "currency", "provider"):
                 if row.get(field) != current.get(field) or eps_record.get(field) != row.get(field):
                     raise DecisionContractError(f"{label}.{field} does not match PIT EPS basis")
             if eps_record.get("unit") not in EPS_UNITS:
                 raise DecisionContractError(f"{label}.eps_record.unit is not approved")
+            if canonical_record_hash(eps_record) != eps_record_hash:
+                raise DecisionContractError(f"{label} historical EPS canonical hash mismatch")
             if row.get("unit") not in PER_UNITS:
                 raise DecisionContractError(f"{label}.unit is not approved")
             if row.get("split_adjustment_policy") not in SPLIT_POLICIES:
@@ -428,7 +485,11 @@ def _validate_company_per(
         "company_pit_forward_per_ledger", classification=classification, schema_valid=True,
         reason="historical PER rows reproduce raw price/EPS and bind exact prior-available EPS records",
         manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
-        details={"row_count": len(normalized), "source_hashes": sorted(sources)},
+        details={
+            "row_count": len(normalized),
+            "historical_eps_record_count": len(historical_eps),
+            "source_hashes": sorted(sources),
+        },
     )
 
 
@@ -442,11 +503,20 @@ def _validate_relative(
     rows = value.get("records")
     if not isinstance(rows, list) or len(rows) != len(raw_rows):
         raise DecisionContractError("relative Forward multiples do not match raw bytes")
-    normalized = [
-        _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
-                          label=f"relative_forward_multiples.records[{index}]")
-        for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, rows, strict=True))
-    ]
+    normalized: list[dict[str, Any]] = []
+    source_available_by_hash: dict[str, datetime] = {}
+    for index, ((source_hash, source_available, raw_row), manifest_row) in enumerate(
+        zip(raw_rows, rows, strict=True)
+    ):
+        normalized.append(
+            _exact_normalized(
+                manifest_row,
+                raw_row,
+                source_hash=source_hash,
+                label=f"relative_forward_multiples.records[{index}]",
+            )
+        )
+        source_available_by_hash[source_hash] = source_available
     roles = [row.get("role") for row in normalized]
     if len(roles) != len(set(roles)):
         raise DecisionContractError("relative Forward multiples contain duplicate roles")
@@ -458,7 +528,9 @@ def _validate_relative(
         role = str(row["role"])
         label = f"relative_forward_multiples.{role}"
         as_of_values.add(_session(row.get("as_of"), f"{label}.as_of").isoformat())
-        _available(row, label=label, decision_at=decision_at)
+        record_available = _available(row, label=label, decision_at=decision_at)
+        if source_available_by_hash[str(row["source_hash"])] < record_available:
+            raise DecisionContractError(f"{label} source was captured before record availability")
         for field in ("accounting_basis", "forecast_horizon", "currency"):
             if row.get(field) != eps_meta.get(field):
                 raise DecisionContractError(f"{label}.{field} does not match PIT EPS basis")
@@ -595,11 +667,36 @@ def _validate_prices(
         if not isinstance(rows, list) or len(rows) != len(raw_rows) or len(rows) < 200:
             raise DecisionContractError(f"{symbol} adjusted price history has fewer than 200 raw-bound rows")
         dates: list[date] = []
+        source_available = sources[source_hash]["available_at"]
+        latest_record_available: datetime | None = None
         for index, (raw_row_value, manifest_row) in enumerate(zip(raw_rows, rows, strict=True)):
             raw_row = _object(raw_row_value, f"{symbol}.raw[{index}]")
-            row = _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
-                                    label=f"{symbol}.prices[{index}]")
-            dates.append(_session(row.get("date"), f"{symbol}.prices[{index}].date"))
+            row = _exact_normalized(
+                manifest_row,
+                raw_row,
+                source_hash=source_hash,
+                label=f"{symbol}.prices[{index}]",
+                extra={"original_source_hash": source_hash},
+            )
+            label = f"{symbol}.prices[{index}]"
+            if row.get("price_basis") not in {"close", "adjusted_close"}:
+                raise DecisionContractError(f"{label}.price_basis is not approved")
+            session = _session(row.get("session"), f"{label}.session")
+            dates.append(session)
+            _, expected_close = xnys_session_bounds(session)
+            declared_close = _timestamp(row.get("session_close_at"), f"{label}.session_close_at")
+            if declared_close != expected_close:
+                raise DecisionContractError(f"{label}.session_close_at does not match XNYS close")
+            record_available = _available(row, label=label, decision_at=decision_at)
+            if record_available < expected_close:
+                raise DecisionContractError(f"{label}.available_at is before XNYS session close")
+            if record_available.date() != session:
+                raise DecisionContractError(f"{label}.available_at is backdated or delayed to another session")
+            if row.get("corporate_action_basis") != value.get("adjustment_policy"):
+                raise DecisionContractError(f"{label}.corporate_action_basis does not match ledger policy")
+            if source_available < record_available:
+                raise DecisionContractError(f"{label} source was captured before record availability")
+            latest_record_available = max(latest_record_available or record_available, record_available)
             _number(row.get("adjusted_close"), f"{symbol}.prices[{index}].adjusted_close")
         if dates != sorted(dates) or len(dates) != len(set(dates)):
             raise DecisionContractError(f"{symbol} adjusted price dates must be unique and chronological")
@@ -607,6 +704,8 @@ def _validate_prices(
             raise DecisionContractError(
                 f"{symbol} latest price session {dates[-1]} is not latest completed XNYS session {expected_latest}"
             )
+        if latest_record_available is None:
+            raise DecisionContractError(f"{symbol} adjusted price availability is missing")
     return _result(
         "daily_adjusted_price_history", classification=classification, schema_valid=True,
         reason="raw-bound adjusted histories contain only XNYS sessions through the latest completed session",
@@ -625,10 +724,12 @@ def _validate_regime(
     rows = value.get("records")
     if not isinstance(rows, list) or len(rows) != 1 or len(raw_rows) != 1:
         raise DecisionContractError("regime must contain exactly one raw-bound record")
-    source_hash, _, raw_row = raw_rows[0]
+    source_hash, source_available, raw_row = raw_rows[0]
     row = _exact_normalized(rows[0], raw_row, source_hash=source_hash, label="regime.records[0]")
     as_of = _session(row.get("as_of"), "regime.as_of")
-    _available(row, label="regime", decision_at=decision_at)
+    record_available = _available(row, label="regime", decision_at=decision_at)
+    if source_available < record_available:
+        raise DecisionContractError("regime source was captured before record availability")
     if row.get("risk_state") not in REGIME_STATES:
         raise DecisionContractError("regime.risk_state is not approved")
     if row.get("source_kind") != "cross_project_market_proxy":
@@ -642,52 +743,176 @@ def _validate_regime(
     }
 
 
-def _validate_rights(
-    path: str | Path, decision_at: datetime, tickers: tuple[str, ...], required_hashes: set[str]
-) -> dict[str, Any]:
-    manifest_path, raw, value = _load(path, "rights manifest")
-    classification = _common(value, role="rights", decision_at=decision_at, tickers=tickers)
-    sources, evidence = _source_files(manifest_path, value, role="rights", decision_at=decision_at)
-    raw_rows = _raw_list(sources, "rights")
+def _load_pinned_registry(
+    path: str | Path | None,
+    approved_sha256: str | None,
+    *,
+    label: str,
+    schema_version: str,
+) -> tuple[Path, bytes, dict[str, Any]]:
+    if path is None:
+        raise DecisionContractError(f"{label} is missing")
+    if approved_sha256 is None:
+        raise DecisionContractError(f"{label} approved SHA-256 is missing")
+    registry_path, raw, value = _load(path, label)
+    if _hash(approved_sha256, f"{label} approved SHA-256") != _sha256(raw):
+        raise DecisionContractError(f"{label} SHA-256 mismatch")
+    if value.get("schema_version") != schema_version:
+        raise DecisionContractError(f"{label} schema_version is not approved")
+    return registry_path, raw, value
+
+
+def _validate_provenance_registry(
+    path: str | Path | None,
+    approved_sha256: str | None,
+    *,
+    decision_at: datetime,
+    source_evidence: list[dict[str, Any]],
+    actual_evidence_root: str | Path | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    registry_path, raw, value = _load_pinned_registry(
+        path,
+        approved_sha256,
+        label="provenance registry",
+        schema_version=PROVENANCE_REGISTRY_VERSION,
+    )
+    approved_root = Path(actual_evidence_root).resolve() if actual_evidence_root else None
+    if approved_root is None:
+        raise DecisionContractError("actual evidence root is not approved")
     records = value.get("records")
-    if not isinstance(records, list) or len(records) != len(raw_rows):
-        raise DecisionContractError("rights records do not match raw bytes")
-    normalized = [
-        _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
-                          label=f"rights.records[{index}]")
-        for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, records, strict=True))
-    ]
+    if not isinstance(records, list) or not records:
+        raise DecisionContractError("provenance registry records are missing")
     by_hash: dict[str, dict[str, Any]] = {}
-    for row in normalized:
-        evidence_hash = _hash(row.get("evidence_source_hash"), "rights.evidence_source_hash")
-        if evidence_hash in by_hash:
-            raise DecisionContractError("rights records contain a duplicate evidence_source_hash")
-        by_hash[evidence_hash] = row
+    for index, item in enumerate(records):
+        row = _object(item, f"provenance.records[{index}]")
+        source_hash = _hash(row.get("original_file_sha256"), "provenance.original_file_sha256")
+        if source_hash in by_hash:
+            raise DecisionContractError("provenance registry contains duplicate source hashes")
+        for field in (
+            "provider",
+            "captured_at",
+            "original_mime_type",
+            "collector_version",
+            "parser_version",
+            "original_file_path",
+            "approval_receipt",
+        ):
+            if not isinstance(row.get(field), str) or not row[field].strip():
+                raise DecisionContractError(f"provenance.{field} is missing")
+        if not (row.get("original_source_url") or row.get("official_document_id")):
+            raise DecisionContractError("provenance source URL or official document id is missing")
+        if _timestamp(row["captured_at"], "provenance.captured_at") > decision_at:
+            raise DecisionContractError("provenance capture is later than decision_time")
+        source_path = Path(row["original_file_path"])
+        if not source_path.is_absolute():
+            source_path = (registry_path.parent / source_path).resolve()
+        else:
+            source_path = source_path.resolve()
+        try:
+            source_path.relative_to(approved_root)
+        except ValueError as exc:
+            raise DecisionContractError("provenance source path is outside the approved root") from exc
+        if not source_path.is_file() or _sha256(source_path.read_bytes()) != source_hash:
+            raise DecisionContractError("provenance source bytes do not match original_file_sha256")
+        by_hash[source_hash] = {**row, "resolved_path": str(source_path)}
+    required = {str(row["source_hash"]): row for row in source_evidence}
+    if set(required) != set(by_hash):
+        raise DecisionContractError("provenance registry does not exactly cover decision source hashes")
+    for source_hash, evidence in required.items():
+        registry_row = by_hash[source_hash]
+        if Path(evidence["path"]).resolve() != Path(registry_row["resolved_path"]):
+            raise DecisionContractError("provenance source path does not match current contract source")
+        if evidence.get("provider") != registry_row.get("provider"):
+            raise DecisionContractError("provenance provider does not match current contract source")
+    registry_evidence = [{
+        "role": "approval_registry:provenance",
+        "path": str(registry_path.resolve()),
+        "source_hash": _sha256(raw),
+    }]
+    return {
+        "registry_hash": _sha256(raw),
+        "providers": sorted({str(row["provider"]) for row in by_hash.values()}),
+        "covered_source_hashes": sorted(by_hash),
+    }, registry_evidence
+
+
+def _validate_usage_policy_registry(
+    path: str | Path | None,
+    approved_sha256: str | None,
+    *,
+    decision_at: datetime,
+    provenance: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    registry_path, raw, value = _load_pinned_registry(
+        path,
+        approved_sha256,
+        label="usage policy registry",
+        schema_version=USAGE_POLICY_REGISTRY_VERSION,
+    )
+    records = value.get("records")
+    if not isinstance(records, list) or not records:
+        raise DecisionContractError("usage policy registry records are missing")
+    providers: set[str] = set()
+    evidence: list[dict[str, Any]] = [{
+        "role": "approval_registry:usage_policy",
+        "path": str(registry_path.resolve()),
+        "source_hash": _sha256(raw),
+    }]
+    for index, item in enumerate(records):
+        row = _object(item, f"usage_policy.records[{index}]")
+        provider = row.get("provider")
+        if not isinstance(provider, str) or not provider.strip() or provider in providers:
+            raise DecisionContractError("usage policy provider is missing or duplicated")
+        providers.add(provider)
         if row.get("usage_scope") not in USAGE_SCOPES:
-            raise DecisionContractError(f"rights for {evidence_hash} have an invalid usage_scope")
+            raise DecisionContractError(f"usage policy for {provider} has an invalid scope")
         for field in ("storage_allowed", "derivative_analysis_allowed", "local_display_allowed"):
             if row.get(field) is not True:
-                raise DecisionContractError(f"rights for {evidence_hash} do not permit {field}")
-        reviewed = _timestamp(row.get("reviewed_at"), f"rights[{evidence_hash}].reviewed_at")
-        expires = _timestamp(row.get("expires_at"), f"rights[{evidence_hash}].expires_at")
-        if reviewed > decision_at:
-            raise DecisionContractError(f"rights for {evidence_hash} were reviewed after decision_time")
-        if expires <= decision_at:
-            raise DecisionContractError(f"rights for {evidence_hash} are expired")
-    if required_hashes - set(by_hash):
-        raise DecisionContractError("rights manifest does not cover every decision source_hash")
-    return _result(
-        "decision_display_rights", classification=classification, schema_valid=True,
-        reason="local storage, derivative analysis, and display rights cover every evidence source",
-        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
-        details={"covered_source_hashes": sorted(required_hashes), "source_hashes": sorted(sources)},
-    )
+                raise DecisionContractError(f"usage policy for {provider} does not permit {field}")
+        clauses = row.get("terms_clause_ids")
+        if not isinstance(clauses, list) or not clauses or not all(
+            isinstance(clause, str) and clause.strip() for clause in clauses
+        ):
+            raise DecisionContractError(f"usage policy for {provider} has no terms clauses")
+        if not isinstance(row.get("approval_receipt"), str) or not row["approval_receipt"].strip():
+            raise DecisionContractError(f"usage policy for {provider} approval receipt is missing")
+        reviewed = _timestamp(row.get("reviewed_at"), f"usage_policy[{provider}].reviewed_at")
+        expires = _timestamp(row.get("expires_at"), f"usage_policy[{provider}].expires_at")
+        if reviewed > decision_at or expires <= decision_at:
+            raise DecisionContractError(f"usage policy for {provider} is not valid at decision_time")
+        terms_path_value = row.get("terms_document_path")
+        if not isinstance(terms_path_value, str) or not terms_path_value:
+            raise DecisionContractError(f"usage policy for {provider} terms document is missing")
+        terms_path = Path(terms_path_value)
+        if not terms_path.is_absolute():
+            terms_path = (registry_path.parent / terms_path).resolve()
+        expected_terms_hash = _hash(
+            row.get("terms_document_sha256"), f"usage_policy[{provider}].terms_document_sha256"
+        )
+        if not terms_path.is_file() or _sha256(terms_path.read_bytes()) != expected_terms_hash:
+            raise DecisionContractError(f"usage policy for {provider} terms document hash mismatch")
+        evidence.append({
+            "role": f"usage_terms:{provider}",
+            "path": str(terms_path),
+            "source_hash": expected_terms_hash,
+        })
+    if providers != set(provenance.get("providers") or []):
+        raise DecisionContractError("usage policy registry does not exactly cover provenance providers")
+    return {
+        "registry_hash": _sha256(raw),
+        "providers": sorted(providers),
+        "covered_source_hashes": provenance.get("covered_source_hashes") or [],
+    }, evidence
 
 
 def validate_ready_contracts(
     contract_paths: dict[str, str | Path] | None,
     *, decision_time: str, tickers: tuple[str, ...],
     actual_evidence_root: str | Path | None = None,
+    provenance_registry_path: str | Path | None = None,
+    approved_provenance_registry_sha256: str | None = None,
+    usage_policy_registry_path: str | Path | None = None,
+    approved_usage_policy_registry_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Validate raw-bound offline manifests without creating a decision."""
     decision_at = _timestamp(decision_time, "decision_time")
@@ -730,13 +955,6 @@ def validate_ready_contracts(
         regime_error = "regime manifest is missing"
     except (OSError, DecisionContractError, ValueError) as exc:
         regime_error = str(exc)
-
-    required_hashes: set[str] = set()
-    for result in results.values():
-        required_hashes.update((result.get("details") or {}).get("source_hashes") or [])
-    if regime:
-        required_hashes.update(regime["source_hashes"])
-    results["decision_display_rights"] = run("rights", _validate_rights, required_hashes)
 
     price_as_of_value = (results["daily_adjusted_price_history"].get("details") or {}).get("latest_session")
     relative_as_of_value = (results["independent_qqq_soxx_peer_forward_multiples"].get("details") or {}).get("as_of")
@@ -790,6 +1008,52 @@ def validate_ready_contracts(
     if len(classifications) > 1:
         for result in results.values():
             result.update(passed=False, status="blocked", reason="evidence classifications are mixed across contracts")
+    source_evidence_by_hash: dict[str, dict[str, Any]] = {}
+    for result in results.values():
+        for item in result.get("evidence") or []:
+            if str(item.get("role", "")).startswith("contract_source:"):
+                source_evidence_by_hash[str(item["source_hash"])] = item
+    provenance: dict[str, Any] | None = None
+    provenance_evidence: list[dict[str, Any]] = []
+    provenance_error: str | None = None
+    try:
+        provenance, provenance_evidence = _validate_provenance_registry(
+            provenance_registry_path,
+            approved_provenance_registry_sha256,
+            decision_at=decision_at,
+            source_evidence=list(source_evidence_by_hash.values()),
+            actual_evidence_root=actual_evidence_root,
+        )
+    except (OSError, DecisionContractError, ValueError) as exc:
+        provenance_error = str(exc)
+
+    rights_error: str | None = None
+    rights_evidence: list[dict[str, Any]] = []
+    if provenance is None:
+        rights_error = f"provenance approval failed: {provenance_error}"
+    else:
+        try:
+            rights, rights_evidence = _validate_usage_policy_registry(
+                usage_policy_registry_path,
+                approved_usage_policy_registry_sha256,
+                decision_at=decision_at,
+                provenance=provenance,
+            )
+            results["decision_display_rights"] = _result(
+                "decision_display_rights",
+                classification=classification,
+                schema_valid=True,
+                reason="pre-pinned usage-policy registry and terms evidence cover every provider",
+                manifest_path=Path(usage_policy_registry_path) if usage_policy_registry_path else None,
+                manifest_hash=rights["registry_hash"],
+                evidence=rights_evidence,
+                details=rights,
+            )
+        except (OSError, DecisionContractError, ValueError) as exc:
+            rights_error = str(exc)
+    if rights_error is not None:
+        results["decision_display_rights"] = _blocked_result("decision_display_rights", rights_error)
+
     evidence: list[dict[str, Any]] = []
     for result in results.values():
         if result.get("manifest_path") and result.get("manifest_hash"):
@@ -798,22 +1062,9 @@ def validate_ready_contracts(
                 "source_hash": result["manifest_hash"],
             })
         evidence.extend(result.get("evidence") or [])
+    evidence.extend(provenance_evidence)
+    evidence.extend(rights_evidence)
     unique = {(row["role"], row["path"], row["source_hash"]): row for row in evidence}
-    if classification == "actual_local_evidence":
-        approved_root = Path(actual_evidence_root).resolve() if actual_evidence_root else None
-        root_error = None
-        if approved_root is None:
-            root_error = "actual evidence root is not approved"
-        else:
-            for row in unique.values():
-                try:
-                    Path(row["path"]).resolve().relative_to(approved_root)
-                except (KeyError, TypeError, ValueError):
-                    root_error = "actual evidence path is outside the approved root"
-                    break
-        if root_error:
-            for result in results.values():
-                result.update(passed=False, status="blocked", reason=root_error)
 
     order = (
         "verified_pit_forward_eps", "company_pit_forward_per_ledger",
@@ -822,11 +1073,42 @@ def validate_ready_contracts(
         "daily_adjusted_price_history", "decision_display_rights",
     )
     requirements = [results[key] for key in order]
+    trust_ready = (
+        classification == "local_evidence_candidate"
+        and provenance is not None
+        and rights_error is None
+        and all(bool(row.get("schema_valid")) for row in requirements)
+    )
+    if trust_ready:
+        for row in requirements:
+            row.update(
+                passed=True,
+                status="passed",
+                reason=str(row["reason"]).replace(
+                    "local evidence candidate validated; external approval required: ", ""
+                ),
+                evidence_classification="actual_local_evidence",
+            )
+        output_classification = "actual_local_evidence"
+    else:
+        output_classification = classification
+        if classification == "local_evidence_candidate" and provenance_error:
+            for row in requirements:
+                if row.get("schema_valid"):
+                    row.update(
+                        passed=False,
+                        status="blocked",
+                        reason=f"provenance approval failed: {provenance_error}",
+                    )
     return {
-        "contract_version": CONTRACT_VERSION, "evidence_classification": classification,
+        "contract_version": CONTRACT_VERSION, "evidence_classification": output_classification,
         "decision_time": decision_time, "target_tickers": list(tickers),
         "requirements": requirements, "evidence": list(unique.values()),
         "schema_valid": all(bool(row.get("schema_valid")) for row in requirements),
         "promotion_ready": all(bool(row.get("passed")) for row in requirements),
         "decision_created": False,
+        "provenance_registry_hash": provenance.get("registry_hash") if provenance else None,
+        "usage_policy_registry_hash": (
+            (results.get("decision_display_rights", {}).get("details") or {}).get("registry_hash")
+        ),
     }
