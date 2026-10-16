@@ -30,12 +30,13 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--ready-contract-root")
     for role in CONTRACT_ROLES:
-        parser.add_argument(f"--{role.replace('_', '-')}")
+        flag = "--regime-contract" if role == "regime" else f"--{role.replace('_', '-')}"
+        parser.add_argument(flag, dest=f"{role}_contract")
     args = parser.parse_args()
     ready_contract_paths = {
-        role: getattr(args, role)
+        role: getattr(args, f"{role}_contract")
         for role in CONTRACT_ROLES
-        if getattr(args, role)
+        if getattr(args, f"{role}_contract")
     }
     try:
         report = audit_same_date_evidence(

@@ -1,8 +1,7 @@
-"""Strict offline evidence contracts for Same-Date decision promotion.
+"""Fail-closed offline contracts for Same-Date decision promotion.
 
-The validators in this module do not fetch data and do not create a decision.
-They bind normalized records to preserved source bytes and distinguish a
-synthetic fixture from evidence that is eligible for a local production audit.
+Every normalized row is reconstructed from preserved source bytes. The
+module performs no network access and never creates an investment decision.
 """
 
 from __future__ import annotations
@@ -14,18 +13,28 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from stocklens.market_calendar import (
+    is_xnys_session,
+    latest_completed_session,
+    next_xnys_session,
+    xnys_session_bounds,
+    xnys_sessions,
+)
 
 CONTRACT_VERSION = "same-date-ready-contract-v1"
 EVIDENCE_CLASSES = {"synthetic_fixture", "actual_local_evidence"}
 ACCOUNTING_BASES = {"gaap", "non_gaap"}
 FORECAST_HORIZONS = {"FY1", "NTM"}
-PER_UNITS = {"multiple"}
 EPS_UNITS = {"currency_per_diluted_share"}
+PER_UNITS = {"multiple"}
 USAGE_SCOPES = {"personal_local_research"}
 WEIGHTING_METHODS = {"equal_weight", "market_cap"}
 TIMING_BASES = {"sec_acceptance_timestamp", "conservative_next_session"}
 PRICE_ADJUSTMENT_POLICIES = {"split_and_cash_dividend_adjusted"}
 SPLIT_POLICIES = {"price_and_eps_split_adjusted"}
+REGIME_STATES = {"risk_on", "neutral", "risk_off"}
+EPS_MAX_LAG_SESSIONS = 1
+REGIME_MAX_LAG_SESSIONS = 1
 
 CONTRACT_ROLES = (
     "pit_forward_eps",
@@ -33,9 +42,9 @@ CONTRACT_ROLES = (
     "relative_forward_multiples",
     "filing_timing",
     "adjusted_price_history",
+    "regime",
     "rights",
 )
-
 REQUIREMENT_BY_ROLE = {
     "pit_forward_eps": "verified_pit_forward_eps",
     "company_pit_forward_per": "company_pit_forward_per_ledger",
@@ -47,11 +56,22 @@ REQUIREMENT_BY_ROLE = {
 
 
 class DecisionContractError(ValueError):
-    """Raised when an offline contract is malformed or internally inconsistent."""
+    """Raised when evidence is malformed, stale, future-dated, or unbound."""
 
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest().upper()
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def canonical_record_hash(value: dict[str, Any]) -> str:
+    """Return the stable hash binding normalized fields to one raw record."""
+    return _sha256(_canonical_bytes(value))
 
 
 def _hash(value: Any, label: str) -> str:
@@ -88,10 +108,16 @@ def _date(value: Any, label: str) -> date:
 def _number(value: Any, label: str, *, positive: bool = True) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise DecisionContractError(f"{label} must be numeric")
-    number = float(value)
-    if not math.isfinite(number) or (positive and number <= 0):
+    result = float(value)
+    if not math.isfinite(result) or (positive and result <= 0):
         raise DecisionContractError(f"{label} must be a finite positive number")
-    return number
+    return result
+
+
+def _object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise DecisionContractError(f"{label} must be an object")
+    return value
 
 
 def _load(path: str | Path, label: str) -> tuple[Path, bytes, dict[str, Any]]:
@@ -103,17 +129,11 @@ def _load(path: str | Path, label: str) -> tuple[Path, bytes, dict[str, Any]]:
         value = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DecisionContractError(f"{label} is not valid UTF-8 JSON") from exc
-    if not isinstance(value, dict):
-        raise DecisionContractError(f"{label} root must be an object")
-    return source, raw, value
+    return source, raw, _object(value, f"{label} root")
 
 
 def _common(
-    value: dict[str, Any],
-    *,
-    role: str,
-    decision_at: datetime,
-    tickers: tuple[str, ...],
+    value: dict[str, Any], *, role: str, decision_at: datetime, tickers: tuple[str, ...]
 ) -> str:
     if value.get("schema_version") != f"{role.replace('_', '-')}-v1":
         raise DecisionContractError(f"{role} schema_version is not approved")
@@ -130,53 +150,96 @@ def _common(
 
 
 def _source_files(
-    manifest_path: Path, value: dict[str, Any], *, label: str, decision_at: datetime
-) -> tuple[dict[str, Path], list[dict[str, Any]]]:
+    manifest_path: Path, value: dict[str, Any], *, role: str, decision_at: datetime
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     rows = value.get("source_files")
     if not isinstance(rows, list) or not rows:
-        raise DecisionContractError(f"{label}.source_files are missing")
-    by_hash: dict[str, Path] = {}
-    evidence: list[dict[str, Any]] = []
+        raise DecisionContractError(f"{role}.source_files are missing")
     root = manifest_path.parent.resolve()
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise DecisionContractError(f"{label}.source_files[{index}] is invalid")
+    sources: dict[str, dict[str, Any]] = {}
+    evidence: list[dict[str, Any]] = []
+    expected_schema = f"{role.replace('_', '-')}-source-v1"
+    for index, item in enumerate(rows):
+        row = _object(item, f"{role}.source_files[{index}]")
         relative = row.get("path")
         if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
-            raise DecisionContractError(f"{label}.source_files[{index}].path must be relative")
+            raise DecisionContractError(f"{role}.source_files[{index}].path must be relative")
         path = (root / relative).resolve()
         try:
             path.relative_to(root)
         except ValueError as exc:
-            raise DecisionContractError(f"{label}.source_files[{index}].path escapes root") from exc
-        if not path.is_file():
-            raise DecisionContractError(f"{label}.source_files[{index}] is missing")
-        expected = _hash(row.get("source_hash"), f"{label}.source_files[{index}].source_hash")
-        actual = _sha256(path.read_bytes())
-        if actual != expected:
-            raise DecisionContractError(f"{label}.source_files[{index}] source_hash mismatch")
-        available_at = _timestamp(row.get("available_at"), f"{label}.source_files[{index}].available_at")
+            raise DecisionContractError(f"{role}.source_files[{index}].path escapes root") from exc
+        source_path, raw, parsed = _load(path, f"{role}.source_files[{index}]")
+        expected_hash = _hash(row.get("source_hash"), f"{role}.source_files[{index}].source_hash")
+        actual_hash = _sha256(raw)
+        if expected_hash != actual_hash:
+            raise DecisionContractError(f"{role}.source_files[{index}] source_hash mismatch")
+        if parsed.get("raw_schema_version") != expected_schema:
+            raise DecisionContractError(f"{role}.source_files[{index}] raw schema is not approved")
+        if not isinstance(parsed.get("source"), str) or not parsed["source"].strip():
+            raise DecisionContractError(f"{role}.source_files[{index}] source is missing")
+        available_at = _timestamp(row.get("available_at"), f"{role}.source_files[{index}].available_at")
         if available_at > decision_at:
-            raise DecisionContractError(f"{label}.source_files[{index}] is future information")
-        if actual in by_hash:
-            raise DecisionContractError(f"{label}.source_files contain a duplicate source_hash")
-        by_hash[actual] = path
-        evidence.append(
-            {
-                "role": f"contract_source:{label}:{index}",
-                "path": str(path),
-                "source_hash": actual,
-                "available_at": available_at.isoformat(),
-            }
+            raise DecisionContractError(f"{role}.source_files[{index}] is future information")
+        if actual_hash in sources:
+            raise DecisionContractError(f"{role}.source_files contain a duplicate source_hash")
+        sources[actual_hash] = {
+            "path": source_path,
+            "raw": raw,
+            "value": parsed,
+            "available_at": available_at,
+        }
+        evidence.append({
+            "role": f"contract_source:{role}:{index}",
+            "path": str(source_path),
+            "source_hash": actual_hash,
+            "available_at": available_at.isoformat(),
+        })
+    return sources, evidence
+
+
+def _raw_list(
+    sources: dict[str, dict[str, Any]], label: str
+) -> list[tuple[str, datetime, dict[str, Any]]]:
+    records: list[tuple[str, datetime, dict[str, Any]]] = []
+    for source_hash, source in sources.items():
+        rows = source["value"].get("records")
+        if not isinstance(rows, list):
+            raise DecisionContractError(f"{label} raw records are missing")
+        records.extend(
+            (source_hash, source["available_at"], _object(row, f"{label} raw record"))
+            for row in rows
         )
-    return by_hash, evidence
+    return records
 
 
-def _record_source_hash(row: dict[str, Any], hashes: dict[str, Path], label: str) -> str:
-    source_hash = _hash(row.get("source_hash"), f"{label}.source_hash")
-    if source_hash not in hashes:
-        raise DecisionContractError(f"{label}.source_hash is not linked to source_files")
-    return source_hash
+def _raw_dict(
+    sources: dict[str, dict[str, Any]], label: str
+) -> dict[str, tuple[str, list[Any]]]:
+    merged: dict[str, tuple[str, list[Any]]] = {}
+    for source_hash, source in sources.items():
+        records = source["value"].get("records")
+        if not isinstance(records, dict):
+            raise DecisionContractError(f"{label} raw records are missing")
+        for symbol, rows in records.items():
+            if symbol in merged or not isinstance(rows, list):
+                raise DecisionContractError(f"{label} raw symbol set is invalid")
+            merged[str(symbol)] = (source_hash, rows)
+    return merged
+
+
+def _exact_normalized(
+    manifest_row: Any,
+    raw_row: dict[str, Any],
+    *,
+    source_hash: str,
+    label: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = {**raw_row, "source_hash": source_hash, **(extra or {})}
+    if manifest_row != normalized:
+        raise DecisionContractError(f"{label} does not match parsed source bytes")
+    return normalized
 
 
 def _available(row: dict[str, Any], *, label: str, decision_at: datetime) -> datetime:
@@ -184,6 +247,22 @@ def _available(row: dict[str, Any], *, label: str, decision_at: datetime) -> dat
     if available_at > decision_at:
         raise DecisionContractError(f"{label}.available_at is later than decision_time")
     return available_at
+
+
+def _session(value: Any, label: str) -> date:
+    result = _date(value, label)
+    if not is_xnys_session(result):
+        raise DecisionContractError(f"{label} is not an XNYS session")
+    return result
+
+
+def _session_lag(older: date, newer: date, label: str) -> int:
+    if older > newer:
+        raise DecisionContractError(f"{label} is later than the aligned price session")
+    sessions = xnys_sessions(older, newer)
+    if not sessions or sessions[0] != older or sessions[-1] != newer:
+        raise DecisionContractError(f"{label} is not aligned to XNYS sessions")
+    return len(sessions) - 1
 
 
 def _result(
@@ -216,12 +295,7 @@ def _result(
 
 
 def _blocked_result(requirement_id: str, reason: str) -> dict[str, Any]:
-    return _result(
-        requirement_id,
-        classification=None,
-        schema_valid=False,
-        reason=reason,
-    )
+    return _result(requirement_id, classification=None, schema_valid=False, reason=reason)
 
 
 def _validate_eps(
@@ -229,23 +303,28 @@ def _validate_eps(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest_path, raw, value = _load(path, "PIT Forward EPS manifest")
     classification = _common(value, role="pit_forward_eps", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="pit_forward_eps", decision_at=decision_at)
-    records = value.get("records")
-    if not isinstance(records, list) or len(records) != len(tickers):
-        raise DecisionContractError("pit_forward_eps.records must contain one row per ticker")
-    metadata: dict[str, dict[str, str]] = {}
-    seen: set[str] = set()
-    for index, row in enumerate(records):
-        if not isinstance(row, dict):
-            raise DecisionContractError(f"pit_forward_eps.records[{index}] is invalid")
+    sources, evidence = _source_files(manifest_path, value, role="pit_forward_eps", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "pit_forward_eps")
+    rows = value.get("records")
+    if not isinstance(rows, list) or len(rows) != len(raw_rows) or len(rows) != len(tickers):
+        raise DecisionContractError("pit_forward_eps.records must contain one raw-bound row per ticker")
+    metadata: dict[str, dict[str, Any]] = {}
+    for index, ((source_hash, source_available, raw_row), manifest_row) in enumerate(
+        zip(raw_rows, rows, strict=True)
+    ):
+        canonical_hash = canonical_record_hash(raw_row)
+        row = _exact_normalized(
+            manifest_row, raw_row, source_hash=source_hash,
+            label=f"pit_forward_eps.records[{index}]",
+            extra={"canonical_record_hash": canonical_hash},
+        )
         ticker = row.get("ticker")
-        if ticker not in tickers or ticker in seen:
+        if ticker not in tickers or ticker in metadata:
             raise DecisionContractError("pit_forward_eps ticker set is invalid")
-        seen.add(str(ticker))
-        basis = row.get("accounting_basis")
-        horizon = row.get("forecast_horizon")
-        currency = row.get("currency")
-        unit = row.get("unit")
+        basis, horizon, currency, unit = (
+            row.get("accounting_basis"), row.get("forecast_horizon"),
+            row.get("currency"), row.get("unit"),
+        )
         if basis not in ACCOUNTING_BASES:
             raise DecisionContractError(f"{ticker} accounting_basis is not approved")
         if horizon not in FORECAST_HORIZONS:
@@ -258,158 +337,187 @@ def _validate_eps(
             raise DecisionContractError(f"{ticker} usage_scope is not approved")
         if not isinstance(row.get("provider"), str) or not row["provider"].strip():
             raise DecisionContractError(f"{ticker} provider is missing")
-        _date(row.get("as_of"), f"{ticker}.as_of")
-        _available(row, label=str(ticker), decision_at=decision_at)
-        source_hash = _record_source_hash(row, hashes, str(ticker))
+        as_of = _session(row.get("as_of"), f"{ticker}.as_of")
+        available_at = _available(row, label=str(ticker), decision_at=decision_at)
+        if source_available > available_at:
+            raise DecisionContractError(f"{ticker} source was not available by the EPS record timestamp")
         low = _number(row.get("eps_low"), f"{ticker}.eps_low")
         base = _number(row.get("eps_base"), f"{ticker}.eps_base")
         high = _number(row.get("eps_high"), f"{ticker}.eps_high")
         if not low <= base <= high:
             raise DecisionContractError(f"{ticker} EPS scenarios are not ordered")
         metadata[str(ticker)] = {
-            "accounting_basis": str(basis),
-            "forecast_horizon": str(horizon),
-            "currency": str(currency),
-            "unit": str(unit),
-            "source_hash": source_hash,
+            "accounting_basis": basis, "forecast_horizon": horizon,
+            "currency": currency, "unit": unit, "as_of": as_of.isoformat(),
+            "available_at": available_at.isoformat(), "source_hash": source_hash,
+            "canonical_record_hash": canonical_hash,
         }
-    shared = {(m["accounting_basis"], m["forecast_horizon"], m["currency"], m["unit"]) for m in metadata.values()}
+    shared = {
+        (row["accounting_basis"], row["forecast_horizon"], row["currency"], row["unit"])
+        for row in metadata.values()
+    }
     if len(shared) != 1:
         raise DecisionContractError("PIT Forward EPS basis, horizon, currency, and unit must match")
-    result = _result(
-        "verified_pit_forward_eps",
-        classification=classification,
-        schema_valid=True,
-        reason="PIT EPS rows and preserved source bytes passed the offline contract",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"metadata": metadata, "source_hashes": sorted(hashes)},
-    )
-    return result, value
+    return _result(
+        "verified_pit_forward_eps", classification=classification, schema_valid=True,
+        reason="raw consensus bytes deterministically reproduce every PIT EPS record",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"metadata": metadata, "source_hashes": sorted(sources)},
+    ), value
 
 
 def _validate_company_per(
-    path: str | Path,
-    decision_at: datetime,
-    tickers: tuple[str, ...],
-    eps_result: dict[str, Any],
+    path: str | Path, decision_at: datetime, tickers: tuple[str, ...], eps_result: dict[str, Any]
 ) -> dict[str, Any]:
     manifest_path, raw, value = _load(path, "company PIT Forward PER ledger")
     classification = _common(value, role="company_pit_forward_per", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="company_pit_forward_per", decision_at=decision_at)
-    records = value.get("records")
-    if not isinstance(records, list):
-        raise DecisionContractError("company_pit_forward_per.records are missing")
-    eps_meta = (eps_result.get("details") or {}).get("metadata") or {}
-    eps_hashes = set((eps_result.get("details") or {}).get("source_hashes") or [])
+    sources, evidence = _source_files(manifest_path, value, role="company_pit_forward_per", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "company_pit_forward_per")
+    rows = value.get("records")
+    if not isinstance(rows, list) or len(rows) != len(raw_rows):
+        raise DecisionContractError("company_pit_forward_per records do not match raw bytes")
+    normalized: list[dict[str, Any]] = []
+    for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, rows, strict=True)):
+        eps_record = _object(raw_row.get("eps_record"), f"per[{index}].eps_record")
+        normalized.append(_exact_normalized(
+            manifest_row, raw_row, source_hash=source_hash,
+            label=f"company_pit_forward_per.records[{index}]",
+            extra={"underlying_eps_record_hash": canonical_record_hash(eps_record)},
+        ))
+    current_meta = (eps_result.get("details") or {}).get("metadata") or {}
     for ticker in tickers:
-        rows = [row for row in records if isinstance(row, dict) and row.get("ticker") == ticker]
-        if len(rows) < 20:
+        ticker_rows = [row for row in normalized if row.get("ticker") == ticker]
+        if len(ticker_rows) < 20:
             raise DecisionContractError(f"{ticker} company PIT Forward PER history has fewer than 20 rows")
         dates: list[date] = []
-        for index, row in enumerate(rows):
+        for index, row in enumerate(ticker_rows):
             label = f"{ticker}.per[{index}]"
-            observation = _date(row.get("as_of"), f"{label}.as_of")
+            observation = _session(row.get("as_of"), f"{label}.as_of")
             dates.append(observation)
-            available_at = _available(row, label=label, decision_at=decision_at)
-            if available_at.date() >= observation:
-                raise DecisionContractError(
-                    f"{label}.underlying EPS was not available before the price session"
-                )
-            _record_source_hash(row, hashes, label)
-            underlying_hash = _hash(row.get("underlying_eps_hash"), f"{label}.underlying_eps_hash")
-            if underlying_hash not in eps_hashes:
-                raise DecisionContractError(f"{label}.underlying_eps_hash is not linked to PIT EPS evidence")
-            meta = eps_meta.get(ticker) or {}
+            _available(row, label=label, decision_at=decision_at)
+            eps_record = _object(row.get("eps_record"), f"{label}.eps_record")
+            if eps_record.get("ticker") != ticker:
+                raise DecisionContractError(f"{label}.eps_record ticker does not match")
+            eps_available = _timestamp(eps_record.get("available_at"), f"{label}.eps_record.available_at")
+            source_available = _timestamp(row.get("eps_source_available_at"), f"{label}.eps_source_available_at")
+            session_open, _ = xnys_session_bounds(observation)
+            if not source_available <= eps_available < session_open:
+                raise DecisionContractError(f"{label} violates EPS source <= EPS record < PER observation session")
+            current = current_meta.get(ticker) or {}
             for field in ("accounting_basis", "forecast_horizon", "currency"):
-                if row.get(field) != meta.get(field):
+                if row.get(field) != current.get(field) or eps_record.get(field) != row.get(field):
                     raise DecisionContractError(f"{label}.{field} does not match PIT EPS basis")
+            if eps_record.get("unit") not in EPS_UNITS:
+                raise DecisionContractError(f"{label}.eps_record.unit is not approved")
             if row.get("unit") not in PER_UNITS:
                 raise DecisionContractError(f"{label}.unit is not approved")
             if row.get("split_adjustment_policy") not in SPLIT_POLICIES:
                 raise DecisionContractError(f"{label}.split_adjustment_policy is not approved")
             price = _number(row.get("price"), f"{label}.price")
-            eps = _number(row.get("forward_eps"), f"{label}.forward_eps")
+            forward_eps = _number(row.get("forward_eps"), f"{label}.forward_eps")
+            if not math.isclose(forward_eps, _number(eps_record.get("eps_base"), f"{label}.eps_record.eps_base"), rel_tol=1e-12):
+                raise DecisionContractError(f"{label}.forward_eps does not match its PIT EPS record")
             multiple = _number(row.get("forward_per"), f"{label}.forward_per")
-            if not math.isclose(price / eps, multiple, rel_tol=1e-6, abs_tol=1e-6):
+            if not math.isclose(price / forward_eps, multiple, rel_tol=1e-9, abs_tol=1e-9):
                 raise DecisionContractError(f"{label}.forward_per calculation mismatch")
-        if (max(dates) - min(dates)).days < 730:
-            raise DecisionContractError(f"{ticker} company PIT Forward PER history spans less than two years")
         if dates != sorted(dates) or len(dates) != len(set(dates)):
-            raise DecisionContractError(
-                f"{ticker} company PIT Forward PER dates must be unique and chronological"
-            )
+            raise DecisionContractError(f"{ticker} PER dates must be unique and chronological")
+        if (dates[-1] - dates[0]).days < 730:
+            raise DecisionContractError(f"{ticker} PER history spans less than two years")
     return _result(
-        "company_pit_forward_per_ledger",
-        classification=classification,
-        schema_valid=True,
-        reason="same-basis point-in-time PER rows passed minimum count and span checks",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"row_count": len(records), "source_hashes": sorted(hashes)},
+        "company_pit_forward_per_ledger", classification=classification, schema_valid=True,
+        reason="historical PER rows reproduce raw price/EPS and bind exact prior-available EPS records",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"row_count": len(normalized), "source_hashes": sorted(sources)},
     )
 
 
 def _validate_relative(
-    path: str | Path,
-    decision_at: datetime,
-    tickers: tuple[str, ...],
-    eps_result: dict[str, Any],
+    path: str | Path, decision_at: datetime, tickers: tuple[str, ...], eps_result: dict[str, Any]
 ) -> dict[str, Any]:
     manifest_path, raw, value = _load(path, "relative Forward multiples ledger")
     classification = _common(value, role="relative_forward_multiples", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="relative_forward_multiples", decision_at=decision_at)
-    records = value.get("records")
-    if not isinstance(records, list):
-        raise DecisionContractError("relative_forward_multiples.records are missing")
-    required_roles = {"qqq", "soxx", "peer_basket"}
-    by_role = {row.get("role"): row for row in records if isinstance(row, dict)}
-    if set(by_role) != required_roles:
+    sources, evidence = _source_files(manifest_path, value, role="relative_forward_multiples", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "relative_forward_multiples")
+    rows = value.get("records")
+    if not isinstance(rows, list) or len(rows) != len(raw_rows):
+        raise DecisionContractError("relative Forward multiples do not match raw bytes")
+    normalized = [
+        _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
+                          label=f"relative_forward_multiples.records[{index}]")
+        for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, rows, strict=True))
+    ]
+    roles = [row.get("role") for row in normalized]
+    if len(roles) != len(set(roles)):
+        raise DecisionContractError("relative Forward multiples contain duplicate roles")
+    if set(roles) != {"qqq", "soxx", "peer_basket"}:
         raise DecisionContractError("relative Forward multiples must contain QQQ, SOXX, and peer_basket")
     eps_meta = next(iter(((eps_result.get("details") or {}).get("metadata") or {}).values()), {})
     as_of_values: set[str] = set()
-    for role in sorted(required_roles):
-        row = by_role[role]
+    for row in normalized:
+        role = str(row["role"])
         label = f"relative_forward_multiples.{role}"
-        as_of_values.add(str(_date(row.get("as_of"), f"{label}.as_of")))
+        as_of_values.add(_session(row.get("as_of"), f"{label}.as_of").isoformat())
         _available(row, label=label, decision_at=decision_at)
-        _record_source_hash(row, hashes, label)
         for field in ("accounting_basis", "forecast_horizon", "currency"):
             if row.get(field) != eps_meta.get(field):
                 raise DecisionContractError(f"{label}.{field} does not match PIT EPS basis")
         if row.get("unit") not in PER_UNITS:
             raise DecisionContractError(f"{label}.unit is not approved")
-        _number(row.get("forward_multiple"), f"{label}.forward_multiple")
-        if row.get("weighting_method") not in WEIGHTING_METHODS:
+        method = row.get("weighting_method")
+        if method not in WEIGHTING_METHODS:
             raise DecisionContractError(f"{label}.weighting_method is not approved")
         constituents = row.get("constituents")
         if not isinstance(constituents, list) or not constituents:
             raise DecisionContractError(f"{label}.constituents are missing")
-        weights = [_number(item.get("weight"), f"{label}.constituent.weight") for item in constituents if isinstance(item, dict)]
-        if len(weights) != len(constituents) or not math.isclose(sum(weights), 1.0, abs_tol=1e-6):
-            raise DecisionContractError(f"{label}.constituent weights must sum to 1")
-        for index, constituent in enumerate(constituents):
-            constituent_label = f"{label}.constituents[{index}]"
-            if not isinstance(constituent.get("ticker"), str) or not constituent["ticker"]:
-                raise DecisionContractError(f"{constituent_label}.ticker is missing")
+        names = [item.get("ticker") for item in constituents if isinstance(item, dict)]
+        if len(names) != len(constituents) or len(names) != len(set(names)):
+            raise DecisionContractError(f"{label}.constituent tickers are missing or duplicated")
+        total_market_cap = sum(_number(item.get("market_cap"), f"{label}.constituent.market_cap") for item in constituents)
+        recomputed = 0.0
+        for index, item in enumerate(constituents):
+            item_label = f"{label}.constituents[{index}]"
             for field in ("accounting_basis", "forecast_horizon", "currency"):
-                if constituent.get(field) != eps_meta.get(field):
-                    raise DecisionContractError(
-                        f"{constituent_label}.{field} does not match PIT EPS basis"
-                    )
+                if item.get(field) != eps_meta.get(field):
+                    raise DecisionContractError(f"{item_label}.{field} does not match PIT EPS basis")
+            constituent_evidence = {
+                "ticker": item.get("ticker"),
+                "accounting_basis": item.get("accounting_basis"),
+                "forecast_horizon": item.get("forecast_horizon"),
+                "currency": item.get("currency"),
+                "as_of": item.get("as_of"),
+                "price": item.get("price"),
+                "forward_eps": item.get("forward_eps"),
+            }
+            source_record_hash = _hash(
+                item.get("source_record_hash"), f"{item_label}.source_record_hash"
+            )
+            if source_record_hash != canonical_record_hash(constituent_evidence):
+                raise DecisionContractError(
+                    f"{item_label}.source_record_hash does not match constituent fields"
+                )
+            if _session(item.get("as_of"), f"{item_label}.as_of").isoformat() != row.get("as_of"):
+                raise DecisionContractError(f"{item_label}.as_of does not match aggregate session")
+            price = _number(item.get("price"), f"{item_label}.price")
+            forward_eps = _number(item.get("forward_eps"), f"{item_label}.forward_eps")
+            multiple = _number(item.get("forward_multiple"), f"{item_label}.forward_multiple")
+            if not math.isclose(price / forward_eps, multiple, rel_tol=1e-9, abs_tol=1e-9):
+                raise DecisionContractError(f"{item_label}.forward_multiple calculation mismatch")
+            weight = _number(item.get("weight"), f"{item_label}.weight")
+            expected_weight = 1 / len(constituents) if method == "equal_weight" else float(item["market_cap"]) / total_market_cap
+            if not math.isclose(weight, expected_weight, rel_tol=1e-9, abs_tol=1e-9):
+                raise DecisionContractError(f"{item_label}.weight does not match {method}")
+            recomputed += weight * multiple
+        aggregate = _number(row.get("forward_multiple"), f"{label}.forward_multiple")
+        if not math.isclose(aggregate, recomputed, rel_tol=1e-9, abs_tol=1e-9):
+            raise DecisionContractError(f"{label}.forward_multiple does not match constituent recomputation")
     if len(as_of_values) != 1:
         raise DecisionContractError("relative Forward multiples do not share one as_of date")
     return _result(
-        "independent_qqq_soxx_peer_forward_multiples",
-        classification=classification,
-        schema_valid=True,
-        reason="QQQ, SOXX, and peer multiples share one verified EPS basis and date",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"as_of": next(iter(as_of_values)), "source_hashes": sorted(hashes)},
+        "independent_qqq_soxx_peer_forward_multiples", classification=classification,
+        schema_valid=True, reason="QQQ, SOXX, and peer aggregates reproduce constituent price/EPS multiples",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"as_of": next(iter(as_of_values)), "source_hashes": sorted(sources)},
     )
 
 
@@ -418,41 +526,46 @@ def _validate_filing(
 ) -> dict[str, Any]:
     manifest_path, raw, value = _load(path, "filing timing manifest")
     classification = _common(value, role="filing_timing", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="filing_timing", decision_at=decision_at)
-    records = value.get("records")
-    if not isinstance(records, list) or len(records) != len(tickers):
-        raise DecisionContractError("filing_timing.records must contain one row per ticker")
+    sources, evidence = _source_files(manifest_path, value, role="filing_timing", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "filing_timing")
+    rows = value.get("records")
+    if not isinstance(rows, list) or len(rows) != len(raw_rows) or len(rows) != len(tickers):
+        raise DecisionContractError("filing_timing records do not match raw bytes")
     seen: set[str] = set()
-    for index, row in enumerate(records):
-        if not isinstance(row, dict):
-            raise DecisionContractError(f"filing_timing.records[{index}] is invalid")
+    for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, rows, strict=True)):
+        row = _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
+                                label=f"filing_timing.records[{index}]")
         ticker = row.get("ticker")
         if ticker not in tickers or ticker in seen:
             raise DecisionContractError("filing_timing ticker set is invalid")
         seen.add(str(ticker))
-        _record_source_hash(row, hashes, str(ticker))
         filing_date = _date(row.get("filing_date"), f"{ticker}.filing_date")
-        usable = _date(row.get("usable_from_session"), f"{ticker}.usable_from_session")
+        usable = _session(row.get("usable_from_session"), f"{ticker}.usable_from_session")
         basis = row.get("timing_basis")
         if basis not in TIMING_BASES:
             raise DecisionContractError(f"{ticker}.timing_basis is not approved")
-        if basis == "sec_acceptance_timestamp":
+        if basis == "conservative_next_session":
+            if row.get("accepted_at") is not None or usable != next_xnys_session(filing_date):
+                raise DecisionContractError(f"{ticker} conservative usable date is not the next XNYS session")
+        else:
             accepted = _timestamp(row.get("accepted_at"), f"{ticker}.accepted_at")
             if accepted > decision_at:
                 raise DecisionContractError(f"{ticker}.accepted_at is future information")
-        elif usable <= filing_date:
-            raise DecisionContractError(f"{ticker} same-day entry is blocked without acceptance timestamp")
+            accepted_day = accepted.date()
+            if is_xnys_session(accepted_day):
+                _, close = xnys_session_bounds(accepted_day)
+                expected = accepted_day if accepted < close else next_xnys_session(accepted_day)
+            else:
+                expected = next_xnys_session(accepted_day)
+            if usable != expected:
+                raise DecisionContractError(f"{ticker} SEC acceptance does not map to the correct XNYS session")
         if usable > decision_at.date():
             raise DecisionContractError(f"{ticker}.usable_from_session is after decision_time")
     return _result(
-        "sec_acceptance_or_conservative_next_session",
-        classification=classification,
-        schema_valid=True,
-        reason="filing availability uses SEC acceptance or a conservative next-session rule",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"source_hashes": sorted(hashes)},
+        "sec_acceptance_or_conservative_next_session", classification=classification,
+        schema_valid=True, reason="filing timestamps map to an exact XNYS session with after-close handling",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"source_hashes": sorted(sources)},
     )
 
 
@@ -461,220 +574,238 @@ def _validate_prices(
 ) -> dict[str, Any]:
     manifest_path, raw, value = _load(path, "adjusted price ledger")
     classification = _common(value, role="adjusted_price_history", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="adjusted_price_history", decision_at=decision_at)
+    sources, evidence = _source_files(manifest_path, value, role="adjusted_price_history", decision_at=decision_at)
     if value.get("adjustment_policy") not in PRICE_ADJUSTMENT_POLICIES:
         raise DecisionContractError("adjusted price ledger adjustment_policy is not approved")
     if value.get("calendar") != "XNYS":
         raise DecisionContractError("adjusted price ledger calendar must be XNYS")
     if not isinstance(value.get("corporate_action_policy"), str) or not value["corporate_action_policy"].strip():
         raise DecisionContractError("adjusted price ledger corporate_action_policy is missing")
+    raw_records = _raw_dict(sources, "adjusted_price_history")
     records = value.get("records")
-    if not isinstance(records, dict):
-        raise DecisionContractError("adjusted price ledger records are missing")
+    if not isinstance(records, dict) or set(records) != set(raw_records):
+        raise DecisionContractError("adjusted price symbol set does not match raw bytes")
     symbols = (*tickers, "QQQ", "SOXX")
-    latest: dict[str, str] = {}
+    if set(records) != set(symbols):
+        raise DecisionContractError("adjusted price ledger must contain target tickers, QQQ, and SOXX")
+    expected_latest = latest_completed_session(decision_at).session_date
     for symbol in symbols:
-        rows = records.get(symbol)
-        if not isinstance(rows, list) or len(rows) < 200:
-            raise DecisionContractError(f"{symbol} adjusted price history has fewer than 200 rows")
+        source_hash, raw_rows = raw_records[symbol]
+        rows = records[symbol]
+        if not isinstance(rows, list) or len(rows) != len(raw_rows) or len(rows) < 200:
+            raise DecisionContractError(f"{symbol} adjusted price history has fewer than 200 raw-bound rows")
         dates: list[date] = []
-        for index, row in enumerate(rows):
-            if not isinstance(row, dict):
-                raise DecisionContractError(f"{symbol}.prices[{index}] is invalid")
-            label = f"{symbol}.prices[{index}]"
-            dates.append(_date(row.get("date"), f"{label}.date"))
-            _number(row.get("adjusted_close"), f"{label}.adjusted_close")
-            _record_source_hash(row, hashes, label)
+        for index, (raw_row_value, manifest_row) in enumerate(zip(raw_rows, rows, strict=True)):
+            raw_row = _object(raw_row_value, f"{symbol}.raw[{index}]")
+            row = _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
+                                    label=f"{symbol}.prices[{index}]")
+            dates.append(_session(row.get("date"), f"{symbol}.prices[{index}].date"))
+            _number(row.get("adjusted_close"), f"{symbol}.prices[{index}].adjusted_close")
         if dates != sorted(dates) or len(dates) != len(set(dates)):
             raise DecisionContractError(f"{symbol} adjusted price dates must be unique and chronological")
-        if dates[-1] > decision_at.date():
-            raise DecisionContractError(f"{symbol} adjusted price history contains future information")
-        latest[symbol] = dates[-1].isoformat()
-    if len(set(latest.values())) != 1:
-        raise DecisionContractError("adjusted price histories do not share one latest session")
+        if dates[-1].isoformat() != expected_latest:
+            raise DecisionContractError(
+                f"{symbol} latest price session {dates[-1]} is not latest completed XNYS session {expected_latest}"
+            )
     return _result(
-        "daily_adjusted_price_history",
-        classification=classification,
-        schema_valid=True,
-        reason="daily adjusted histories, corporate-action policy, and XNYS calendar passed",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"latest_session": next(iter(latest.values())), "source_hashes": sorted(hashes)},
+        "daily_adjusted_price_history", classification=classification, schema_valid=True,
+        reason="raw-bound adjusted histories contain only XNYS sessions through the latest completed session",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"latest_session": expected_latest, "source_hashes": sorted(sources)},
     )
 
 
+def _validate_regime(
+    path: str | Path, decision_at: datetime, tickers: tuple[str, ...]
+) -> dict[str, Any]:
+    manifest_path, raw, value = _load(path, "regime manifest")
+    classification = _common(value, role="regime", decision_at=decision_at, tickers=tickers)
+    sources, evidence = _source_files(manifest_path, value, role="regime", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "regime")
+    rows = value.get("records")
+    if not isinstance(rows, list) or len(rows) != 1 or len(raw_rows) != 1:
+        raise DecisionContractError("regime must contain exactly one raw-bound record")
+    source_hash, _, raw_row = raw_rows[0]
+    row = _exact_normalized(rows[0], raw_row, source_hash=source_hash, label="regime.records[0]")
+    as_of = _session(row.get("as_of"), "regime.as_of")
+    _available(row, label="regime", decision_at=decision_at)
+    if row.get("risk_state") not in REGIME_STATES:
+        raise DecisionContractError("regime.risk_state is not approved")
+    if row.get("source_kind") != "cross_project_market_proxy":
+        raise DecisionContractError("regime.source_kind is not an approved proxy")
+    if not isinstance(row.get("indicators"), dict) or not row["indicators"]:
+        raise DecisionContractError("regime.indicators are missing")
+    return {
+        "classification": classification, "as_of": as_of.isoformat(),
+        "manifest_path": manifest_path, "manifest_hash": _sha256(raw),
+        "evidence": evidence, "source_hashes": sorted(sources),
+    }
+
+
 def _validate_rights(
-    path: str | Path,
-    decision_at: datetime,
-    tickers: tuple[str, ...],
-    required_hashes: set[str],
+    path: str | Path, decision_at: datetime, tickers: tuple[str, ...], required_hashes: set[str]
 ) -> dict[str, Any]:
     manifest_path, raw, value = _load(path, "rights manifest")
     classification = _common(value, role="rights", decision_at=decision_at, tickers=tickers)
-    hashes, evidence = _source_files(manifest_path, value, label="rights", decision_at=decision_at)
+    sources, evidence = _source_files(manifest_path, value, role="rights", decision_at=decision_at)
+    raw_rows = _raw_list(sources, "rights")
     records = value.get("records")
-    if not isinstance(records, list):
-        raise DecisionContractError("rights.records are missing")
+    if not isinstance(records, list) or len(records) != len(raw_rows):
+        raise DecisionContractError("rights records do not match raw bytes")
+    normalized = [
+        _exact_normalized(manifest_row, raw_row, source_hash=source_hash,
+                          label=f"rights.records[{index}]")
+        for index, ((source_hash, _, raw_row), manifest_row) in enumerate(zip(raw_rows, records, strict=True))
+    ]
     by_hash: dict[str, dict[str, Any]] = {}
-    for index, row in enumerate(records):
-        if not isinstance(row, dict):
-            raise DecisionContractError(f"rights.records[{index}] is invalid")
-        source_hash = _hash(row.get("source_hash"), f"rights.records[{index}].source_hash")
-        if source_hash in by_hash:
-            raise DecisionContractError("rights records contain a duplicate source_hash")
-        by_hash[source_hash] = row
+    for row in normalized:
+        evidence_hash = _hash(row.get("evidence_source_hash"), "rights.evidence_source_hash")
+        if evidence_hash in by_hash:
+            raise DecisionContractError("rights records contain a duplicate evidence_source_hash")
+        by_hash[evidence_hash] = row
         if row.get("usage_scope") not in USAGE_SCOPES:
-            raise DecisionContractError(f"rights for {source_hash} have an invalid usage_scope")
+            raise DecisionContractError(f"rights for {evidence_hash} have an invalid usage_scope")
         for field in ("storage_allowed", "derivative_analysis_allowed", "local_display_allowed"):
             if row.get(field) is not True:
-                raise DecisionContractError(f"rights for {source_hash} do not permit {field}")
-        reviewed = _timestamp(row.get("reviewed_at"), f"rights[{source_hash}].reviewed_at")
-        expires = _timestamp(row.get("expires_at"), f"rights[{source_hash}].expires_at")
+                raise DecisionContractError(f"rights for {evidence_hash} do not permit {field}")
+        reviewed = _timestamp(row.get("reviewed_at"), f"rights[{evidence_hash}].reviewed_at")
+        expires = _timestamp(row.get("expires_at"), f"rights[{evidence_hash}].expires_at")
         if reviewed > decision_at:
-            raise DecisionContractError(f"rights for {source_hash} were reviewed after decision_time")
+            raise DecisionContractError(f"rights for {evidence_hash} were reviewed after decision_time")
         if expires <= decision_at:
-            raise DecisionContractError(f"rights for {source_hash} are expired")
-    missing = required_hashes - set(by_hash)
-    if missing:
+            raise DecisionContractError(f"rights for {evidence_hash} are expired")
+    if required_hashes - set(by_hash):
         raise DecisionContractError("rights manifest does not cover every decision source_hash")
     return _result(
-        "decision_display_rights",
-        classification=classification,
-        schema_valid=True,
-        reason="storage, derivative analysis, and local display rights cover every source hash",
-        manifest_path=manifest_path,
-        manifest_hash=_sha256(raw),
-        evidence=evidence,
-        details={"covered_source_hashes": sorted(required_hashes), "source_hashes": sorted(hashes)},
+        "decision_display_rights", classification=classification, schema_valid=True,
+        reason="local storage, derivative analysis, and display rights cover every evidence source",
+        manifest_path=manifest_path, manifest_hash=_sha256(raw), evidence=evidence,
+        details={"covered_source_hashes": sorted(required_hashes), "source_hashes": sorted(sources)},
     )
 
 
 def validate_ready_contracts(
     contract_paths: dict[str, str | Path] | None,
-    *,
-    decision_time: str,
-    tickers: tuple[str, ...],
+    *, decision_time: str, tickers: tuple[str, ...],
     actual_evidence_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Validate all six offline manifests without creating a snapshot or decision."""
-
+    """Validate raw-bound offline manifests without creating a decision."""
     decision_at = _timestamp(decision_time, "decision_time")
     paths = contract_paths or {}
     results: dict[str, dict[str, Any]] = {}
-    loaded_classifications: set[str] = set()
+    classifications: set[str] = set()
 
     def run(role: str, validator: Any, *args: Any) -> dict[str, Any]:
         requirement_id = REQUIREMENT_BY_ROLE[role]
-        path = paths.get(role)
-        if path is None:
+        if role not in paths:
             return _blocked_result(requirement_id, f"{role} manifest is missing")
         try:
-            result = validator(path, decision_at, tickers, *args)
-        except (OSError, DecisionContractError) as exc:
+            result = validator(paths[role], decision_at, tickers, *args)
+        except (OSError, DecisionContractError, ValueError) as exc:
             return _blocked_result(requirement_id, str(exc))
-        classification = result.get("evidence_classification")
-        if isinstance(classification, str):
-            loaded_classifications.add(classification)
+        if isinstance(result.get("evidence_classification"), str):
+            classifications.add(result["evidence_classification"])
         return result
 
     try:
         eps_result, _ = _validate_eps(paths["pit_forward_eps"], decision_at, tickers)
     except KeyError:
         eps_result = _blocked_result("verified_pit_forward_eps", "pit_forward_eps manifest is missing")
-    except (OSError, DecisionContractError) as exc:
+    except (OSError, DecisionContractError, ValueError) as exc:
         eps_result = _blocked_result("verified_pit_forward_eps", str(exc))
     if isinstance(eps_result.get("evidence_classification"), str):
-        loaded_classifications.add(str(eps_result["evidence_classification"]))
+        classifications.add(eps_result["evidence_classification"])
     results["verified_pit_forward_eps"] = eps_result
+    results["company_pit_forward_per_ledger"] = run("company_pit_forward_per", _validate_company_per, eps_result)
+    results["independent_qqq_soxx_peer_forward_multiples"] = run("relative_forward_multiples", _validate_relative, eps_result)
+    results["sec_acceptance_or_conservative_next_session"] = run("filing_timing", _validate_filing)
+    results["daily_adjusted_price_history"] = run("adjusted_price_history", _validate_prices)
 
-    results["company_pit_forward_per_ledger"] = run(
-        "company_pit_forward_per", _validate_company_per, eps_result
-    )
-    results["independent_qqq_soxx_peer_forward_multiples"] = run(
-        "relative_forward_multiples", _validate_relative, eps_result
-    )
-    results["sec_acceptance_or_conservative_next_session"] = run(
-        "filing_timing", _validate_filing
-    )
-    results["daily_adjusted_price_history"] = run(
-        "adjusted_price_history", _validate_prices
-    )
+    regime: dict[str, Any] | None = None
+    regime_error: str | None = None
+    try:
+        regime = _validate_regime(paths["regime"], decision_at, tickers)
+        classifications.add(regime["classification"])
+    except KeyError:
+        regime_error = "regime manifest is missing"
+    except (OSError, DecisionContractError, ValueError) as exc:
+        regime_error = str(exc)
 
     required_hashes: set[str] = set()
-    for requirement_id, result in results.items():
-        if requirement_id == "decision_display_rights":
-            continue
+    for result in results.values():
         required_hashes.update((result.get("details") or {}).get("source_hashes") or [])
-    rights_path = paths.get("rights")
-    if rights_path is None:
-        rights_result = _blocked_result("decision_display_rights", "rights manifest is missing")
-    else:
-        try:
-            rights_result = _validate_rights(rights_path, decision_at, tickers, required_hashes)
-        except (OSError, DecisionContractError) as exc:
-            rights_result = _blocked_result("decision_display_rights", str(exc))
-    results["decision_display_rights"] = rights_result
-    if isinstance(rights_result.get("evidence_classification"), str):
-        loaded_classifications.add(str(rights_result["evidence_classification"]))
+    if regime:
+        required_hashes.update(regime["source_hashes"])
+    results["decision_display_rights"] = run("rights", _validate_rights, required_hashes)
 
-    relative_as_of = (results["independent_qqq_soxx_peer_forward_multiples"].get("details") or {}).get("as_of")
-    price_as_of = (results["daily_adjusted_price_history"].get("details") or {}).get("latest_session")
-    alignment_schema_valid = bool(relative_as_of and price_as_of and relative_as_of == price_as_of)
-    classification = next(iter(loaded_classifications)) if len(loaded_classifications) == 1 else None
+    price_as_of_value = (results["daily_adjusted_price_history"].get("details") or {}).get("latest_session")
+    relative_as_of_value = (results["independent_qqq_soxx_peer_forward_multiples"].get("details") or {}).get("as_of")
+    eps_dates = {
+        str(row.get("as_of"))
+        for row in ((eps_result.get("details") or {}).get("metadata") or {}).values()
+        if row.get("as_of")
+    }
+    alignment_error = regime_error
+    alignment_details = {
+        "decision_time": decision_time, "price_as_of": price_as_of_value,
+        "relative_as_of": relative_as_of_value, "eps_as_of": sorted(eps_dates),
+        "regime_as_of": regime.get("as_of") if regime else None,
+        "eps_max_lag_sessions": EPS_MAX_LAG_SESSIONS,
+        "regime_max_lag_sessions": REGIME_MAX_LAG_SESSIONS,
+    }
+    if alignment_error is None:
+        try:
+            if not price_as_of_value or relative_as_of_value != price_as_of_value:
+                raise DecisionContractError("relative multiples and price do not share the latest session")
+            price_as_of = _session(price_as_of_value, "aligned.price_as_of")
+            if len(eps_dates) != 1:
+                raise DecisionContractError("PIT EPS records do not share one as_of session")
+            eps_lag = _session_lag(_session(next(iter(eps_dates)), "aligned.eps_as_of"), price_as_of, "EPS")
+            regime_lag = _session_lag(_session(regime["as_of"], "aligned.regime_as_of"), price_as_of, "regime")
+            alignment_details.update({"eps_lag_sessions": eps_lag, "regime_lag_sessions": regime_lag})
+            if eps_lag > EPS_MAX_LAG_SESSIONS:
+                raise DecisionContractError("PIT EPS is stale for the decision session")
+            if regime_lag > REGIME_MAX_LAG_SESSIONS:
+                raise DecisionContractError("regime is stale for the decision session")
+        except (DecisionContractError, ValueError) as exc:
+            alignment_error = str(exc)
+    classification = next(iter(classifications)) if len(classifications) == 1 else None
     results["same_date_price_and_regime"] = _result(
-        "same_date_price_and_regime",
-        classification=classification,
-        schema_valid=alignment_schema_valid,
-        reason=(
-            f"relative multiples and adjusted prices share {price_as_of}"
-            if alignment_schema_valid
-            else f"relative multiples={relative_as_of}, adjusted prices={price_as_of}"
-        ),
-        details={"as_of": price_as_of},
+        "same_date_price_and_regime", classification=classification,
+        schema_valid=alignment_error is None,
+        reason=("price, EPS, relative multiples, regime, and decision time are aligned" if alignment_error is None else str(alignment_error)),
+        details=alignment_details, evidence=(regime.get("evidence") or []) if regime else [],
+        manifest_path=regime.get("manifest_path") if regime else None,
+        manifest_hash=regime.get("manifest_hash") if regime else None,
     )
-    original_schema_valid = bool(eps_result.get("schema_valid") and (eps_result.get("evidence") or []))
+    original_valid = bool(eps_result.get("schema_valid") and eps_result.get("evidence"))
     results["original_consensus_bytes"] = _result(
-        "original_consensus_bytes",
-        classification=eps_result.get("evidence_classification"),
-        schema_valid=original_schema_valid,
-        reason=(
-            "PIT Forward EPS records are linked to preserved source bytes"
-            if original_schema_valid
-            else "PIT Forward EPS manifest or preserved source-byte linkage is missing"
-        ),
+        "original_consensus_bytes", classification=eps_result.get("evidence_classification"),
+        schema_valid=original_valid,
+        reason=("normalized PIT EPS exactly reproduces preserved consensus bytes" if original_valid else "PIT EPS raw-byte linkage is missing"),
         evidence=list(eps_result.get("evidence") or []),
         details={"source_hashes": (eps_result.get("details") or {}).get("source_hashes") or []},
     )
 
-    if len(loaded_classifications) > 1:
+    if len(classifications) > 1:
         for result in results.values():
-            result["passed"] = False
-            result["status"] = "blocked"
-            result["reason"] = "evidence classifications are mixed across contracts"
+            result.update(passed=False, status="blocked", reason="evidence classifications are mixed across contracts")
     evidence: list[dict[str, Any]] = []
     for result in results.values():
-        manifest_path = result.get("manifest_path")
-        manifest_hash = result.get("manifest_hash")
-        if manifest_path and manifest_hash:
-            evidence.append(
-                {
-                    "role": f"contract_manifest:{result['id']}",
-                    "path": manifest_path,
-                    "source_hash": manifest_hash,
-                }
-            )
+        if result.get("manifest_path") and result.get("manifest_hash"):
+            evidence.append({
+                "role": f"contract_manifest:{result['id']}", "path": result["manifest_path"],
+                "source_hash": result["manifest_hash"],
+            })
         evidence.extend(result.get("evidence") or [])
-    unique_evidence = {
-        (row["role"], row["path"], row["source_hash"]): row for row in evidence
-    }
+    unique = {(row["role"], row["path"], row["source_hash"]): row for row in evidence}
     if classification == "actual_local_evidence":
         approved_root = Path(actual_evidence_root).resolve() if actual_evidence_root else None
-        root_error: str | None = None
+        root_error = None
         if approved_root is None:
             root_error = "actual evidence root is not approved"
         else:
-            for row in unique_evidence.values():
+            for row in unique.values():
                 try:
                     Path(row["path"]).resolve().relative_to(approved_root)
                 except (KeyError, TypeError, ValueError):
@@ -682,26 +813,20 @@ def validate_ready_contracts(
                     break
         if root_error:
             for result in results.values():
-                result["passed"] = False
-                result["status"] = "blocked"
-                result["reason"] = root_error
+                result.update(passed=False, status="blocked", reason=root_error)
+
+    order = (
+        "verified_pit_forward_eps", "company_pit_forward_per_ledger",
+        "independent_qqq_soxx_peer_forward_multiples", "original_consensus_bytes",
+        "same_date_price_and_regime", "sec_acceptance_or_conservative_next_session",
+        "daily_adjusted_price_history", "decision_display_rights",
+    )
+    requirements = [results[key] for key in order]
     return {
-        "contract_version": CONTRACT_VERSION,
-        "evidence_classification": classification,
-        "decision_time": decision_time,
-        "target_tickers": list(tickers),
-        "requirements": [results[key] for key in (
-            "verified_pit_forward_eps",
-            "company_pit_forward_per_ledger",
-            "independent_qqq_soxx_peer_forward_multiples",
-            "original_consensus_bytes",
-            "same_date_price_and_regime",
-            "sec_acceptance_or_conservative_next_session",
-            "daily_adjusted_price_history",
-            "decision_display_rights",
-        )],
-        "evidence": list(unique_evidence.values()),
-        "schema_valid": all(bool(row.get("schema_valid")) for row in results.values()),
-        "promotion_ready": all(bool(row.get("passed")) for row in results.values()),
+        "contract_version": CONTRACT_VERSION, "evidence_classification": classification,
+        "decision_time": decision_time, "target_tickers": list(tickers),
+        "requirements": requirements, "evidence": list(unique.values()),
+        "schema_valid": all(bool(row.get("schema_valid")) for row in requirements),
+        "promotion_ready": all(bool(row.get("passed")) for row in requirements),
         "decision_created": False,
     }

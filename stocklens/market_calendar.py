@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from statistics import median
 from typing import TYPE_CHECKING, Iterable
@@ -78,6 +78,47 @@ def latest_completed_session(now: datetime) -> MarketSession:
         open_utc=opened.to_pydatetime().astimezone(timezone.utc).replace(microsecond=0).isoformat(),
         close_utc=close.to_pydatetime().astimezone(timezone.utc).replace(microsecond=0).isoformat(),
     )
+
+
+def is_xnys_session(value: date | str) -> bool:
+    """Return whether *value* is an actual XNYS trading session."""
+
+    day = value.isoformat() if isinstance(value, date) else str(value)
+    return len(_xnys_calendar().sessions_in_range(day, day)) == 1
+
+
+def xnys_sessions(start: date | str, end: date | str) -> tuple[date, ...]:
+    """Return actual XNYS session dates in an inclusive range."""
+
+    first = start.isoformat() if isinstance(start, date) else str(start)
+    last = end.isoformat() if isinstance(end, date) else str(end)
+    return tuple(session.date() for session in _xnys_calendar().sessions_in_range(first, last))
+
+
+def next_xnys_session(value: date | str) -> date:
+    """Return the first XNYS session strictly after *value*."""
+
+    import pandas as pd
+
+    day = value.isoformat() if isinstance(value, date) else str(value)
+    calendar = _xnys_calendar()
+    session = calendar.date_to_session(day, direction="next")
+    if session.date().isoformat() == day:
+        session = calendar.session_offset(session, 1)
+    return pd.Timestamp(session).date()
+
+
+def xnys_session_bounds(value: date | str) -> tuple[datetime, datetime]:
+    """Return regular-session open and close in UTC for an XNYS date."""
+
+    day = value.isoformat() if isinstance(value, date) else str(value)
+    if not is_xnys_session(day):
+        raise ValueError(f"{day} is not an XNYS session")
+    calendar = _xnys_calendar()
+    session = calendar.date_to_session(day)
+    opened = calendar.session_open(session).to_pydatetime().astimezone(timezone.utc)
+    closed = calendar.session_close(session).to_pydatetime().astimezone(timezone.utc)
+    return opened, closed
 
 
 def market_phase(now: datetime) -> str:

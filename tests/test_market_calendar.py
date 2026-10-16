@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from stocklens.market_calendar import assess_market_times, latest_completed_session, market_phase
+from stocklens.market_calendar import (
+    assess_market_times,
+    is_xnys_session,
+    latest_completed_session,
+    market_phase,
+    next_xnys_session,
+    xnys_session_bounds,
+)
 
 
 def test_calendar_skips_us_market_holiday() -> None:
@@ -69,3 +76,14 @@ def test_collection_time_never_substitutes_for_missing_market_time() -> None:
     assert result.market_time_max_utc is None
     assert result.missing_time_count == 199
     assert result.invalid_time_count == 1
+
+
+def test_session_helpers_reject_weekend_and_skip_to_monday() -> None:
+    assert is_xnys_session(date(2026, 8, 29)) is False
+    assert next_xnys_session(date(2026, 8, 28)) == date(2026, 8, 31)
+
+
+def test_session_bounds_distinguish_regular_close() -> None:
+    opened, closed = xnys_session_bounds("2026-08-27")
+    assert opened.isoformat() == "2026-08-27T13:30:00+00:00"
+    assert closed.isoformat() == "2026-08-27T20:00:00+00:00"
