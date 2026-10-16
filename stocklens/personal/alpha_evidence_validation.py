@@ -6,14 +6,134 @@ create parser candidates, or perform investment calculations.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import re
 from datetime import date
 from typing import Any
+
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 
 ERROR_ENVELOPE_KEYS = ("Note", "Information", "Error Message")
 JSON_CONTENT_TYPES = {"application/json", "text/json"}
-TERMS_CONTENT_TYPES = {"text/html", "application/xhtml+xml", "application/pdf"}
+TERMS_CONTENT_TYPES = {"application/pdf"}
+PROVIDER_RESTRICTION_RULE_VERSION = "alpha-vantage-error-semantics-v1"
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _matching_pages(texts: list[str], predicate: Any) -> list[int]:
+    return [index + 1 for index, text in enumerate(texts) if predicate(text)]
+
+
+def inspect_terms_pdf(payload: bytes) -> dict[str, Any]:
+    """Return non-verbatim structural and clause evidence for one terms PDF."""
+
+    try:
+        reader = PdfReader(io.BytesIO(payload), strict=True)
+        if reader.is_encrypted or not reader.pages:
+            raise PdfReadError("encrypted or empty PDF")
+        extracted = [page.extract_text() for page in reader.pages]
+    except (PdfReadError, OSError, TypeError, ValueError):
+        return {
+            "pdf_structure_valid": False,
+            "page_count": 0,
+            "page_text_sha256": [],
+            "text_extraction_complete": False,
+            "document_title": None,
+            "document_title_verified": False,
+            "provider_identifier_verified": False,
+            "provider_identifier_pages": [],
+            "clauses": {},
+        }
+
+    text_extraction_complete = all(isinstance(text, str) and bool(text.strip()) for text in extracted)
+    texts = [_normalized_text(text or "") for text in extracted]
+    first_lines = [
+        line.strip()
+        for line in (extracted[0] or "").splitlines()
+        if line.strip()
+    ]
+    title = first_lines[0] if first_lines else None
+    title_verified = bool(title and _normalized_text(title) == "terms of service")
+    provider_pages = _matching_pages(texts, lambda text: "alpha vantage" in text)
+    clause_pages = {
+        "personal_noncommercial_use": _matching_pages(
+            texts,
+            lambda text: "personal" in text and "non-commercial use" in text,
+        ),
+        "termination": _matching_pages(
+            texts,
+            lambda text: "termination" in text or "terminate" in text,
+        ),
+        "assignment_or_transfer": _matching_pages(
+            texts,
+            lambda text: "assign" in text or "transfer" in text,
+        ),
+        "use_restrictions": _matching_pages(
+            texts,
+            lambda text: "restriction" in text or "prohibit" in text or "may not" in text,
+        ),
+    }
+    clauses = {
+        clause_id: {"status": "found" if pages else "missing", "pages": pages}
+        for clause_id, pages in clause_pages.items()
+    }
+    return {
+        "pdf_structure_valid": True,
+        "page_count": len(reader.pages),
+        "page_text_sha256": [
+            hashlib.sha256((text or "").encode("utf-8")).hexdigest().upper()
+            for text in extracted
+        ],
+        "text_extraction_complete": text_extraction_complete,
+        "document_title": title,
+        "document_title_verified": title_verified,
+        "provider_identifier_verified": bool(provider_pages),
+        "provider_identifier_pages": provider_pages,
+        "clauses": clauses,
+    }
+
+
+def classify_provider_error_envelope(value: dict[str, Any]) -> dict[str, str]:
+    """Classify an error envelope without returning or persisting provider text."""
+
+    texts = [
+        _normalized_text(raw)
+        for key in ERROR_ENVELOPE_KEYS
+        if isinstance((raw := value.get(key)), str) and raw.strip()
+    ]
+    combined = " ".join(texts)
+    classification = "provider_restriction_unknown"
+    if re.search(
+        r"invalid\s+(api\s*key|apikey)|(?:api\s*key|apikey)\s+(?:is\s+)?invalid|"
+        r"missing\s+(?:api\s*key|apikey)|provide\s+(?:a\s+)?valid\s+(?:api\s*key|apikey)",
+        combined,
+    ):
+        classification = "provider_authentication_error"
+    elif re.search(
+        r"invalid\s+(?:api\s+call|symbol|parameter|function)|"
+        r"unknown\s+(?:symbol|parameter|function)|"
+        r"(?:symbol|parameter|function)\s+(?:is\s+)?(?:invalid|not\s+found)",
+        combined,
+    ):
+        classification = "provider_request_error"
+    elif re.search(
+        r"rate\s+limit|call\s+frequency|calls?\s+per\s+(?:minute|day)|"
+        r"requests?\s+per\s+(?:minute|day)|daily\s+(?:request\s+)?limit|"
+        r"api\s+call\s+volume|premium|subscription|subscribe",
+        combined,
+    ):
+        classification = "provider_rate_or_plan_limit"
+    return {
+        "provider_restriction_class": classification,
+        "provider_restriction_rule_version": PROVIDER_RESTRICTION_RULE_VERSION,
+    }
 
 
 def _media_type(value: str | None) -> str:
@@ -22,12 +142,29 @@ def _media_type(value: str | None) -> str:
 
 def validate_terms_bytes(payload: bytes, content_type: str | None) -> dict[str, Any]:
     media_type = _media_type(content_type)
-    valid = bool(payload) and media_type in TERMS_CONTENT_TYPES
+    inspection = inspect_terms_pdf(payload) if media_type == "application/pdf" else None
+    required_clauses = (
+        "personal_noncommercial_use", "termination",
+        "assignment_or_transfer", "use_restrictions",
+    )
+    valid_pdf = bool(
+        inspection
+        and inspection["pdf_structure_valid"]
+        and inspection["text_extraction_complete"]
+        and inspection["document_title_verified"]
+        and inspection["provider_identifier_verified"]
+        and all(
+            (inspection["clauses"].get(clause_id) or {}).get("status") == "found"
+            for clause_id in required_clauses
+        )
+    )
+    valid = bool(payload) and media_type in TERMS_CONTENT_TYPES and valid_pdf
     return {
         "valid_provider_dataset": valid,
         "validation_code": "valid_terms_document" if valid else "invalid_terms_document",
         "content_media_type": media_type or None,
         "accepted_content_types": sorted(TERMS_CONTENT_TYPES),
+        "terms_inspection": inspection,
     }
 
 
@@ -127,6 +264,8 @@ def validate_dataset_bytes(
         "period_fields_present": None,
     }
     if error or value is None:
+        if error == "provider_error_envelope" and value is not None:
+            return {**base, **classify_provider_error_envelope(value)}
         return base
     symbol = _declared_symbol(value)
     if symbol != ticker.upper():

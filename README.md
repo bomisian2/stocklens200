@@ -24,6 +24,8 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 
 ## 로컬 실행
 
+지원·CI 실행 환경은 **Python 3.12**입니다. `.python-version`과 GitHub Actions를 3.12로 고정했습니다. Python 3.14와 Streamlit 1.65 조합의 AppTest는 독립 환경에서 반환되지 않은 사례가 있어 현재 지원 범위에 포함하지 않습니다.
+
 ```bash
 python -m pip install -r requirements.txt
 python scripts/update_data.py
@@ -33,10 +35,14 @@ streamlit run app.py
 테스트:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-personal.txt
+python -m pytest -q -m "not streamlit"
+python scripts/run_streamlit_apptests.py --timeout-seconds 180
 python -m pytest -q
 python scripts/validate_snapshot.py
 ```
+
+`run_streamlit_apptests.py`는 AppTest를 별도 프로세스에서 실행하고 180초를 넘기면 종료 코드 124로 실패시킵니다. Python 3.12가 아니면 종료 코드 2로 즉시 차단하므로 AppTest 내부 timeout에 의존해 무한 대기하지 않습니다.
 
 `--strict`는 현재 최신 완료 시장 세션과 비교하는 라이브 운영 검사입니다. 과거에 정상 저장된 스냅샷의 재현성 검사와 혼동하지 않으며, PR의 오프라인 코드 검사에는 사용하지 않습니다.
 

@@ -1,13 +1,47 @@
 from __future__ import annotations
 
 import json
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 import requests
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from stocklens.personal import offline_alpha_collector as collector
+
+
+def _pdf_page(writer: PdfWriter, lines: list[str]) -> None:
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+    })
+    commands = ["BT /F1 11 Tf 40 740 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            commands.append("0 -18 Td")
+        commands.append(f"({line}) Tj")
+    commands.append("ET")
+    stream = DecodedStreamObject()
+    stream.set_data(" ".join(commands).encode("ascii"))
+    page[NameObject("/Contents")] = stream
+
+
+def _terms_pdf() -> bytes:
+    writer = PdfWriter()
+    _pdf_page(writer, ["TERMS OF SERVICE", "Alpha Vantage personal, non-commercial use and use restrictions"])
+    _pdf_page(writer, ["Alpha Vantage assignment and transfer clause"])
+    _pdf_page(writer, ["Alpha Vantage termination and prohibited use"])
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 def _daily(symbol: str) -> bytes:
@@ -65,7 +99,7 @@ class FakeSession:
         self.calls.append({"url": url, **kwargs})
         if "terms_of_service" in url:
             return self.overrides.get("terms") or FakeResponse(
-                b"<html>terms</html>", url=url, content_type="text/html; charset=utf-8",
+                _terms_pdf(), url=url, content_type="application/pdf",
             )
         function = kwargs.get("params", {}).get("function")
         symbol = kwargs.get("params", {}).get("symbol")
@@ -467,7 +501,7 @@ def test_allowed_redirect_counts_against_actual_five_request_budget(
                     headers={"Location": "/terms_final.pdf"},
                 )
             if "terms_final.pdf" in url:
-                return FakeResponse(b"%PDF fixture", url=url, content_type="application/pdf")
+                return FakeResponse(_terms_pdf(), url=url, content_type="application/pdf")
             function = kwargs.get("params", {}).get("function")
             symbol = kwargs.get("params", {}).get("symbol")
             body = _daily(symbol) if function == "TIME_SERIES_DAILY" else _estimates(symbol)

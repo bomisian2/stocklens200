@@ -486,8 +486,14 @@ def test_invalid_dynamic_provider_envelopes_do_not_count_as_required_raw(tmp_pat
         })
     _write_json(run_root / "collection-run.json", {"run_id": "run-one"})
     ledger_hash = hashlib.sha256((run_root / "collection-run.json").read_bytes()).hexdigest().upper()
+    stale_rows = [dict(row) for row in rows]
+    stale_rows[0]["adjudication"] = "invalid_provider_dataset"
     _write_json(private_root / "decision/alpha-vantage-adjudication-run-one.json", {
         "adjudication_version": "alpha-vantage-collection-adjudication-p4.3-v1",
+        "run_id": "run-one", "collection_run": {"source_hash": ledger_hash}, "requests": stale_rows,
+    })
+    _write_json(private_root / "decision/alpha-vantage-adjudication-p4.3.1-run-one.json", {
+        "adjudication_version": "alpha-vantage-collection-adjudication-p4.3.1-v1",
         "run_id": "run-one", "collection_run": {"source_hash": ledger_hash}, "requests": rows,
     })
     report = build_p4_evidence_inventory(

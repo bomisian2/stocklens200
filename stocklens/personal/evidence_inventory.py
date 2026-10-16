@@ -763,16 +763,30 @@ def _discover_private_provider_artifacts(
     results: list[dict[str, Any]] = []
     base = private_root.resolve(strict=True)
     adjudications: dict[str, dict[str, Any]] = {}
+    adjudication_priority = {
+        "alpha-vantage-collection-adjudication-p4.3-v1": 1,
+        "alpha-vantage-collection-adjudication-p4.3.1-v1": 2,
+    }
     decision_root = private_root / "decision"
     if decision_root.is_dir():
         for path in decision_root.glob("alpha-vantage-adjudication-*.json"):
             value = _read_json(path)
             run_id = str(value.get("run_id") or "")
-            if run_id and value.get("adjudication_version") == "alpha-vantage-collection-adjudication-p4.3-v1":
+            version = str(value.get("adjudication_version") or "")
+            current = adjudications.get(run_id)
+            if (
+                run_id
+                and version in adjudication_priority
+                and (
+                    current is None
+                    or adjudication_priority[version] > current["priority"]
+                )
+            ):
                 adjudications[run_id] = {
                     "value": value,
                     "path": path,
                     "source_hash": _sha256(path),
+                    "priority": adjudication_priority[version],
                 }
     for relative_root in (Path("raw/alpha_vantage"), Path("raw/nasdaq_consensus")):
         directory = private_root / relative_root

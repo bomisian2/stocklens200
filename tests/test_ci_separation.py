@@ -16,10 +16,21 @@ def test_pr_ci_is_offline_and_separates_code_from_snapshot_integrity() -> None:
 
     assert "code-tests (offline)" in workflow
     assert "stored-snapshot-integrity (offline)" in workflow
-    assert "python -m pytest -q" in workflow
+    assert 'python -m pytest -q -m "not streamlit"' in workflow
+    assert "python scripts/run_streamlit_apptests.py --timeout-seconds 180" in workflow
+    assert 'python-version: "3.12"' in workflow
     assert "python scripts/validate_snapshot.py" in workflow
     assert "scripts/update_data.py" not in workflow
     assert "--strict" not in workflow
+
+
+def test_streamlit_runner_pins_python_and_uses_process_timeout() -> None:
+    runner = (ROOT / "scripts" / "run_streamlit_apptests.py").read_text(encoding="utf-8")
+    assert "SUPPORTED_PYTHON = (3, 12)" in runner
+    assert "subprocess.run" in runner
+    assert "timeout=args.timeout_seconds" in runner
+    assert "TimeoutExpired" in runner
+    assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.12"
 
 
 def test_provider_diagnostic_is_manual_rights_gated_and_not_scheduled() -> None:

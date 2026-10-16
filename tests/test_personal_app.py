@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from stocklens.personal import decision_model
@@ -19,6 +20,7 @@ from stocklens.personal.same_date_builder import build_same_date_snapshot
 
 
 APPTEST_TIMEOUT_SECONDS = 30
+pytestmark = pytest.mark.streamlit
 
 
 def _sha256(path: Path) -> str:
