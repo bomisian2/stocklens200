@@ -11,6 +11,7 @@ from stocklens.personal.offline_alpha_collector import (  # noqa: E402
     MAX_CALLS,
     OfflineCollectorError,
     api_key_from_environment,
+    collection_report_is_complete,
     collect_approved_alpha_evidence,
     exact_request_plan,
 )
@@ -64,6 +65,9 @@ def main() -> int:
         "parser_attempted": report["parser_attempted"],
         "decision_created": report["decision_created"],
     }, ensure_ascii=False))
+    if not collection_report_is_complete(report):
+        print("Alpha Vantage evidence collection did not complete successfully", file=sys.stderr)
+        return 2
     return 0
 
 

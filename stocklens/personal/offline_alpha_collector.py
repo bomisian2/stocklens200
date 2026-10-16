@@ -105,15 +105,69 @@ def _raw_name(row: EvidenceRequest) -> str:
     return f"{row.ticker}_{row.function}.response.raw"
 
 
-def _write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_output_path(private_root: Path, path: Path, *, label: str) -> None:
+    """Fail closed when a collector path resolves outside private_data."""
+
+    base = private_root.resolve(strict=True)
+    absolute = Path(os.path.abspath(path))
+    if not _is_within(absolute, base):
+        raise OfflineCollectorError(f"{label} is outside repository private_data")
+    cursor = base
+    for part in absolute.relative_to(base).parts:
+        cursor = cursor / part
+        if cursor.exists() or cursor.is_symlink():
+            try:
+                resolved = cursor.resolve(strict=True)
+            except OSError as exc:
+                raise OfflineCollectorError(f"{label} cannot be safely resolved") from exc
+            if not _is_within(resolved, base):
+                raise OfflineCollectorError(f"{label} resolves outside repository private_data")
+    resolved = absolute.resolve(strict=False)
+    if not _is_within(resolved, base):
+        raise OfflineCollectorError(f"{label} resolves outside repository private_data")
+
+
+def _safe_mkdir(private_root: Path, directory: Path, *, label: str) -> None:
+    """Create a directory one component at a time and recheck every component."""
+
+    base = private_root.resolve(strict=True)
+    absolute = Path(os.path.abspath(directory))
+    _validate_output_path(private_root, absolute, label=label)
+    cursor = base
+    for part in absolute.relative_to(base).parts:
+        cursor = cursor / part
+        _validate_output_path(private_root, cursor, label=label)
+        try:
+            cursor.mkdir(exist_ok=True)
+        except FileExistsError as exc:
+            raise OfflineCollectorError(f"{label} collides with a non-directory path") from exc
+        if not cursor.is_dir():
+            raise OfflineCollectorError(f"{label} collides with a non-directory path")
+        _validate_output_path(private_root, cursor, label=label)
+
+
+def _write_json(private_root: Path, path: Path, value: dict[str, Any]) -> None:
+    _validate_output_path(private_root, path.parent, label="JSON output parent")
+    _validate_output_path(private_root, path, label="JSON output")
     temporary = path.with_suffix(path.suffix + ".tmp")
+    _validate_output_path(private_root, temporary, label="temporary JSON output")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _validate_output_path(private_root, temporary, label="temporary JSON output")
+    _validate_output_path(private_root, path, label="JSON output")
     temporary.replace(path)
 
 
-def _create_json_exclusive(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _create_json_exclusive(private_root: Path, path: Path, value: dict[str, Any]) -> None:
+    _validate_output_path(private_root, path.parent, label="exclusive JSON output parent")
+    _validate_output_path(private_root, path, label="exclusive JSON output")
     payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     with path.open("xb") as handle:
         handle.write(payload)
@@ -131,8 +185,11 @@ def _response_chunks(response: Any) -> Iterable[bytes]:
 
 
 def _planned_paths(private_root: Path, run_id: str) -> dict[str, Any]:
-    run_root = private_root / "raw" / "alpha_vantage" / run_id
-    rights_path = private_root / "rights" / "alpha_vantage" / run_id / "provider-terms-manifest.json"
+    raw_root = private_root / "raw"
+    provider_root = raw_root / "alpha_vantage"
+    run_root = provider_root / run_id
+    rights_root = private_root / "rights" / "alpha_vantage" / run_id
+    rights_path = rights_root / "provider-terms-manifest.json"
     requests: dict[str, dict[str, Path]] = {}
     for row in REQUEST_PLAN:
         raw = run_root / _raw_name(row)
@@ -142,11 +199,36 @@ def _planned_paths(private_root: Path, run_id: str) -> dict[str, Any]:
             "manifest": raw.with_suffix(raw.suffix + ".manifest.json"),
         }
     return {
+        "raw_root": raw_root,
+        "provider_root": provider_root,
+        "lock": provider_root / ".collector.lock",
         "run_root": run_root,
         "run_ledger": run_root / "collection-run.json",
+        "rights_root": rights_root,
         "rights": rights_path,
         "requests": requests,
     }
+
+
+def _all_planned_paths(paths: dict[str, Any]) -> list[tuple[str, Path]]:
+    planned = [
+        ("raw directory", paths["raw_root"]),
+        ("provider directory", paths["provider_root"]),
+        ("collector lock", paths["lock"]),
+        ("run directory", paths["run_root"]),
+        ("run ledger", paths["run_ledger"]),
+        ("rights directory", paths["rights_root"]),
+        ("rights manifest", paths["rights"]),
+    ]
+    for request_id, row in paths["requests"].items():
+        for kind, path in row.items():
+            planned.append((f"{request_id} {kind}", path))
+    return planned
+
+
+def _validate_all_output_paths(private_root: Path, paths: dict[str, Any]) -> None:
+    for label, path in _all_planned_paths(paths):
+        _validate_output_path(private_root, path, label=label)
 
 
 def _preflight_output_paths(paths: dict[str, Any]) -> None:
@@ -165,14 +247,16 @@ def _preflight_output_paths(paths: dict[str, Any]) -> None:
 
 
 class _ExclusiveCollectorLock:
-    def __init__(self, private_root: Path, run_id: str, started_at: str) -> None:
-        self.path = private_root / "raw" / "alpha_vantage" / ".collector.lock"
+    def __init__(self, private_root: Path, path: Path, run_id: str, started_at: str) -> None:
+        self.private_root = private_root
+        self.path = path
         self.run_id = run_id
         self.started_at = started_at
         self.acquired = False
 
     def __enter__(self) -> "_ExclusiveCollectorLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_output_path(self.private_root, self.path.parent, label="collector lock parent")
+        _validate_output_path(self.private_root, self.path, label="collector lock")
         payload = json.dumps({
             "collector_version": COLLECTOR_VERSION,
             "run_id": self.run_id,
@@ -188,6 +272,7 @@ class _ExclusiveCollectorLock:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        _validate_output_path(self.private_root, self.path, label="collector lock")
         self.acquired = True
         return self
 
@@ -195,8 +280,9 @@ class _ExclusiveCollectorLock:
         del exc_type, exc, traceback
         if self.acquired:
             try:
+                _validate_output_path(self.private_root, self.path, label="collector lock")
                 current = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OfflineCollectorError, OSError, json.JSONDecodeError):
                 current = {}
             if current.get("run_id") == self.run_id:
                 self.path.unlink(missing_ok=True)
@@ -230,11 +316,15 @@ def _capture_one(
     clock: Callable[[], datetime],
     before_http_request: Callable[[str, str], None],
     after_http_request_completed: Callable[[], None],
+    private_root: Path,
 ) -> dict[str, Any]:
     """Capture one logical operation using manually validated redirects."""
 
     _validate_request(row)
     raw_path, partial_path, manifest_path = paths["raw"], paths["partial"], paths["manifest"]
+    for label, path in (("raw response", raw_path), ("partial response", partial_path),
+                        ("capture manifest", manifest_path)):
+        _validate_output_path(private_root, path, label=label)
     params: dict[str, str] | None = None
     if row.kind == "dataset":
         params = {"function": str(row.function), "symbol": str(row.ticker), "apikey": api_key}
@@ -293,6 +383,8 @@ def _capture_one(
             headers_received_at = attempt_headers
             final_url = response_url
             content_type = str(getattr(response, "headers", {}).get("Content-Type") or "") or None
+            _validate_output_path(private_root, partial_path.parent, label="partial response parent")
+            _validate_output_path(private_root, partial_path, label="partial response")
             with partial_path.open("xb") as handle:
                 for chunk in _response_chunks(response):
                     if not chunk:
@@ -318,6 +410,8 @@ def _capture_one(
                 failure_code = str(validation.get("validation_code") or "provider_dataset_invalid")
             else:
                 capture_state = "captured"
+            _validate_output_path(private_root, partial_path, label="partial response")
+            _validate_output_path(private_root, raw_path, label="raw response")
             partial_path.replace(raw_path)
             break
     except BaseException as exc:
@@ -372,7 +466,7 @@ def _capture_one(
             "decision_created": False,
             "operational_eligible": False,
         }
-        _write_json(manifest_path, manifest)
+        _write_json(private_root, manifest_path, manifest)
     if propagate is not None:
         raise propagate
     return manifest
@@ -401,13 +495,16 @@ def collect_approved_alpha_evidence(
         raise OfflineCollectorError("run_id must use only letters, digits, hyphen, or underscore")
     for row in REQUEST_PLAN:
         _validate_request(row)
-    private_root = resolve_repository_private_data(project_root, require_exists=False)
+    private_root = resolve_repository_private_data(project_root, require_exists=True)
     effective_clock = clock or (lambda: datetime.now(timezone.utc))
     if now is not None and now.tzinfo is None:
         raise OfflineCollectorError("run start timestamp must be timezone-aware")
     started_at = now.astimezone(timezone.utc) if now else _utc(effective_clock)
     started_text = _iso(started_at)
     paths = _planned_paths(private_root, run_id)
+    _validate_all_output_paths(private_root, paths)
+    _safe_mkdir(private_root, paths["provider_root"], label="provider directory")
+    _validate_all_output_paths(private_root, paths)
     client = session or requests.Session()
     report: dict[str, Any] = {
         "collector_version": COLLECTOR_VERSION,
@@ -429,12 +526,16 @@ def collect_approved_alpha_evidence(
         "decision_created": False,
         "operational_eligible": False,
     }
-    with _ExclusiveCollectorLock(private_root, run_id, started_text):
+    with _ExclusiveCollectorLock(private_root, paths["lock"], run_id, started_text):
+        _validate_all_output_paths(private_root, paths)
         _preflight_output_paths(paths)
-        _create_json_exclusive(paths["run_ledger"], report)
+        _safe_mkdir(private_root, paths["run_root"], label="run directory")
+        _safe_mkdir(private_root, paths["rights_root"], label="rights directory")
+        _validate_all_output_paths(private_root, paths)
+        _create_json_exclusive(private_root, paths["run_ledger"], report)
 
         def persist() -> None:
-            _write_json(paths["run_ledger"], report)
+            _write_json(private_root, paths["run_ledger"], report)
 
         def before_http(request_id: str, attempted_at: str) -> None:
             if report["calls_attempted"] >= MAX_HTTP_REQUESTS:
@@ -459,6 +560,7 @@ def collect_approved_alpha_evidence(
                     clock=effective_clock,
                     before_http_request=before_http,
                     after_http_request_completed=after_http_completed,
+                    private_root=private_root,
                 )
                 report["results"].append(result)
                 report["active_request_id"] = None
@@ -513,7 +615,7 @@ def collect_approved_alpha_evidence(
                 "operational_eligible": False,
             }
             try:
-                _create_json_exclusive(paths["rights"], rights)
+                _create_json_exclusive(private_root, paths["rights"], rights)
             except BaseException as exc:
                 report["run_state"] = "failed"
                 report["failure_code"] = _failure_code(exc)
@@ -521,6 +623,38 @@ def collect_approved_alpha_evidence(
                 persist()
                 raise
     return report
+
+
+def collection_report_is_complete(report: dict[str, Any]) -> bool:
+    """Return true only for a fully completed and validated five-operation run."""
+
+    expected_ids = [row.request_id for row in REQUEST_PLAN]
+    results = report.get("results")
+    if not isinstance(results, list):
+        return False
+    if report.get("run_state") != "completed" or report.get("failure_code") is not None:
+        return False
+    if report.get("active_request_id") is not None:
+        return False
+    if report.get("logical_operation_count") != len(expected_ids):
+        return False
+    if report.get("approved_actual_http_request_budget") != MAX_HTTP_REQUESTS:
+        return False
+    if report.get("calls_attempted") != MAX_HTTP_REQUESTS:
+        return False
+    if report.get("calls_completed") != MAX_HTTP_REQUESTS:
+        return False
+    if len(results) != len(expected_ids):
+        return False
+    if [row.get("request_id") for row in results if isinstance(row, dict)] != expected_ids:
+        return False
+    return all(
+        isinstance(row, dict)
+        and row.get("capture_state") == "captured"
+        and row.get("valid_provider_dataset") is True
+        and row.get("failure_code") is None
+        for row in results
+    )
 
 
 def api_key_from_environment() -> str:

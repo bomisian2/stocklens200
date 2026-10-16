@@ -227,12 +227,59 @@ def test_global_exclusive_lock_blocks_same_and_different_concurrent_runs(
 ) -> None:
     private = _patch_private(monkeypatch, tmp_path)
     session = FakeSession()
-    with collector._ExclusiveCollectorLock(private, "same-run", "2026-10-16T08:00:00Z"):
+    lock_path = private / "raw/alpha_vantage/.collector.lock"
+    lock_path.parent.mkdir(parents=True)
+    with collector._ExclusiveCollectorLock(
+        private, lock_path, "same-run", "2026-10-16T08:00:00Z",
+    ):
         with pytest.raises(collector.OfflineCollectorError, match="already active"):
             collector.collect_approved_alpha_evidence(
                 project_root=tmp_path, api_key="secret", run_id=second_run,
                 personal_noncommercial_confirmed=True, max_calls=5, session=session,
             )
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("escape_at", ["raw", "raw/alpha_vantage", "rights/alpha_vantage"])
+def test_output_parent_symlink_escape_is_blocked_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escape_at: str,
+) -> None:
+    private = _patch_private(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = private / escape_at
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable; path escape NOT TESTED locally: {exc}")
+    session = FakeSession()
+    with pytest.raises(collector.OfflineCollectorError, match="outside repository private_data"):
+        collector.collect_approved_alpha_evidence(
+            project_root=tmp_path, api_key="secret", run_id="escape-run",
+            personal_noncommercial_confirmed=True, max_calls=5, session=session,
+        )
+    assert session.calls == []
+
+
+def test_lock_symlink_escape_is_blocked_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = _patch_private(monkeypatch, tmp_path)
+    provider = private / "raw/alpha_vantage"
+    provider.mkdir(parents=True)
+    outside = tmp_path / "outside-lock"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (provider / ".collector.lock").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlink unavailable; lock escape NOT TESTED locally: {exc}")
+    session = FakeSession()
+    with pytest.raises(collector.OfflineCollectorError, match="outside repository private_data"):
+        collector.collect_approved_alpha_evidence(
+            project_root=tmp_path, api_key="secret", run_id="escape-lock",
+            personal_noncommercial_confirmed=True, max_calls=5, session=session,
+        )
     assert session.calls == []
 
 
