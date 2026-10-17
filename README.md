@@ -44,7 +44,7 @@ python scripts/validate_snapshot.py
 
 `run_streamlit_apptests.py`는 먼저 정확히 6개의 AppTest가 수집되는지 확인한 뒤 별도 프로세스에서 실행합니다. 0개 또는 6개가 아닌 수가 수집되면 종료 코드 2, 전체 수집·실행이 180초를 넘기면 종료 코드 124로 실패합니다. Python 3.12가 아니어도 종료 코드 2로 즉시 차단하므로 AppTest 내부 timeout에 의존해 무한 대기하지 않습니다.
 
-Same-Date P5.0의 외부 호출 없는 보충 수집 계획과 공급자 중립 로컬 import 계약은 [docs/same-date-p5-data-recovery.md](docs/same-date-p5-data-recovery.md)에 기록합니다. 보충 수집기는 별도 승인 전 `--show-plan`만 허용하며, 기존 약관과 AVGO 일봉을 재호출하지 않습니다.
+Same-Date P5.0.1의 외부 호출 없는 보충 수집 계획과 공급자 중립 로컬 import 계약은 [docs/same-date-p5-data-recovery.md](docs/same-date-p5-data-recovery.md)에 기록합니다. 보충 수집기는 하나의 요청이라도 HTTP·네트워크·구조·티커·공급자 검증에 실패하면 다음 대기와 요청 전에 중단합니다. 별도 승인 전 `--show-plan`만 허용하며, 기존 약관과 AVGO 일봉을 재호출하지 않습니다. 로컬 import 통과는 컨테이너·manifest·해시·권리 계약 검증일 뿐이며 행 단위 의미 검증 전에는 실제 데이터 자격을 부여하지 않습니다.
 
 `--strict`는 현재 최신 완료 시장 세션과 비교하는 라이브 운영 검사입니다. 과거에 정상 저장된 스냅샷의 재현성 검사와 혼동하지 않으며, PR의 오프라인 코드 검사에는 사용하지 않습니다.
 

@@ -26,6 +26,14 @@ PRICE_ADJUSTMENT_POLICIES = {"adjusted", "unadjusted"}
 USAGE_SCOPES = {"personal_local_research"}
 RIGHTS_ALLOWED = "authorized"
 EVIDENCE_CLASSES = {"user_provided_real", "synthetic_fixture"}
+MANIFEST_FIELDS = {
+    "schema_version", "data_kind", "evidence_class", "provider", "ticker",
+    "source_file", "source_format", "source_hash", "as_of", "available_at",
+    "captured_at", "accounting_basis", "horizon", "currency", "per_share_unit",
+    "analyst_count", "revision_or_vintage", "usage_scope",
+    "price_adjustment_policy", "rights",
+}
+RIGHTS_FIELDS = {"storage", "derived_analysis", "local_display", "public_display"}
 
 
 class LocalImportContractError(ValueError):
@@ -74,8 +82,10 @@ def _timestamp(value: Any, *, label: str) -> datetime:
 def _as_of(value: Any) -> date:
     if not isinstance(value, str) or not value.strip():
         raise LocalImportContractError("as_of is missing")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise LocalImportContractError("as_of must be exactly YYYY-MM-DD")
     try:
-        return date.fromisoformat(value[:10])
+        return date.fromisoformat(value)
     except ValueError as exc:
         raise LocalImportContractError("as_of is invalid") from exc
 
@@ -129,19 +139,16 @@ def validate_provider_neutral_import(
         raise LocalImportContractError("import manifest is invalid JSON") from exc
     if not isinstance(manifest, dict):
         raise LocalImportContractError("import manifest root must be an object")
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        raise LocalImportContractError("import schema_version is not approved")
-
-    required = {
-        "provider", "ticker", "source_file", "source_format", "source_hash",
-        "as_of", "available_at", "captured_at", "accounting_basis", "horizon",
-        "currency", "per_share_unit", "analyst_count", "revision_or_vintage",
-        "usage_scope", "price_adjustment_policy", "rights", "data_kind",
-        "evidence_class",
-    }
-    missing = sorted(required.difference(manifest))
+    missing = sorted(MANIFEST_FIELDS.difference(manifest))
+    unexpected = sorted(set(manifest).difference(MANIFEST_FIELDS))
     if missing:
         raise LocalImportContractError(f"import manifest required fields missing: {missing}")
+    if unexpected:
+        raise LocalImportContractError(
+            f"import manifest contains unexpected fields: {unexpected}"
+        )
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise LocalImportContractError("import schema_version is not approved")
 
     provider = manifest.get("provider")
     ticker = manifest.get("ticker")
@@ -156,6 +163,8 @@ def validate_provider_neutral_import(
         raise LocalImportContractError("evidence_class is not approved")
 
     source_relative = _relative_path(manifest.get("source_file"), label="source_file")
+    if source_relative == manifest_relative:
+        raise LocalImportContractError("source_file must not be the import manifest itself")
     source_path = _resolved_file(private_root, source_relative, label="import source")
     expected_hash = _hash(manifest.get("source_hash"), label="source_hash")
     actual_hash = hashlib.sha256(source_path.read_bytes()).hexdigest().upper()
@@ -185,6 +194,14 @@ def validate_provider_neutral_import(
     rights = manifest.get("rights")
     if not isinstance(rights, dict):
         raise LocalImportContractError("rights object is missing")
+    missing_rights = sorted(RIGHTS_FIELDS.difference(rights))
+    unexpected_rights = sorted(set(rights).difference(RIGHTS_FIELDS))
+    if missing_rights:
+        raise LocalImportContractError(f"rights fields missing: {missing_rights}")
+    if unexpected_rights:
+        raise LocalImportContractError(
+            f"rights contains unexpected fields: {unexpected_rights}"
+        )
     for field in ("storage", "derived_analysis", "local_display"):
         if rights.get(field) != RIGHTS_ALLOWED:
             raise LocalImportContractError(f"{field} right is not explicitly authorized")
@@ -224,7 +241,11 @@ def validate_provider_neutral_import(
     synthetic = manifest.get("evidence_class") == "synthetic_fixture"
     return {
         "schema_version": SCHEMA_VERSION,
-        "status": "validated_synthetic_fixture" if synthetic else "validated_local_import",
+        "status": (
+            "synthetic_evidence_container_validated"
+            if synthetic else "evidence_container_validated"
+        ),
+        "validation_scope": "container_and_manifest_only",
         "provider": provider.strip(),
         "ticker": ticker,
         "data_kind": data_kind,
@@ -245,7 +266,9 @@ def validate_provider_neutral_import(
         "record_count": record_count,
         "allowed_uses": allowed_uses,
         "synthetic_fixture": synthetic,
-        "real_data_eligible": not synthetic,
+        "row_semantics_validated": False,
+        "real_data_eligible": False,
+        "real_data_eligibility_reason": "row_level_semantic_validation_required",
         "parser_candidate": False,
         "snapshot_created": False,
         "decision_created": False,

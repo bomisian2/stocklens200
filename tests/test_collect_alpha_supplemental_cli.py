@@ -11,9 +11,14 @@ from scripts import collect_alpha_supplemental as cli
 def _result(request_id: str, *, valid: bool = True) -> dict[str, Any]:
     return {
         "request_id": request_id,
+        "http_status": 200,
         "capture_state": "captured" if valid else "invalid_provider_dataset",
         "valid_provider_dataset": valid,
         "failure_code": None if valid else "provider_error_envelope",
+        "provider_restriction_class": None,
+        "timestamp_order_valid": True,
+        "response_sha256": "A" * 64,
+        "byte_length": 100,
     }
 
 
@@ -64,6 +69,7 @@ def test_supplemental_cli_show_plan_is_zero_call_and_exact(monkeypatch, capsys) 
     assert '"maximum_actual_http_requests": 3' in output
     assert '"execution_approved": false' in output
     assert '"terms_request_included": false' in output
+    assert '"stop_on_any_failed_capture": true' in output
 
 
 def test_supplemental_cli_returns_zero_only_for_exact_completion(monkeypatch) -> None:

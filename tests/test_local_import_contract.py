@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 from stocklens.personal import local_import_contract as contract
 
@@ -94,18 +95,22 @@ def test_checked_in_schema_matches_runtime_contract() -> None:
     assert {"storage", "derived_analysis", "local_display"}.issubset(
         schema["properties"]["rights"]["required"],
     )
+    assert schema["additionalProperties"] is False
 
 
-def test_real_forward_estimate_import_is_validated_but_never_promoted(
+def test_real_forward_estimate_container_is_validated_but_not_data_eligible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source, _, _ = _fixture(tmp_path, monkeypatch)
     result = _validate(tmp_path)
-    assert result["status"] == "validated_local_import"
+    assert result["status"] == "evidence_container_validated"
+    assert result["validation_scope"] == "container_and_manifest_only"
     assert result["source_hash"] == hashlib.sha256(source.read_bytes()).hexdigest().upper()
     assert result["accounting_basis"] == "GAAP"
     assert result["horizon"] == "FY1"
-    assert result["real_data_eligible"] is True
+    assert result["row_semantics_validated"] is False
+    assert result["real_data_eligible"] is False
+    assert result["real_data_eligibility_reason"] == "row_level_semantic_validation_required"
     assert result["parser_candidate"] is result["decision_created"] is False
     assert result["operational_eligible"] is False
 
@@ -125,7 +130,7 @@ def test_synthetic_fixture_is_never_reported_as_real_data(
 ) -> None:
     _fixture(tmp_path, monkeypatch, evidence_class="synthetic_fixture")
     result = _validate(tmp_path)
-    assert result["status"] == "validated_synthetic_fixture"
+    assert result["status"] == "synthetic_evidence_container_validated"
     assert result["synthetic_fixture"] is True
     assert result["real_data_eligible"] is False
 
@@ -196,3 +201,90 @@ def test_import_paths_cannot_escape_private_data(
             manifest_relative_path="imports/../outside.json",
             decision_time=DECISION_TIME,
         )
+
+
+def test_import_blocks_manifest_as_its_own_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, manifest_path, manifest = _fixture(tmp_path, monkeypatch)
+    manifest["source_file"] = "imports/inbox/AVGO.manifest.json"
+    _save(manifest_path, manifest)
+    with pytest.raises(contract.LocalImportContractError, match="must not be the import manifest"):
+        _validate(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("as_of", "2026-10-16-not-a-date", "exactly YYYY-MM-DD"),
+        ("as_of", "2026-02-30", "as_of is invalid"),
+        ("unexpected_field", "not-allowed", "unexpected fields"),
+    ],
+)
+def test_runtime_rejects_schema_invalid_manifest_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    _, manifest_path, manifest = _fixture(tmp_path, monkeypatch)
+    manifest[field] = value
+    _save(manifest_path, manifest)
+    with pytest.raises(contract.LocalImportContractError, match=message):
+        _validate(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("data_kind", "updates", "message"),
+    [
+        (
+            "forward_estimates",
+            {"price_adjustment_policy": "unadjusted"},
+            "price adjustment must be not_applicable",
+        ),
+        (
+            "daily_prices",
+            {"accounting_basis": "GAAP", "analyst_count": 1},
+            "accounting basis and horizon must be not_applicable",
+        ),
+    ],
+)
+def test_data_kind_rejects_invalid_field_combinations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    data_kind: str,
+    updates: dict,
+    message: str,
+) -> None:
+    _, manifest_path, manifest = _fixture(tmp_path, monkeypatch, data_kind=data_kind)
+    manifest.update(updates)
+    _save(manifest_path, manifest)
+    with pytest.raises(contract.LocalImportContractError, match=message):
+        _validate(tmp_path)
+
+
+def test_checked_in_schema_and_runtime_agree_on_valid_and_invalid_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = json.loads(
+        (ROOT / "config/provider-neutral-local-import-v1.schema.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    _, manifest_path, manifest = _fixture(tmp_path, monkeypatch)
+
+    assert list(validator.iter_errors(manifest)) == []
+    assert _validate(tmp_path)["status"] == "evidence_container_validated"
+
+    invalid_values = [
+        {**manifest, "as_of": "2026-10-16-not-a-date"},
+        {**manifest, "unexpected_field": "not-allowed"},
+        {**manifest, "price_adjustment_policy": "unadjusted"},
+    ]
+    for invalid in invalid_values:
+        assert list(validator.iter_errors(invalid))
+        _save(manifest_path, invalid)
+        with pytest.raises(contract.LocalImportContractError):
+            _validate(tmp_path)

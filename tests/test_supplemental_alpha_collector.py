@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import requests
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -72,11 +73,19 @@ def _estimates(ticker: str) -> bytes:
 
 
 class FakeResponse:
-    def __init__(self, body: bytes, *, url: str = "https://www.alphavantage.co/query") -> None:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        url: str = "https://www.alphavantage.co/query",
+        status: int = 200,
+        content_type: str = "application/json",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.body = body
         self.url = url
-        self.status_code = 200
-        self.headers = {"Content-Type": "application/json"}
+        self.status_code = status
+        self.headers = {"Content-Type": content_type, **(headers or {})}
 
     def iter_content(self, chunk_size: int):
         del chunk_size
@@ -84,6 +93,13 @@ class FakeResponse:
 
     def close(self) -> None:
         return None
+
+
+class PartialFailureResponse(FakeResponse):
+    def iter_content(self, chunk_size: int):
+        del chunk_size
+        yield b"partial-before-connection-loss"
+        raise requests.exceptions.ConnectionError("fixture partial response interrupted")
 
 
 class FakeSession:
@@ -99,6 +115,19 @@ class FakeSession:
         if params["function"] == "TIME_SERIES_DAILY":
             return FakeResponse(_daily())
         return FakeResponse(_estimates(params["symbol"]))
+
+
+class SequenceSession:
+    def __init__(self, outcomes: list[FakeResponse | BaseException]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[dict] = []
+
+    def get(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        outcome = self.outcomes[len(self.calls) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
 
 class StepClock:
@@ -138,8 +167,8 @@ def _run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    session: FakeSession | None = None,
-) -> tuple[Path, FakeSession, list[float], dict]:
+    session: FakeSession | SequenceSession | None = None,
+) -> tuple[Path, FakeSession | SequenceSession, list[float], dict]:
     private, digest = _private_fixture(tmp_path, monkeypatch)
     client = session or FakeSession()
     sleeps: list[float] = []
@@ -206,6 +235,96 @@ def test_provider_restriction_envelope_stops_after_first_request(
     assert report["failure_code"] == "provider_rate_or_plan_limit"
     assert report["calls_attempted"] == report["calls_completed"] == 1
     assert len(session.calls) == 1
+    assert sleeps == []
+    assert collector.supplemental_report_is_complete(report) is False
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_code"),
+    [
+        (FakeResponse(_daily(), status=500), "http_500"),
+        (requests.exceptions.Timeout("fixture timeout"), "timeout"),
+        (requests.exceptions.ConnectionError("fixture connection error"), "connection_error"),
+        (FakeResponse(b"not-json"), "invalid_json_body"),
+        (FakeResponse(_daily(), content_type="text/plain"), "invalid_json_content_type"),
+        (
+            FakeResponse(json.dumps({
+                "Meta Data": {"2. Symbol": "AVGO"},
+                "Time Series (Daily)": {
+                    "2026-10-16": {
+                        "1. open": "200", "2. high": "205", "3. low": "198",
+                        "4. close": "203", "5. volume": "1000",
+                    }
+                },
+            }).encode()),
+            "ticker_mismatch",
+        ),
+    ],
+)
+def test_first_request_failure_stops_before_sleep_or_second_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: FakeResponse | BaseException,
+    failure_code: str,
+) -> None:
+    session = SequenceSession([outcome])
+    _, session, sleeps, report = _run(tmp_path, monkeypatch, session=session)
+    assert report["run_state"] == "failed"
+    assert report["failure_code"] == failure_code
+    assert report["calls_attempted"] == 1
+    assert len(session.calls) == 1
+    assert sleeps == []
+    assert collector.supplemental_report_is_complete(report) is False
+
+
+def test_second_request_failure_stops_before_second_sleep_and_third_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SequenceSession([
+        FakeResponse(_daily()),
+        FakeResponse(b"not-json"),
+    ])
+    _, session, sleeps, report = _run(tmp_path, monkeypatch, session=session)
+    assert report["run_state"] == "failed"
+    assert report["failure_code"] == "invalid_json_body"
+    assert report["calls_attempted"] == report["calls_completed"] == 2
+    assert len(session.calls) == 2
+    assert sleeps == [60.0]
+    assert collector.supplemental_report_is_complete(report) is False
+
+
+def test_partial_first_response_is_preserved_and_stops_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SequenceSession([PartialFailureResponse(b"")])
+    private, session, sleeps, report = _run(tmp_path, monkeypatch, session=session)
+    assert report["run_state"] == "failed"
+    assert report["failure_code"] == "connection_error"
+    assert report["calls_attempted"] == 1
+    assert report["calls_completed"] == 0
+    assert len(session.calls) == 1
+    assert sleeps == []
+    partial = (
+        private / "raw/alpha_vantage/p5-fixture-run"
+        / "NVDA_TIME_SERIES_DAILY.response.raw.partial"
+    )
+    assert partial.read_bytes() == b"partial-before-connection-loss"
+
+
+def test_redirect_budget_exhaustion_stops_the_first_logical_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirect = FakeResponse(
+        b"",
+        status=302,
+        headers={"Location": "https://www.alphavantage.co/query"},
+    )
+    session = SequenceSession([redirect, redirect, redirect])
+    _, session, sleeps, report = _run(tmp_path, monkeypatch, session=session)
+    assert report["run_state"] == "failed"
+    assert report["failure_code"] == "collector_policy_error"
+    assert report["calls_attempted"] == report["calls_completed"] == 3
+    assert len(session.calls) == 3
     assert sleeps == []
     assert collector.supplemental_report_is_complete(report) is False
 

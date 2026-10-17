@@ -37,7 +37,7 @@ from .offline_alpha_collector import (
 )
 
 
-COLLECTOR_VERSION = "alpha-vantage-supplemental-evidence-p5-v1"
+COLLECTOR_VERSION = "alpha-vantage-supplemental-evidence-p5.0.1-v1"
 MAX_HTTP_REQUESTS = 3
 REQUEST_INTERVAL_SECONDS = 60
 BASELINE_TERMS_RUN_ID = "p422-8c6d282-approved-01"
@@ -182,6 +182,36 @@ def _verify_baseline_terms(
     }
 
 
+def _capture_succeeded(result: dict[str, Any]) -> bool:
+    """Return true only for a complete, semantically valid provider capture."""
+
+    return bool(
+        result.get("http_status") == 200
+        and result.get("capture_state") == "captured"
+        and result.get("valid_provider_dataset") is True
+        and result.get("failure_code") is None
+        and result.get("provider_restriction_class") is None
+        and result.get("timestamp_order_valid") is True
+        and isinstance(result.get("response_sha256"), str)
+        and len(result["response_sha256"]) == 64
+        and isinstance(result.get("byte_length"), int)
+        and result["byte_length"] > 0
+    )
+
+
+def _capture_failure(result: dict[str, Any]) -> str:
+    """Return a normalized fail-fast code without copying provider text."""
+
+    for field in ("provider_restriction_class", "failure_code", "validation_code"):
+        value = result.get(field)
+        if isinstance(value, str) and value and value not in {"valid_dataset", "valid"}:
+            return value
+    status = result.get("http_status")
+    if isinstance(status, int) and status != 200:
+        return f"http_{status}"
+    return "data_collection_incomplete"
+
+
 def collect_alpha_supplemental_evidence(
     *,
     project_root: str | Path,
@@ -308,10 +338,10 @@ def collect_alpha_supplemental_evidence(
                 report["results"].append(result)
                 report["active_request_id"] = None
                 persist()
-                restriction = result.get("provider_restriction_class")
-                if restriction:
+                if not _capture_succeeded(result):
                     report["run_state"] = "failed"
-                    report["failure_code"] = str(restriction)
+                    report["failure_code"] = _capture_failure(result)
+                    persist()
                     break
             if report["run_state"] != "failed":
                 invalid = [
@@ -352,13 +382,7 @@ def supplemental_report_is_complete(report: dict[str, Any]) -> bool:
         and report.get("automatic_retries") == 0
         and report.get("concurrency") == 1
         and [row.get("request_id") for row in results if isinstance(row, dict)] == expected
-        and all(
-            isinstance(row, dict)
-            and row.get("capture_state") == "captured"
-            and row.get("valid_provider_dataset") is True
-            and row.get("failure_code") is None
-            for row in results
-        )
+        and all(isinstance(row, dict) and _capture_succeeded(row) for row in results)
     )
 
 

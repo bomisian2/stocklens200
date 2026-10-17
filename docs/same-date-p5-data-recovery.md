@@ -1,4 +1,4 @@
-# Same-Date P5.0 data recovery
+# Same-Date P5.0.1 data recovery
 
 This phase adds offline contracts only. It does not authorize or perform a
 provider request, parse provider bytes into a candidate, or create a Same-Date
@@ -24,10 +24,14 @@ interval is a conservative project throttle, not a claim of additional
 provider capacity. A fresh execution approval must reconfirm the provider limit
 review and that the user's remaining daily allowance is sufficient.
 
-Any provider error/restriction envelope stops the run immediately. The original
-terms bytes are linked by SHA-256; they are not fetched or copied into the new
-run. A unique run ID, separate ledger, and separate terms-link manifest are
-required. All outputs stay below ignored `private_data/`.
+Every unsuccessful capture stops the run before another sleep or request. This
+includes non-200 HTTP status, network timeout or connection failure, incomplete
+or partial capture, invalid content type or JSON structure, ticker mismatch,
+provider error/restriction envelope, redirect-budget exhaustion, or any result
+whose `valid_provider_dataset` is not true. The original terms bytes are linked
+by SHA-256; they are not fetched or copied into the new run. A unique run ID,
+separate ledger, and separate terms-link manifest are required. All outputs
+stay below ignored `private_data/`.
 
 Zero-call plan inspection:
 
@@ -53,9 +57,13 @@ policy, and explicit storage/derived-analysis/local-display rights.
 Forward estimates fail closed when GAAP/non-GAAP or FY1/FY2/NTM is unknown.
 Daily price files must explicitly state adjusted or unadjusted. Unknown rights,
 future availability, hash mismatch, missing timestamps, path escape, and empty
-source files are rejected. A validated synthetic fixture is labelled separately
-from user-provided real evidence. No passing import is automatically promoted to
-a parser candidate, snapshot, valuation, or decision.
+source files are rejected. This stage validates only the evidence container,
+manifest, timestamps, hash, and rights contract. It does not inspect source-row
+ticker, dates, values, currency, horizon, accounting basis, or analyst count,
+so `row_semantics_validated=false` and `real_data_eligible=false` remain
+mandatory. A validated synthetic fixture is labelled separately from
+user-provided real evidence. No passing import is automatically promoted to a
+parser candidate, snapshot, valuation, or decision.
 
 ## Existing AVGO compact daily data
 

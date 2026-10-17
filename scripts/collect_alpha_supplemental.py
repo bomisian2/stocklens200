@@ -43,6 +43,7 @@ def main() -> int:
             "request_interval_seconds": REQUEST_INTERVAL_SECONDS,
             "concurrency": 1,
             "automatic_retries": 0,
+            "stop_on_any_failed_capture": True,
             "stop_on_provider_restriction_envelope": True,
             "terms_request_included": False,
             "avgo_daily_request_included": False,
