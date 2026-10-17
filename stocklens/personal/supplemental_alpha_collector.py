@@ -21,6 +21,7 @@ from .alpha_evidence_validation import validate_terms_bytes
 from .evidence_inventory import resolve_repository_private_data
 from .offline_alpha_collector import (
     API_ENDPOINT,
+    COLLECTOR_VERSION as BASE_CAPTURE_COLLECTOR_VERSION,
     EvidenceRequest,
     OfflineCollectorError,
     _ExclusiveCollectorLock,
@@ -327,6 +328,7 @@ def collect_alpha_supplemental_evidence(
                     sleeper(float(REQUEST_INTERVAL_SECONDS))
                 result = _capture_one(
                     row,
+                    collector_version=BASE_CAPTURE_COLLECTOR_VERSION,
                     paths=paths["requests"][row.request_id],
                     api_key=api_key,
                     session=client,

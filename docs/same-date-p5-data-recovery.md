@@ -131,8 +131,22 @@ The zero-call plan is available with:
 .\.venv-py312\Scripts\python.exe scripts\collect_alpha_continuation.py --show-plan
 ```
 
-The execution path requires a future, independent approval with a new run ID
-and approval reference. Even a structurally valid response remains
+P5.0.3.1 binds the execution identifiers to the exact local Git HEAD. For a
+40-character commit SHA `<sha>`, the only accepted values are
+`p5031-<sha>-continuation-approved-01` and
+`independent-qa-p5.0.3.1-<sha>-continuation-01`. Both values must still
+be explicitly approved by independent QA; matching the deterministic format
+does not itself grant approval. A changed HEAD automatically invalidates the
+prior identifiers.
+
+The shared capture helper now requires its caller to provide a collector
+version. General and supplemental collectors continue recording the legacy
+`alpha-vantage-offline-evidence-v2` capture version, preserving their existing
+contract. The continuation collector records
+`alpha-vantage-continuation-evidence-p5.0.3-v1` in both its ledger and capture
+manifest.
+
+Even a structurally valid response remains
 `accounting_basis=unknown`, `historical_availability_verified=false`,
 `fy1_ntm_mapping_eligible=false`, `parser_candidate=false`,
 `snapshot_created=false`, `decision_created=false`, and

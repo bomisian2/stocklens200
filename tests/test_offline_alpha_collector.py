@@ -179,6 +179,13 @@ def test_fixture_run_uses_immutable_run_directory_and_never_persists_secret(
     assert (run_root / "AVGO_TIME_SERIES_DAILY.response.raw").is_file()
     assert not (private / "raw/alpha_vantage/terms-of-service.html").exists()
     files = [path for path in private.rglob("*") if path.is_file()]
+    manifests = list(run_root.glob("*.manifest.json"))
+    assert manifests
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["collector_version"]
+        == collector.COLLECTOR_VERSION
+        for path in manifests
+    )
     combined = b"\n".join(path.read_bytes() for path in files)
     assert b"super-secret-key" not in combined
     assert b"must-not-persist" not in combined

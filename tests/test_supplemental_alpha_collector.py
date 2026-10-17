@@ -219,6 +219,13 @@ def test_supplemental_fixture_is_sequential_hash_linked_and_never_promotes(
     assert report["parser_attempted"] is report["candidate_created"] is False
     assert report["snapshot_created"] is report["decision_created"] is False
     assert report["operational_eligible"] is False
+    manifests = list(run_root.glob("*.manifest.json"))
+    assert manifests
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["collector_version"]
+        == "alpha-vantage-offline-evidence-v2"
+        for path in manifests
+    )
     combined = b"\n".join(path.read_bytes() for path in private.rglob("*") if path.is_file())
     assert b"secret-not-persisted" not in combined
 

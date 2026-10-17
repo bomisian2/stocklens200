@@ -310,6 +310,7 @@ def _failure_code(exc: BaseException) -> str:
 def _capture_one(
     row: EvidenceRequest,
     *,
+    collector_version: str,
     paths: dict[str, Path],
     api_key: str,
     session: requests.Session,
@@ -320,6 +321,8 @@ def _capture_one(
 ) -> dict[str, Any]:
     """Capture one logical operation using manually validated redirects."""
 
+    if not collector_version.strip():
+        raise OfflineCollectorError("capture collector version is required")
     _validate_request(row)
     raw_path, partial_path, manifest_path = paths["raw"], paths["partial"], paths["manifest"]
     for label, path in (("raw response", raw_path), ("partial response", partial_path),
@@ -442,7 +445,7 @@ def _capture_one(
             and request_started_at <= headers_received_at <= response_completed_at
         )
         manifest = {
-            "collector_version": COLLECTOR_VERSION,
+            "collector_version": collector_version,
             "request_id": row.request_id,
             "provider": "Alpha Vantage",
             "request_host": urlsplit(row.url).hostname,
@@ -561,6 +564,7 @@ def collect_approved_alpha_evidence(
             for row in REQUEST_PLAN:
                 result = _capture_one(
                     row,
+                    collector_version=COLLECTOR_VERSION,
                     paths=paths["requests"][row.request_id],
                     api_key=api_key,
                     session=client,

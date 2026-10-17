@@ -15,6 +15,12 @@ from stocklens.personal import alpha_continuation_collector as collector
 from stocklens.personal.alpha_evidence_validation import validate_dataset_bytes
 
 
+SYNTHETIC_COMMIT_SHA = "1" * 40
+APPROVED_RUN_ID, APPROVED_REFERENCE = collector.approval_identifiers_for_commit(
+    SYNTHETIC_COMMIT_SHA
+)
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
@@ -162,6 +168,15 @@ def _predecessor_fixture(
     monkeypatch.setattr(
         collector, "resolve_repository_private_data", lambda *args, **kwargs: private,
     )
+    monkeypatch.setattr(
+        collector, "_repository_head_sha", lambda *args, **kwargs: SYNTHETIC_COMMIT_SHA,
+    )
+    monkeypatch.setattr(collector, "PREVIOUS_LEDGER_SHA256", ledger_hash)
+    monkeypatch.setattr(collector, "AVGO_RAW_SHA256", avgo_hash)
+    monkeypatch.setattr(collector, "AVGO_MANIFEST_SHA256", avgo_manifest_hash)
+    monkeypatch.setattr(
+        collector, "P502_ADJUDICATION_SHA256", hashes["expected_adjudication_sha256"]
+    )
     return private, hashes
 
 
@@ -171,7 +186,8 @@ def _run(
     *,
     session: FakeSession | None = None,
     include_nvda_estimates: bool = False,
-    run_id: str = "p503-fixture-run",
+    run_id: str = APPROVED_RUN_ID,
+    approval_reference: str = APPROVED_REFERENCE,
 ) -> tuple[Path, FakeSession, dict[str, str], dict[str, Any]]:
     private, hashes = _predecessor_fixture(
         tmp_path, monkeypatch, include_nvda_estimates=include_nvda_estimates,
@@ -181,7 +197,7 @@ def _run(
         project_root=tmp_path,
         api_key="secret-not-persisted",
         run_id=run_id,
-        approval_reference="future-independent-qa-p5.0.3-approval",
+        approval_reference=approval_reference,
         personal_noncommercial_confirmed=True,
         current_provider_limit_review_confirmed=True,
         max_calls=1,
@@ -227,6 +243,8 @@ def test_exact_one_success_is_hash_linked_and_never_promotes(
     assert collector.continuation_report_is_complete(report) is True
     assert report["calls_attempted"] == report["calls_completed"] == 1
     assert report["automatic_retries"] == 0
+    assert report["collector_version"] == collector.COLLECTOR_VERSION
+    assert report["source_commit_sha"] == SYNTHETIC_COMMIT_SHA
     assert len(session.calls) == 1
     assert session.calls[0]["params"]["function"] == "EARNINGS_ESTIMATES"
     assert session.calls[0]["params"]["symbol"] == "NVDA"
@@ -241,7 +259,7 @@ def test_exact_one_success_is_hash_linked_and_never_promotes(
     assert result["snapshot_created"] is False
     assert result["decision_created"] is False
     assert result["operational_eligible"] is False
-    run_root = private / "raw" / "alpha_vantage" / "p503-fixture-run"
+    run_root = private / "raw" / "alpha_vantage" / APPROVED_RUN_ID
     raw = run_root / "NVDA_EARNINGS_ESTIMATES.response.raw"
     manifest = raw.with_suffix(raw.suffix + ".manifest.json")
     ledger = run_root / "continuation-collection-run.json"
@@ -249,6 +267,7 @@ def test_exact_one_success_is_hash_linked_and_never_promotes(
     manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
     ledger_value = json.loads(ledger.read_text(encoding="utf-8"))
     assert manifest_value["response_sha256"] == _sha(raw)
+    assert manifest_value["collector_version"] == collector.COLLECTOR_VERSION
     assert ledger_value["predecessor_evidence"] == report["predecessor_evidence"]
     combined = b"\n".join(path.read_bytes() for path in private.rglob("*") if path.is_file())
     assert b"secret-not-persisted" not in combined
@@ -302,7 +321,13 @@ def test_redirect_is_fail_closed_without_second_http_request(
         ({"api_key": ""}, "API_KEY"),
         ({"max_calls": 0}, "exactly one"),
         ({"max_calls": 2}, "exactly one"),
-        ({"approval_reference": ""}, "approval reference"),
+        ({"approval_reference": ""}, "approval_reference is not approved"),
+        ({"approval_reference": "arbitrary-approval"}, "approval_reference is not approved"),
+        ({"run_id": "arbitrary-run"}, "run_id is not approved"),
+        (
+            {"run_id": "p503-a76e1a7-continuation-approved-01"},
+            "run_id is not approved",
+        ),
     ],
 )
 def test_policy_preflight_blocks_before_network(
@@ -316,8 +341,8 @@ def test_policy_preflight_blocks_before_network(
     kwargs: dict[str, Any] = {
         "project_root": tmp_path,
         "api_key": "secret",
-        "run_id": "blocked-run",
-        "approval_reference": "future-approval",
+        "run_id": APPROVED_RUN_ID,
+        "approval_reference": APPROVED_REFERENCE,
         "personal_noncommercial_confirmed": True,
         "current_provider_limit_review_confirmed": True,
         "max_calls": 1,
@@ -339,8 +364,8 @@ def test_predecessor_hash_mismatch_blocks_before_network(
     hashes["expected_ledger_sha256"] = "0" * 64
     with pytest.raises(collector.OfflineCollectorError, match="ledger SHA-256 mismatch"):
         collector.collect_alpha_continuation_evidence(
-            project_root=tmp_path, api_key="secret", run_id="blocked-run",
-            approval_reference="future-approval",
+            project_root=tmp_path, api_key="secret", run_id=APPROVED_RUN_ID,
+            approval_reference=APPROVED_REFERENCE,
             personal_noncommercial_confirmed=True,
             current_provider_limit_review_confirmed=True,
             max_calls=1, session=session, clock=StepClock(), **hashes,
@@ -357,8 +382,8 @@ def test_existing_nvda_result_blocks_before_network(
     session = FakeSession()
     with pytest.raises(collector.OfflineCollectorError, match="request history mismatch"):
         collector.collect_alpha_continuation_evidence(
-            project_root=tmp_path, api_key="secret", run_id="blocked-run",
-            approval_reference="future-approval",
+            project_root=tmp_path, api_key="secret", run_id=APPROVED_RUN_ID,
+            approval_reference=APPROVED_REFERENCE,
             personal_noncommercial_confirmed=True,
             current_provider_limit_review_confirmed=True,
             max_calls=1, session=session, clock=StepClock(), **hashes,
@@ -370,12 +395,12 @@ def test_run_id_reuse_and_output_collision_block_before_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private, hashes = _predecessor_fixture(tmp_path, monkeypatch)
-    (private / "raw" / "alpha_vantage" / "collision-run").mkdir()
+    (private / "raw" / "alpha_vantage" / APPROVED_RUN_ID).mkdir()
     session = FakeSession()
     with pytest.raises(collector.OfflineCollectorError, match="collision"):
         collector.collect_alpha_continuation_evidence(
-            project_root=tmp_path, api_key="secret", run_id="collision-run",
-            approval_reference="future-approval",
+            project_root=tmp_path, api_key="secret", run_id=APPROVED_RUN_ID,
+            approval_reference=APPROVED_REFERENCE,
             personal_noncommercial_confirmed=True,
             current_provider_limit_review_confirmed=True,
             max_calls=1, session=session, clock=StepClock(), **hashes,
@@ -409,17 +434,46 @@ def test_estimates_array_semantics_fail_closed(mutate: Any, code: str) -> None:
 
 def _complete_cli_report() -> dict[str, Any]:
     return {
-        "run_id": "fixture-run", "logical_operation_count": 1,
+        "collector_version": collector.COLLECTOR_VERSION,
+        "source_commit_sha": SYNTHETIC_COMMIT_SHA,
+        "run_id": APPROVED_RUN_ID,
+        "approval_reference": APPROVED_REFERENCE,
+        "redirects_allowed": False,
+        "logical_operation_count": 1,
         "approved_actual_http_request_budget": 1, "concurrency": 1,
         "calls_attempted": 1, "calls_completed": 1, "automatic_retries": 0,
         "run_state": "completed", "failure_code": None,
+        "predecessor_evidence": {
+            "previous_run_id": collector.PREVIOUS_RUN_ID,
+            "supplemental_ledger": {
+                "relative_path": collector.PREVIOUS_LEDGER_RELATIVE_PATH,
+                "source_sha256": collector.PREVIOUS_LEDGER_SHA256,
+            },
+            "avgo_estimates_raw": {
+                "relative_path": collector.AVGO_RAW_RELATIVE_PATH,
+                "source_sha256": collector.AVGO_RAW_SHA256,
+            },
+            "avgo_estimates_manifest": {
+                "relative_path": collector.AVGO_MANIFEST_RELATIVE_PATH,
+                "source_sha256": collector.AVGO_MANIFEST_SHA256,
+            },
+            "p502_adjudication": {
+                "relative_path": collector.P502_ADJUDICATION_RELATIVE_PATH,
+                "source_sha256": collector.P502_ADJUDICATION_SHA256,
+            },
+            "nvda_estimates_previously_captured": False,
+        },
         "results": [{
+            "collector_version": collector.COLLECTOR_VERSION,
             "request_id": "nvda-estimates", "http_status": 200,
+            "function": "EARNINGS_ESTIMATES", "ticker": "NVDA",
+            "provider_schema_version": "alpha-vantage-estimates-array-v1",
             "capture_state": "captured", "valid_provider_dataset": True,
             "failure_code": None, "provider_restriction_class": None,
             "timestamp_order_valid": True, "response_sha256": "A" * 64,
             "byte_length": 100, "accounting_basis": "unknown",
             "historical_availability_verified": False,
+            "historical_record_classification": "current_snapshot_records_for_past_periods",
             "fy1_ntm_mapping_eligible": False, "parser_candidate": False,
             "snapshot_created": False, "decision_created": False,
             "operational_eligible": False,
@@ -433,8 +487,8 @@ def _complete_cli_report() -> dict[str, Any]:
 def _run_cli(monkeypatch: pytest.MonkeyPatch, report: dict[str, Any]) -> int:
     monkeypatch.setattr(sys, "argv", [
         "collect_alpha_continuation.py", "--execute",
-        "--run-id", "future-approved-run",
-        "--approval-reference", "future-independent-qa-approval",
+        "--run-id", APPROVED_RUN_ID,
+        "--approval-reference", APPROVED_REFERENCE,
         "--max-calls", "1", "--confirm-personal-noncommercial",
         "--confirm-current-provider-limit-reviewed",
     ])
@@ -445,6 +499,47 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, report: dict[str, Any]) -> int:
 
 def test_cli_returns_zero_only_for_exact_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _run_cli(monkeypatch, _complete_cli_report()) == 0
+
+
+@pytest.mark.parametrize(
+    ("mutate", "label"),
+    [
+        (lambda value: value.update(collector_version="alpha-vantage-offline-evidence-v2"), "old collector"),
+        (
+            lambda value: value["results"][0].update(
+                collector_version="alpha-vantage-offline-evidence-v2"
+            ),
+            "old capture manifest collector",
+        ),
+        (lambda value: value.update(redirects_allowed=True), "redirect policy"),
+        (lambda value: value["results"][0].update(function="TIME_SERIES_DAILY"), "function"),
+        (lambda value: value["results"][0].update(ticker="AVGO"), "ticker"),
+        (lambda value: value["results"][0].update(provider_schema_version="unknown"), "schema"),
+        (
+            lambda value: value["results"][0].update(
+                historical_record_classification="historical_pit"
+            ),
+            "historical classification",
+        ),
+        (
+            lambda value: value["predecessor_evidence"]["supplemental_ledger"].update(
+                source_sha256="0" * 64
+            ),
+            "predecessor hash",
+        ),
+        (
+            lambda value: value["predecessor_evidence"].pop("p502_adjudication"),
+            "predecessor missing",
+        ),
+    ],
+)
+def test_completion_requires_exact_continuation_contract(
+    mutate: Any, label: str,
+) -> None:
+    del label
+    report = _complete_cli_report()
+    mutate(report)
+    assert collector.continuation_report_is_complete(report) is False
 
 
 @pytest.mark.parametrize("failure_code", ["timeout", "connection_error", "http_500", "provider_restriction_unknown"])

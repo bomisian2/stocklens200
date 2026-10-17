@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import requests
 
+from .alpha_evidence_validation import ESTIMATES_ARRAY_SCHEMA_VERSION
 from .evidence_inventory import resolve_repository_private_data
 from .offline_alpha_collector import (
     API_ENDPOINT,
@@ -64,6 +66,41 @@ P502_ADJUDICATION_SHA256 = (
 REQUEST = EvidenceRequest(
     "nvda-estimates", "dataset", API_ENDPOINT, "EARNINGS_ESTIMATES", "NVDA",
 )
+
+
+def _normalise_commit_sha(value: str) -> str:
+    commit_sha = value.strip().lower()
+    if len(commit_sha) != 40 or any(character not in "0123456789abcdef" for character in commit_sha):
+        raise OfflineCollectorError("approved source commit SHA must be 40 hexadecimal characters")
+    return commit_sha
+
+
+def approval_identifiers_for_commit(commit_sha: str) -> tuple[str, str]:
+    """Return the only execution identifiers eligible for one source commit."""
+
+    normalised = _normalise_commit_sha(commit_sha)
+    return (
+        f"p5031-{normalised}-continuation-approved-01",
+        f"independent-qa-p5.0.3.1-{normalised}-continuation-01",
+    )
+
+
+def _repository_head_sha(project_root: str | Path) -> str:
+    """Resolve the exact local Git HEAD without reading user-configured output."""
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(project_root).resolve()), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OfflineCollectorError("repository HEAD could not be verified") from exc
+    if result.returncode != 0:
+        raise OfflineCollectorError("repository HEAD could not be verified")
+    return _normalise_commit_sha(result.stdout)
 
 
 def exact_continuation_request_plan() -> list[dict[str, Any]]:
@@ -284,15 +321,14 @@ def collect_alpha_continuation_evidence(
         raise OfflineCollectorError("ALPHAVANTAGE_API_KEY is required before any request")
     if max_calls != MAX_HTTP_REQUESTS:
         raise OfflineCollectorError("continuation budget must be exactly one HTTP request")
-    if not approval_reference.strip():
-        raise OfflineCollectorError("a separate P5.0.3 execution approval reference is required")
-    if not run_id or any(
-        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-        for character in run_id
-    ):
-        raise OfflineCollectorError("run_id must use only letters, digits, hyphen, or underscore")
-    if run_id == PREVIOUS_RUN_ID:
-        raise OfflineCollectorError("continuation run_id must differ from the previous run")
+    source_commit_sha = _repository_head_sha(project_root)
+    approved_run_id, approved_reference = approval_identifiers_for_commit(source_commit_sha)
+    if run_id != approved_run_id:
+        raise OfflineCollectorError("continuation run_id is not approved for the current source commit")
+    if approval_reference != approved_reference:
+        raise OfflineCollectorError(
+            "continuation approval_reference is not approved for the current source commit"
+        )
 
     private_root = resolve_repository_private_data(project_root, require_exists=True)
     predecessor = _verify_predecessor_evidence(
@@ -313,6 +349,7 @@ def collect_alpha_continuation_evidence(
     started_text = _iso(started_at)
     report: dict[str, Any] = {
         "collector_version": COLLECTOR_VERSION,
+        "source_commit_sha": source_commit_sha,
         "run_id": run_id,
         "approval_reference": approval_reference,
         "started_at": started_text,
@@ -372,6 +409,7 @@ def collect_alpha_continuation_evidence(
         try:
             result = _capture_one(
                 REQUEST,
+                collector_version=COLLECTOR_VERSION,
                 paths={
                     "raw": paths["raw"],
                     "partial": paths["partial"],
@@ -407,9 +445,43 @@ def collect_alpha_continuation_evidence(
 
 def continuation_report_is_complete(report: dict[str, Any]) -> bool:
     results = report.get("results")
+    predecessor = report.get("predecessor_evidence")
+    source_commit_sha = report.get("source_commit_sha")
+    try:
+        approved_run_id, approved_reference = approval_identifiers_for_commit(
+            source_commit_sha if isinstance(source_commit_sha, str) else ""
+        )
+    except OfflineCollectorError:
+        return False
+    predecessor_is_exact = bool(
+        isinstance(predecessor, dict)
+        and predecessor.get("previous_run_id") == PREVIOUS_RUN_ID
+        and predecessor.get("nvda_estimates_previously_captured") is False
+        and predecessor.get("supplemental_ledger") == {
+            "relative_path": PREVIOUS_LEDGER_RELATIVE_PATH,
+            "source_sha256": PREVIOUS_LEDGER_SHA256,
+        }
+        and predecessor.get("avgo_estimates_raw") == {
+            "relative_path": AVGO_RAW_RELATIVE_PATH,
+            "source_sha256": AVGO_RAW_SHA256,
+        }
+        and predecessor.get("avgo_estimates_manifest") == {
+            "relative_path": AVGO_MANIFEST_RELATIVE_PATH,
+            "source_sha256": AVGO_MANIFEST_SHA256,
+        }
+        and predecessor.get("p502_adjudication") == {
+            "relative_path": P502_ADJUDICATION_RELATIVE_PATH,
+            "source_sha256": P502_ADJUDICATION_SHA256,
+        }
+    )
     return bool(
         isinstance(results, list)
         and len(results) == 1
+        and report.get("collector_version") == COLLECTOR_VERSION
+        and report.get("run_id") == approved_run_id
+        and report.get("approval_reference") == approved_reference
+        and report.get("redirects_allowed") is False
+        and predecessor_is_exact
         and report.get("run_state") == "completed"
         and report.get("failure_code") is None
         and report.get("logical_operation_count") == 1
@@ -424,9 +496,15 @@ def continuation_report_is_complete(report: dict[str, Any]) -> bool:
         and report.get("decision_created") is False
         and report.get("operational_eligible") is False
         and isinstance(results[0], dict)
+        and results[0].get("collector_version") == COLLECTOR_VERSION
         and results[0].get("request_id") == "nvda-estimates"
+        and results[0].get("function") == "EARNINGS_ESTIMATES"
+        and results[0].get("ticker") == "NVDA"
+        and results[0].get("provider_schema_version") == ESTIMATES_ARRAY_SCHEMA_VERSION
         and results[0].get("accounting_basis") == "unknown"
         and results[0].get("historical_availability_verified") is False
+        and results[0].get("historical_record_classification")
+        == "current_snapshot_records_for_past_periods"
         and results[0].get("fy1_ntm_mapping_eligible") is False
         and results[0].get("parser_candidate") is False
         and results[0].get("snapshot_created") is False
@@ -443,6 +521,7 @@ __all__ = [
     "P502_ADJUDICATION_SHA256",
     "PREVIOUS_LEDGER_SHA256",
     "OfflineCollectorError",
+    "approval_identifiers_for_commit",
     "api_key_from_environment",
     "collect_alpha_continuation_evidence",
     "continuation_report_is_complete",
