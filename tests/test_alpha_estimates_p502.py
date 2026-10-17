@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from stocklens.personal import supplemental_alpha_adjudication as adjudication
 from stocklens.personal.alpha_evidence_validation import validate_dataset_bytes
-from stocklens.personal.supplemental_alpha_adjudication import adjudicate_supplemental_run
 
 
 AVAILABLE_AT = "2026-10-17T06:29:22.342127Z"
@@ -239,10 +239,13 @@ def _make_synthetic_run(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
 
 
 def test_offline_adjudication_hash_links_without_mutating_or_promoting_synthetic_input(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private, run_id, original_hashes = _make_synthetic_run(tmp_path)
-    result = adjudicate_supplemental_run(
+    monkeypatch.setattr(
+        adjudication, "resolve_repository_private_data", lambda *args, **kwargs: private,
+    )
+    result = adjudication.adjudicate_supplemental_run(
         project_root=tmp_path,
         run_id=run_id,
         generated_at="2026-10-17T07:00:00Z",
