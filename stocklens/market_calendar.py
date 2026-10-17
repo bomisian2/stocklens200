@@ -74,6 +74,15 @@ def latest_completed_session(now: datetime) -> MarketSession:
     )
 
 
+def next_session_date(session_date: str) -> str:
+    """Return the XNYS session immediately after a verified session date."""
+    calendar = _xnys_calendar()
+    session = pd.Timestamp(session_date)
+    if not calendar.is_session(session):
+        raise ValueError(f"not an XNYS session: {session_date}")
+    return calendar.next_session(session).date().isoformat()
+
+
 def assess_market_times(values: Iterable[str | None], now: datetime) -> FreshnessAssessment:
     """Validate per-security market times against the latest completed US session."""
     expected = latest_completed_session(now)
