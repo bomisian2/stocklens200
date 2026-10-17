@@ -401,7 +401,14 @@ def _capture_one(
                 validation = validate_terms_bytes(payload, content_type)
             else:
                 validation = validate_dataset_bytes(
-                    payload, content_type, function=str(row.function), ticker=str(row.ticker),
+                    payload,
+                    content_type,
+                    function=str(row.function),
+                    ticker=str(row.ticker),
+                    available_at=(
+                        _iso(response_completed_at)
+                        if response_completed_at is not None else None
+                    ),
                 )
             if status_code != 200:
                 capture_state, failure_code = "http_error", f"http_{status_code}"

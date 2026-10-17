@@ -72,3 +72,39 @@ The preserved 100-row, unadjusted AVGO compact series remains
 flow research only. It cannot support long-horizon performance, dividend or
 split-adjusted returns, a Forward PER ledger, valuation, buy zones, or an
 operational signal.
+
+## P5.0.2 offline response-shape adjudication
+
+The approved supplemental run
+`p501-e0f7040-supplemental-approved-01` stopped after its second request. The
+preserved AVGO response uses the provider's `estimates[]` shape rather than the
+legacy annual/quarterly top-level arrays. P5.0.2 validates those shapes through
+separate, unambiguous paths. The array shape requires an exact ticker, a
+non-empty list, ISO dates, `fiscal quarter` or `fiscal year` horizons, finite
+EPS/revenue estimates, and non-negative integral analyst counts. Optional
+revision and prior-estimate fields may be null, but unknown fields and mixed
+legacy/array payloads are rejected.
+
+Structural acceptance does not establish whether estimates are GAAP or
+non-GAAP. It also does not prove when a historical-period estimate first became
+available. Therefore the preserved AVGO response remains
+`accounting_basis=unknown`, `historical_availability_verified=false`,
+`parser_candidate=false`, `decision_created=false`, and
+`operational_eligible=false`. Dates before capture are classified only as past
+periods visible in the current snapshot. FY1/NTM mapping and historical
+backtesting remain prohibited.
+
+The offline command below writes one immutable adjudication under ignored
+`private_data/decision/`. It hash-links the raw response, capture manifest, and
+supplemental ledger without changing any of them:
+
+```powershell
+.\.venv-py312\Scripts\python.exe scripts\adjudicate_alpha_supplemental.py `
+  --run-id "p501-e0f7040-supplemental-approved-01" `
+  --generated-at "<timezone-aware UTC timestamp>"
+```
+
+Synthetic fixtures use `evidence_origin=synthetic_fixture` and can never prove
+that actual provider evidence passed. The local preserved run uses
+`evidence_origin=local_provider_evidence` but remains non-promoting until a
+separate accounting-basis and rights review succeeds.
