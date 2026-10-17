@@ -108,3 +108,33 @@ Synthetic fixtures use `evidence_origin=synthetic_fixture` and can never prove
 that actual provider evidence passed. The local preserved run uses
 `evidence_origin=local_provider_evidence` but remains non-promoting until a
 separate accounting-basis and rights review succeeds.
+
+## P5.0.3 one-request continuation (offline implementation only)
+
+P5.0.3 does not resume or modify the failed supplemental run. Its separate
+collector permits exactly one logical operation and one actual HTTP request:
+
+1. `request_id=nvda-estimates`, `function=EARNINGS_ESTIMATES`, `symbol=NVDA`.
+
+Before any request, the collector re-hashes and validates the immutable prior
+supplemental ledger, AVGO estimates raw bytes and capture manifest, and the
+P5.0.2 adjudication. It also proves that the prior ledger contains only
+`nvda-daily` and `avgo-estimates`, so no prior `nvda-estimates` result exists.
+Hash mismatch, output collision, run ID reuse, a missing API key, or any budget
+other than exactly one blocks before network access. Redirects are disabled;
+the sole redirect response consumes the only budget and fails closed without a
+second HTTP request.
+
+The zero-call plan is available with:
+
+```powershell
+.\.venv-py312\Scripts\python.exe scripts\collect_alpha_continuation.py --show-plan
+```
+
+The execution path requires a future, independent approval with a new run ID
+and approval reference. Even a structurally valid response remains
+`accounting_basis=unknown`, `historical_availability_verified=false`,
+`fy1_ntm_mapping_eligible=false`, `parser_candidate=false`,
+`snapshot_created=false`, `decision_created=false`, and
+`operational_eligible=false`. Records dated before collection remain current
+snapshot records for past periods and are not historical PIT evidence.

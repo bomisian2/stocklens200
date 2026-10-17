@@ -299,6 +299,18 @@ def _finite_number(value: Any) -> bool:
     return math.isfinite(parsed)
 
 
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Return an exact finite number while rejecting bool and null values."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
 def _nonnegative_integer(value: Any) -> bool:
     if isinstance(value, bool) or value is None:
         return False
@@ -328,6 +340,7 @@ def _validate_estimates_array(
 
     parsed_dates: list[date] = []
     horizons: list[str] = []
+    period_keys: set[tuple[date, str]] = set()
     for row in rows:
         if not isinstance(row, dict):
             return {"validation_code": "estimate_row_not_object"}
@@ -343,6 +356,10 @@ def _validate_estimates_array(
         horizon = row.get("horizon")
         if horizon not in _ESTIMATES_ARRAY_HORIZONS:
             return {"validation_code": "estimate_horizon_invalid"}
+        period_key = (period_date, str(horizon))
+        if period_key in period_keys:
+            return {"validation_code": "estimate_period_duplicate"}
+        period_keys.add(period_key)
         missing = [
             field for field in (
                 _ESTIMATES_ARRAY_REQUIRED_NUMERIC_FIELDS
@@ -360,6 +377,17 @@ def _validate_estimates_array(
             for field in _ESTIMATES_ARRAY_REQUIRED_NUMERIC_FIELDS
         ):
             return {"validation_code": "estimate_numeric_invalid"}
+        for prefix, failure_code in (
+            ("eps", "estimate_eps_range_invalid"),
+            ("revenue", "estimate_revenue_range_invalid"),
+        ):
+            high = _finite_decimal(row.get(f"{prefix}_estimate_high"))
+            average = _finite_decimal(row.get(f"{prefix}_estimate_average"))
+            low = _finite_decimal(row.get(f"{prefix}_estimate_low"))
+            if high is None or average is None or low is None:
+                return {"validation_code": "estimate_numeric_invalid"}
+            if not high >= average >= low:
+                return {"validation_code": failure_code}
         if any(
             row.get(field) is not None and not _finite_number(row.get(field))
             for field in _ESTIMATES_ARRAY_OPTIONAL_NUMERIC_FIELDS
@@ -398,6 +426,7 @@ def _validate_estimates_array(
         "parser_candidate_basis_eligible": False,
         "parser_candidate": False,
         "historical_availability_verified": False,
+        "historical_record_classification": "current_snapshot_records_for_past_periods",
         "record_available_at": available_at,
         "forward_period_candidate_count": forward_count,
         "fy1_ntm_mapping_eligible": False,
