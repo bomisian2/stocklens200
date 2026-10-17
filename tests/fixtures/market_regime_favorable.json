@@ -1,0 +1,16 @@
+{
+  "analysis_as_of": "2026-10-14T00:00:00+00:00",
+  "observations": [
+    {"metric_id":"policy_rate_pct","value":2.25,"unit":"percent","source":"fixture official rate","source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","as_of":"2026-09-30","available_at":"2026-09-30T18:00:00+00:00","frequency":"event","status":"verified"},
+    {"metric_id":"treasury_2s10s_spread_pp","value":0.75,"unit":"percentage_point","source":"fixture Treasury curve","source_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"verified"},
+    {"metric_id":"unemployment_rate_change_3m_pp","value":-0.1,"unit":"percentage_point","source":"fixture labor release","source_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","as_of":"2026-09-30","available_at":"2026-10-02T12:30:00+00:00","frequency":"monthly","status":"verified"},
+    {"metric_id":"employment_growth_3m_ratio","value":0.006,"unit":"ratio","source":"fixture labor release","source_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","as_of":"2026-09-30","available_at":"2026-10-02T12:30:00+00:00","frequency":"monthly","status":"verified"},
+    {"metric_id":"cpi_yoy_trend_3m_pp","value":-0.3,"unit":"percentage_point","source":"fixture inflation release","source_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","as_of":"2026-09-30","available_at":"2026-10-08T12:30:00+00:00","frequency":"monthly","status":"verified"},
+    {"metric_id":"pce_yoy_trend_3m_pp","value":-0.25,"unit":"percentage_point","source":"fixture inflation release","source_hash":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","as_of":"2026-09-30","available_at":"2026-10-09T12:30:00+00:00","frequency":"monthly","status":"verified"},
+    {"metric_id":"vix_index","value":15.0,"unit":"index_point","source":"fixture volatility close","source_hash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"verified"},
+    {"metric_id":"hy_oas_pct","value":3.0,"unit":"percent","source":"fixture credit spread","source_hash":"1111111111111111111111111111111111111111111111111111111111111111","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"verified"},
+    {"metric_id":"qqq_trend_63d_ratio","value":0.10,"unit":"ratio","source":"fixture QQQ cache","source_hash":"2222222222222222222222222222222222222222222222222222222222222222","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"proxy"},
+    {"metric_id":"qqq_realized_vol_20d_ratio","value":0.16,"unit":"ratio","source":"fixture QQQ cache","source_hash":"2222222222222222222222222222222222222222222222222222222222222222","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"proxy"},
+    {"metric_id":"qqq_drawdown_observed_ratio","value":-0.03,"unit":"ratio","source":"fixture QQQ cache","source_hash":"2222222222222222222222222222222222222222222222222222222222222222","as_of":"2026-10-10","available_at":"2026-10-10T22:00:00+00:00","frequency":"daily","status":"proxy"}
+  ]
+}

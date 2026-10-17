@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "scope": "public_github_actions_provider_diagnostic",
+  "reviewed_at": "2026-10-14",
+  "automated_external_collection_authorized": false,
+  "reason": "Yahoo/Nasdaq public-runner automated collection and redistribution rights remain unconfirmed.",
+  "providers": {
+    "yahoo_screener": {
+      "diagnostic_call_authorized": false,
+      "public_redistribution_authorized": false
+    },
+    "nasdaq_screener": {
+      "diagnostic_call_authorized": false,
+      "public_redistribution_authorized": false
+    }
+  }
+}
