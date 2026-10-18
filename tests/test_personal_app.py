@@ -508,8 +508,13 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["잠정 연구 행동"] == "대기"
     nvda_rendered = " ".join(item.value for item in [*app.subheader, *app.warning, *app.info, *app.caption, *app.success, *app.error, *app.markdown])
     assert "부분유효 컨센서스" in nvda_rendered
-    assert "현재는 매수하지 말고 $203.42까지 기다림" in nvda_rendered
-    assert "$203.42 / $195.93 / $188.43" in nvda_rendered
+    # Streamlit preserves the Markdown dollar escaping differently across
+    # versions.  Assert the user-visible wording and values without coupling
+    # the test to that renderer detail.
+    assert "현재는 매수하지 말고" in nvda_rendered
+    assert "203.42까지 기다림" in nvda_rendered
+    for value in ("203.42", "195.93", "188.43"):
+        assert value in nvda_rendered
     assert "operational_decision=None / operational_eligible=false" in nvda_rendered
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
