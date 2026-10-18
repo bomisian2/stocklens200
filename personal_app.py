@@ -21,9 +21,9 @@ from stocklens.personal.decision_model import (
     load_decision_inputs,
 )
 from stocklens.personal.market_data import compute_technical_snapshot
-from stocklens.personal.nvda_research import (
-    NvdaResearchError,
-    load_research_artifacts,
+from stocklens.personal.nvda_research_p511 import (
+    NvdaResearchP511Error,
+    load_p511_artifacts,
 )
 from stocklens.personal.market_regime import (
     MarketRegimeError,
@@ -106,22 +106,22 @@ DECISION_CONFIG_PATH = Path(
 TOP10_PRICE_HISTORY_PATH = Path(
     os.environ.get("STOCKLENS_TOP10_PRICE_HISTORY_PATH", str(TOP10_DATA_DIR / "price-history.json"))
 )
-NVDA_P51_ADJUDICATION_PATH = Path(
+NVDA_P511_SUPERSESSION_PATH = Path(
     os.environ.get(
-        "STOCKLENS_NVDA_P51_ADJUDICATION_PATH",
-        str(DATA_DIR / "decision" / "nvda-estimates-partial-adjudication-p5.1.json"),
+        "STOCKLENS_NVDA_P511_SUPERSESSION_PATH",
+        str(DATA_DIR / "decision" / "nvda-p51-supersession-p5.1.1.json"),
     )
 )
-NVDA_P51_READ_MODEL_PATH = Path(
+NVDA_P511_PEER_PROXY_PATH = Path(
     os.environ.get(
-        "STOCKLENS_NVDA_P51_READ_MODEL_PATH",
-        str(DATA_DIR / "normalized" / "research" / "NVDA-consensus-p5.1.json"),
+        "STOCKLENS_NVDA_P511_PEER_PROXY_PATH",
+        str(DATA_DIR / "normalized" / "research" / "NVDA-peer-proxy-p5.1.1.json"),
     )
 )
-NVDA_P51_DECISION_PATH = Path(
+NVDA_P511_DECISION_PATH = Path(
     os.environ.get(
-        "STOCKLENS_NVDA_P51_DECISION_PATH",
-        str(DATA_DIR / "decision" / "nvda-provisional-research-decision-p5.1.json"),
+        "STOCKLENS_NVDA_P511_DECISION_PATH",
+        str(DATA_DIR / "decision" / "nvda-conditional-research-decision-p5.1.1.json"),
     )
 )
 
@@ -182,18 +182,18 @@ def load_same_date_inputs(
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
-def load_nvda_p51_artifacts(
-    adjudication_path: str,
-    adjudication_mtime: int,
-    read_model_path: str,
-    read_model_mtime: int,
+def load_nvda_p511_artifacts(
+    supersession_path: str,
+    supersession_mtime: int,
+    peer_proxy_path: str,
+    peer_proxy_mtime: int,
     decision_path: str,
     decision_mtime: int,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    del adjudication_mtime, read_model_mtime, decision_mtime
-    return load_research_artifacts(
-        adjudication_path=adjudication_path,
-        read_model_path=read_model_path,
+    del supersession_mtime, peer_proxy_mtime, decision_mtime
+    return load_p511_artifacts(
+        supersession_path=supersession_path,
+        peer_proxy_path=peer_proxy_path,
         decision_path=decision_path,
     )
 
@@ -218,35 +218,37 @@ def _money_millions(value: float | None) -> str:
     return "미확보" if value is None else f"${value:,.0f}M"
 
 
-def _render_nvda_p51_research(
-    adjudication: dict[str, Any],
-    read_model: dict[str, Any],
+def _render_nvda_p511_research(
+    supersession: dict[str, Any],
+    peer_proxy: dict[str, Any],
     decision: dict[str, Any],
 ) -> None:
-    st.subheader("NVDA P5.1 부분유효 컨센서스 · 잠정 연구 판단")
+    st.subheader("NVDA P5.1.1 독립 피어 조건부 판단")
     st.warning(
-        "잠정 연구 판단(provisional_research) · operational_eligible=false. "
-        "자동 주문·운영 신호·정식 적정가에는 전달되지 않습니다."
+        "기존 P5.1 순환 가격 앵커는 폐기됐습니다. Alpha Vantage 자료는 품질 교차검증에만 "
+        "사용하며, 밸류에이션과 행동 판단에는 넣지 않습니다. operational_eligible=false"
     )
-    counts = adjudication["row_counts"]
+    quality = decision["alpha_vantage_data_quality"]
+    counts = quality["row_counts"]
     with st.container(horizontal=True):
-        st.metric("전체 공급자 행", f"{counts['total']}건", border=True)
+        st.metric("Alpha 전체 행", f"{counts['total']}건", border=True)
         st.metric("정상 행", f"{counts['valid']}건", border=True)
         st.metric("격리 행", f"{counts['quarantined']}건", border=True)
-        st.metric("미래 연구 입력", f"{counts['future_valid']}건", border=True)
+        st.metric("미래 교차검증", f"{counts['future_valid']}건", border=True)
     st.caption(
-        f"수집시각 {read_model['available_at']} · data_quality_status={read_model['data_quality_status']} · "
-        f"accounting_basis={read_model['accounting_basis']} · 과거 PIT 사용 금지 · 원문 수정 없음"
+        f"수집시각 {quality['available_at']} · data_quality_status={quality['data_quality_status']} · "
+        f"accounting_basis={quality['accounting_basis']} · 과거 PIT 사용 금지 · "
+        f"원문 수정 없음={quality['raw_unchanged']}"
     )
-    for row in adjudication.get("quarantined_records", []):
+    for row in quality.get("quarantined_records", []):
         st.info(
             f"격리: 원문 {row['position']}번째 행 · {row.get('date')} · {row.get('horizon')} · "
             f"사유 {row.get('reason')} · canonical SHA-256 {row['canonical_sha256'][:16]}…"
         )
 
-    st.markdown("#### 현재 시점 이후 정상 컨센서스 4건")
+    st.markdown("#### Alpha Vantage 부분유효 컨센서스 · 품질 교차검증 전용")
     future_rows = []
-    for row in read_model.get("forward_records", []):
+    for row in quality.get("forward_records", []):
         eps = row["eps"]
         revenue = row["revenue"]
         future_rows.append({
@@ -276,82 +278,113 @@ def _render_nvda_p51_research(
             "매출 상단": st.column_config.NumberColumn(format="$%.0f"),
         },
     )
+    cross = decision["alpha_vantage_cross_validation"]
+    st.caption(
+        f"동일 기간 EPS 교차검증: Alpha {cross['alpha_vantage_average']:.4f} vs "
+        f"Top10 {cross['top10_average']:.4f} ({cross['difference_percent_of_top10']:+.2%}). "
+        "Alpha 값은 목표 배수·기준값·행동 계산에 사용하지 않음."
+    )
 
     price = decision["current_price"]
-    selected = decision["selected_forward_period"]
+    consensus = decision["consensus_input"]
+    target_multiple = decision.get("independent_target_multiple")
+    base_value = decision.get("independent_research_base_value")
     with st.container(horizontal=True):
         st.metric(
-            "P5.1 현재가",
+            "현재가",
             f"${price['value']:,.2f}",
-            f"{price['as_of']} · 비조정",
+            f"{price['as_of']} · Top10 로컬 snapshot",
             border=True,
         )
         st.metric(
             "현재 implied forward multiple",
             f"{decision['current_implied_forward_multiple']:.2f}배",
-            f"{selected['period_date']} {selected['horizon']}",
+            f"{consensus['period']} EPS {consensus['average']:.2f}",
             border=True,
         )
         st.metric(
-            "잠정 연구 기준값",
-            f"${decision['provisional_research_base_value']:,.2f}",
+            "독립 목표 배수",
+            f"{target_multiple:.2f}배" if target_multiple is not None else "미산출",
+            f"피어 {len(peer_proxy['post_outlier_peers'])}/{peer_proxy['minimum_peer_count']}",
+            border=True,
+        )
+        st.metric(
+            "독립 연구 기준값",
+            f"${base_value:,.2f}" if base_value is not None else "미산출",
             f"국면 조정 {decision['regime']['adjustment']:+.1%}",
             border=True,
         )
-        st.metric("잠정 연구 행동", decision["research_action"], "신뢰도 낮음", border=True)
+
+    st.markdown("#### Nasdaq Top10 독립 피어 프록시")
+    accepted = peer_proxy.get("pre_outlier_peers") or []
+    after = peer_proxy.get("post_outlier_peers") or []
+    st.write(
+        f"이상치 제거 전 {len(accepted)}개 · 제거 후 {len(after)}개 · "
+        f"최소 요건 {peer_proxy['minimum_peer_count']}개 · gate={peer_proxy['peer_gate_passed']}"
+    )
+    if accepted:
+        st.dataframe(
+            pd.DataFrame(accepted),
+            hide_index=True,
+            width="stretch",
+            column_config={"expected_pe": st.column_config.NumberColumn(format="%.2f배")},
+        )
+    excluded = peer_proxy.get("excluded_peers") or []
+    with st.expander(f"제외 피어 {len(excluded)}개와 사유"):
+        st.dataframe(pd.DataFrame(excluded), hide_index=True, width="stretch")
 
     action_text = str(decision["research_action_text"]).replace("$", r"\$")
-    st.markdown(f"**행동:** {action_text}")
-    buy_prices = decision["provisional_research_buy_prices"]
-    st.success(
-        f"잠정 연구 분할구간: \\${buy_prices[0]:,.2f} / \\${buy_prices[1]:,.2f} / \\${buy_prices[2]:,.2f}"
-    )
-    st.error(
-        f"판단 무효 조건: {selected['period_date']} {selected['horizon']} 평균 EPS가 "
-        f"${decision['invalidation_condition']['eps_average_below']:.4f} 아래로 낮아지면 재계산"
-    )
+    if decision["peer_gate_passed"]:
+        buy_prices = decision["provisional_research_buy_prices"]
+        st.success(f"잠정 연구 행동: {decision['research_action']} · {action_text}")
+        st.write(
+            f"잠정 연구 분할구간: ${buy_prices[0]:,.2f} / ${buy_prices[1]:,.2f} / ${buy_prices[2]:,.2f}"
+        )
+        sensitivity = decision["eps_sensitivity"]
+        st.dataframe(
+            pd.DataFrame([
+                {"EPS": "low", "입력": consensus["low"], "연구값": sensitivity["low"]},
+                {"EPS": "base", "입력": consensus["average"], "연구값": sensitivity["base"]},
+                {"EPS": "high", "입력": consensus["high"], "연구값": sensitivity["high"]},
+            ]),
+            hide_index=True,
+            width="stretch",
+        )
+    else:
+        st.error(
+            f"독립 피어 요건 미충족: {peer_proxy['block_reason']}. 적정가와 승인된 분할매수 가격을 생성하지 않습니다."
+        )
+        st.info(f"조건부 연구 행동: {decision['research_action']} · {action_text}")
+        st.dataframe(
+            pd.DataFrame(decision["conditional_multiple_table"]),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "multiple": st.column_config.NumberColumn("명시 배수", format="%.0f배"),
+                "price": st.column_config.NumberColumn("역산 가격", format="$%.2f"),
+            },
+        )
+        first = decision["first_review_rule"]
+        st.write(
+            f"조건부 규칙: {first['multiple_at_or_below']:.0f}배, ${first['price_at_or_below']:,.2f} 이하에서 "
+            "1차 검토. 승인된 매수가가 아닙니다."
+        )
 
-    sensitivity = decision["provisional_research_values"]
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {"EPS 시나리오": "하단", "EPS": selected["eps"]["low"], "잠정 연구값": sensitivity["low"]},
-                {"EPS 시나리오": "평균", "EPS": selected["eps"]["average"], "잠정 연구값": sensitivity["base"]},
-                {"EPS 시나리오": "상단", "EPS": selected["eps"]["high"], "잠정 연구값": sensitivity["high"]},
-            ]
-        ),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "EPS": st.column_config.NumberColumn(format="$%.4f"),
-            "잠정 연구값": st.column_config.NumberColumn(format="$%.2f"),
-        },
-    )
-    with st.expander("배수·가중치·국면 조정 계산", expanded=True):
+    with st.expander("시점·국면·회계 기준 검증", expanded=True):
+        st.write(f"- P5.1 상태: {supersession['status']}")
+        st.write(f"- 가격 available_at: {price['available_at']}")
+        st.write(f"- 컨센서스 available_at: {consensus['available_at']}")
+        st.write(f"- 피어 배수 국면 조정 전: {_format_value(decision['pre_regime_target_multiple'])}")
         st.write(
-            f"- 연구 배수 프록시(독립 배수 아님): {decision['multiple_proxy']['value']:.2f}배 · "
-            f"표본 {decision['multiple_proxy']['sample_count']}건 "
-            f"({decision['multiple_proxy']['period_start']}~{decision['multiple_proxy']['period_end']})"
+            f"- 국면 조정 후보: {decision['regime']['adjustment']:+.1%} · "
+            f"목표 배수 적용={decision['regime'].get('applied_to_target', False)}"
         )
-        st.write(
-            f"- 국면 전 목표 PER: {decision['pre_regime_target_per']:.2f}배 → "
-            f"국면 후 {decision['target_per_after_regime']:.2f}배"
-        )
-        st.write(
-            f"- 국면 전 기준값: ${decision['pre_regime_base_value']:,.2f} → "
-            f"국면 후 ${decision['provisional_research_base_value']:,.2f}"
-        )
-        for axis, state in decision["axis_availability"].items():
-            normalized = decision["weight_trace"]["normalized_available_only"].get(axis)
-            weight = "제외" if normalized is None else f"{normalized:.0%}"
-            st.write(f"- {axis}: {weight} · {state['reason']}")
         for trace in decision["regime"]["trace"]:
             st.write(f"- {trace}")
-        st.warning(decision["circularity_notice"])
-        st.warning(decision["accounting_basis_impact"])
-        st.caption(decision["calculation_basis"])
+        st.write(f"- accounting_basis: {decision['accounting_basis']}")
+        st.write(f"- PIT 한계: {decision['pit_limit']}")
     st.caption(
-        "운영 판단: 미생성 · accounting basis와 독립 Forward PER 원장이 검증되기 전까지 "
+        "운영 판단: 미생성 · 회계 기준과 독립 PIT 배수 원장이 검증되기 전까지 "
         "operational_decision=None / operational_eligible=false"
     )
 
@@ -1204,26 +1237,26 @@ elif ticker in DECISION_SUPPORTED_TICKERS:
             )
 
 if ticker == "NVDA":
-    p51_paths = (
-        NVDA_P51_ADJUDICATION_PATH,
-        NVDA_P51_READ_MODEL_PATH,
-        NVDA_P51_DECISION_PATH,
+    p511_paths = (
+        NVDA_P511_SUPERSESSION_PATH,
+        NVDA_P511_PEER_PROXY_PATH,
+        NVDA_P511_DECISION_PATH,
     )
-    if all(path.is_file() for path in p51_paths):
+    if all(path.is_file() for path in p511_paths):
         try:
-            p51_adjudication, p51_read_model, p51_decision = load_nvda_p51_artifacts(
-                str(NVDA_P51_ADJUDICATION_PATH),
-                _mtime(NVDA_P51_ADJUDICATION_PATH),
-                str(NVDA_P51_READ_MODEL_PATH),
-                _mtime(NVDA_P51_READ_MODEL_PATH),
-                str(NVDA_P51_DECISION_PATH),
-                _mtime(NVDA_P51_DECISION_PATH),
+            p511_supersession, p511_peer_proxy, p511_decision = load_nvda_p511_artifacts(
+                str(NVDA_P511_SUPERSESSION_PATH),
+                _mtime(NVDA_P511_SUPERSESSION_PATH),
+                str(NVDA_P511_PEER_PROXY_PATH),
+                _mtime(NVDA_P511_PEER_PROXY_PATH),
+                str(NVDA_P511_DECISION_PATH),
+                _mtime(NVDA_P511_DECISION_PATH),
             )
-            _render_nvda_p51_research(p51_adjudication, p51_read_model, p51_decision)
-        except (OSError, json.JSONDecodeError, NvdaResearchError, KeyError, TypeError, ValueError) as exc:
-            st.error(f"NVDA P5.1 연구 자료 검증 실패: {exc}")
+            _render_nvda_p511_research(p511_supersession, p511_peer_proxy, p511_decision)
+        except (OSError, json.JSONDecodeError, NvdaResearchP511Error, KeyError, TypeError, ValueError) as exc:
+            st.error(f"NVDA P5.1.1 연구 자료 검증 실패: {exc}")
     else:
-        st.caption("NVDA P5.1 부분유효 연구 read model이 아직 생성되지 않았습니다.")
+        st.caption("NVDA P5.1.1 독립 피어 연구 산출물이 아직 생성되지 않았습니다.")
 
 v23_self_history = _render_v23_comparison(
     ticker,
