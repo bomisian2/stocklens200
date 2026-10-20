@@ -185,19 +185,31 @@ def _build(paths: dict[str, Path]):
     )
 
 
-def test_price_changes_only_implied_multiple_not_independent_target(tmp_path: Path) -> None:
+def _reseal_decision(path: Path, payload: dict) -> None:
+    payload.pop("calculation_sha256", None)
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    payload["calculation_sha256"] = hashlib.sha256(encoded).hexdigest().upper()
+    _write(path, payload)
+
+
+def test_price_changes_only_implied_multiple_and_p5_actions_stay_null(tmp_path: Path) -> None:
     results = []
     for value in (100.0, 214.13, 999.0):
         paths = _fixture(tmp_path / str(value), price=value, verified_peers=True)
         _, peer, decision = _build(paths)
         results.append((peer, decision))
-    assert [item[0]["post_outlier_median"] for item in results] == [22.0, 22.0, 22.0]
-    assert [item[1]["independent_target_multiple"] for item in results] == [22.0, 22.0, 22.0]
-    assert [item[1]["independent_research_base_value"] for item in results] == pytest.approx([203.94] * 3)
+    assert [item[0]["post_outlier_median"] for item in results] == [None, None, None]
+    assert [item[0]["peer_gate_passed"] for item in results] == [False, False, False]
+    assert [item[1]["independent_target_multiple"] for item in results] == [None, None, None]
+    assert [item[1]["independent_research_base_value"] for item in results] == [None, None, None]
     assert [item[1]["current_implied_forward_multiple"] for item in results] == pytest.approx(
         [100.0 / 9.27, 214.13 / 9.27, 999.0 / 9.27]
     )
-    assert all(item[1]["provisional_research_buy_prices"] == [197.82, 189.66, 181.51] for item in results)
+    assert all(item[1]["provisional_research_buy_prices"] is None for item in results)
+    assert all(item[1]["research_action"] is None for item in results)
+    assert all(item[1]["fair_value"] is None for item in results)
     assert all(item[0]["current_price_used_in_target_multiple"] is False for item in results)
     assert all(item[1]["target_multiple_policy"]["current_price_used_in_target"] is False for item in results)
     assert len({item[1]["target_multiple_policy"]["policy_version"] for item in results}) == 1
@@ -215,7 +227,7 @@ def test_insufficient_actual_basis_peers_uses_only_conditional_table(tmp_path: P
     assert decision["independent_target_multiple"] is None
     assert decision["independent_research_base_value"] is None
     assert decision["provisional_research_buy_prices"] is None
-    assert decision["buy_ladder_status"] == "not_created_peer_gate_failed"
+    assert decision["buy_ladder_status"] == "not_generated_p5_diagnostic_only"
     assert decision["valuation_signal_status"] == "not_generated"
     assert decision["control_action"] == "no_new_position_signal"
     assert decision["research_action"] is None
@@ -241,7 +253,7 @@ def test_future_valuation_row_is_excluded_and_cannot_change_target(tmp_path: Pat
     _write(paths["valuation"], payload)
     _, peer, decision = _build(paths)
     assert peer["post_outlier_median"] is None
-    assert {row["expected_pe"] for row in peer["post_outlier_peers"]} == {18.0, 20.0, 22.0, 24.0, 26.0}
+    assert peer["post_outlier_peers"] == []
     assert peer["excluded_future_valuation_rows"] == [{
         "ticker": "P1", "as_of": "2026-10-17", "reason": "future_valuation_row",
     }]
@@ -272,6 +284,25 @@ def test_manual_review_required_is_not_an_approval(tmp_path: Path) -> None:
     assert policy["public_display_permission"] == "not_authorized"
 
 
+def test_embedded_terms_approval_object_cannot_authorize_use(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    terms = json.loads(paths["terms"].read_text(encoding="utf-8"))
+    terms["approval_receipt"] = {
+        "status": "approved",
+        "approved_scopes": ["derived_analysis", "local_display"],
+        "approved_by": "self-asserted",
+        "approved_at": "2026-10-17T00:00:00Z",
+        "expires_at": "2027-10-17T00:00:00Z",
+    }
+    _write(paths["terms"], terms)
+    _, _, decision = _build(paths)
+    policy = decision["alpha_vantage_policy"]
+    assert policy["approval_receipt_present"] is False
+    assert policy["approval_receipt_validation"] == "external_pinned_file_only"
+    assert policy["derived_analysis_authorized"] is False
+    assert policy["local_display_authorized"] is False
+
+
 def test_five_unknown_basis_peers_never_create_target_or_action(tmp_path: Path) -> None:
     paths = _fixture(tmp_path, peer_count=5, verified_peers=False)
     _, peer, decision = _build(paths)
@@ -292,13 +323,27 @@ def test_point_in_time_false_blocks_target_even_with_explicit_basis(tmp_path: Pa
     assert decision["buy_range"] is None
 
 
-def test_future_source_timestamp_fails_closed(tmp_path: Path) -> None:
+def test_self_asserted_pit_flags_do_not_verify_linked_evidence(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path, verified_peers=True)
+    _, peer, decision = _build(paths)
+    assert peer["self_asserted_provider_timestamp_ignored"] is True
+    assert peer["target_point_in_time_verified"] is False
+    assert peer["target_pit_evidence_reason"] == "linked_pit_evidence_missing"
+    assert peer["peer_gate_passed"] is False
+    assert decision["research_action"] is None
+
+
+def test_future_macro_is_excluded_and_cannot_create_action(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     payload = json.loads(paths["macro"].read_text(encoding="utf-8"))
     payload["generatedAt"] = "2026-10-19T00:00:00Z"
     _write(paths["macro"], payload)
-    with pytest.raises(NvdaResearchP511Error, match="later than decision_time"):
-        _build(paths)
+    _, _, decision = _build(paths)
+    assert decision["regime"]["source_eligible"] is False
+    assert "later than decision_time" in decision["regime"]["exclusion_reason"]
+    assert decision["regime"]["adjustment"] == 0.0
+    assert decision["research_action"] is None
+    assert decision["operational_decision"] is None
 
 
 @pytest.mark.parametrize(
@@ -341,6 +386,71 @@ def test_loader_rejects_p51_and_p511_decisions_and_accepts_only_p512(tmp_path: P
     assert loaded[2]["research_decision_version"] == RESEARCH_DECISION_VERSION
     paths["decision"].write_bytes(paths["p51_decision"].read_bytes())
     with pytest.raises(NvdaResearchP511Error, match="P5.1.2 decision version mismatch"):
+        load_p511_artifacts(
+            supersession_path=paths["supersession"],
+            peer_proxy_path=paths["peer"],
+            decision_path=paths["decision"],
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"peer_gate_passed": True, "fair_value": 999.0},
+        {"research_action": "분할매수", "buy_range": [200.0, 195.0, 190.0]},
+    ),
+)
+def test_loader_rejects_unsealed_decision_action_tampering(
+    tmp_path: Path, mutation: dict,
+) -> None:
+    paths = _fixture(tmp_path)
+    _build(paths)
+    decision = json.loads(paths["decision"].read_text(encoding="utf-8"))
+    decision.update(mutation)
+    _write(paths["decision"], decision)
+    with pytest.raises(NvdaResearchP511Error, match="calculation SHA-256 mismatch"):
+        load_p511_artifacts(
+            supersession_path=paths["supersession"],
+            peer_proxy_path=paths["peer"],
+            decision_path=paths["decision"],
+        )
+
+
+def test_loader_rejects_calculation_sha_tampering(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    _build(paths)
+    decision = json.loads(paths["decision"].read_text(encoding="utf-8"))
+    decision["calculation_sha256"] = "0" * 64
+    _write(paths["decision"], decision)
+    with pytest.raises(NvdaResearchP511Error, match="calculation SHA-256 mismatch"):
+        load_p511_artifacts(
+            supersession_path=paths["supersession"],
+            peer_proxy_path=paths["peer"],
+            decision_path=paths["decision"],
+        )
+
+
+def test_loader_rejects_resealed_peer_gate_mismatch(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    _build(paths)
+    decision = json.loads(paths["decision"].read_text(encoding="utf-8"))
+    decision["peer_gate_passed"] = True
+    _reseal_decision(paths["decision"], decision)
+    with pytest.raises(NvdaResearchP511Error, match="decision/peer gate mismatch"):
+        load_p511_artifacts(
+            supersession_path=paths["supersession"],
+            peer_proxy_path=paths["peer"],
+            decision_path=paths["decision"],
+        )
+
+
+def test_loader_rejects_resealed_peer_diagnostic_mismatch(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    _build(paths)
+    decision = json.loads(paths["decision"].read_text(encoding="utf-8"))
+    decision["peer_diagnostic"]["post_outlier_median"] = 99.0
+    _reseal_decision(paths["decision"], decision)
+    with pytest.raises(NvdaResearchP511Error, match="decision/peer diagnostic mismatch"):
         load_p511_artifacts(
             supersession_path=paths["supersession"],
             peer_proxy_path=paths["peer"],

@@ -1,11 +1,11 @@
 """P5.1.2 provider-homogeneous peer diagnostics for NVDA.
 
 Alpha Vantage evidence is used only for an internal integrity and row-quality
-audit until an explicit rights approval receipt exists.  Nasdaq Top10 data can
-produce descriptive implied-multiple sensitivity, but a target multiple and
-action are emitted only after the stricter accounting-basis, period, point-in-
-time, same-session, and peer-count gates all pass.  The current local evidence
-does not pass those gates.
+audit until an independently pinned rights approval receipt exists. Nasdaq
+Top10 data can produce peer-gate diagnostics and descriptive implied-multiple
+sensitivity, but P5.1.2 never emits a target value, buy range, sell range, or
+investment action. Any future action model belongs to a separately versioned
+Decision Model v2.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ from .nvda_research import (
 from .storage import atomic_write_json
 
 
-SUPERSESSION_VERSION = "nvda-p5.1.1-decision-supersession-p5.1.2-v1"
-PEER_PROXY_VERSION = "nvda-provider-homogeneous-proxy-p5.1.2-v1"
-RESEARCH_DECISION_VERSION = "nvda-non-action-research-state-p5.1.2-v1"
-TARGET_MULTIPLE_POLICY_VERSION = "nvda-provider-homogeneous-multiple-policy-p5.1.2-v1"
+SUPERSESSION_VERSION = "nvda-p5.1.1-decision-supersession-p5.1.2-final-v1"
+PEER_PROXY_VERSION = "nvda-provider-homogeneous-proxy-p5.1.2-final-v1"
+RESEARCH_DECISION_VERSION = "nvda-diagnostic-only-state-p5.1.2-final-v1"
+TARGET_MULTIPLE_POLICY_VERSION = "nvda-diagnostic-only-policy-p5.1.2-final-v1"
 EXPECTED_TICKER = "NVDA"
 MINIMUM_PEERS = 5
 FALLBACK_MULTIPLES = (20.0, 22.0, 24.0)
@@ -129,11 +129,62 @@ def _resolve_linked(private_root: Path, relative: Any, expected_hash: Any, label
     return candidate
 
 
+def _decision_calculation_sha256(decision: dict[str, Any]) -> str:
+    payload = {key: value for key, value in decision.items() if key != "calculation_sha256"}
+    return _canonical_sha256(payload)
+
+
+def _pit_evidence_status(
+    record: dict[str, Any],
+    *,
+    evidence_root: Path | None,
+    decision_time: datetime,
+    label: str,
+) -> tuple[bool, str]:
+    """Verify linked PIT evidence; self-asserted booleans are never sufficient."""
+
+    evidence = record.get("pitEvidence")
+    if evidence_root is None or not isinstance(evidence, dict):
+        return False, "linked_pit_evidence_missing"
+    try:
+        raw = _resolve_linked(
+            evidence_root,
+            evidence.get("source_relative_path"),
+            evidence.get("source_hash"),
+            f"{label} PIT source",
+        )
+        manifest_path = _resolve_linked(
+            evidence_root,
+            evidence.get("manifest_relative_path"),
+            evidence.get("manifest_hash"),
+            f"{label} PIT manifest",
+        )
+        manifest = _json_object(manifest_path)
+        if manifest.get("source_hash") != _file_sha256(raw):
+            raise NvdaResearchP511Error(f"{label} PIT manifest/source hash mismatch")
+        for field in ("provider_timestamp", "available_at", "captured_at"):
+            value = evidence.get(field)
+            if manifest.get(field) != value:
+                raise NvdaResearchP511Error(f"{label} PIT {field} linkage mismatch")
+            _require_before(value, decision_time, f"{label} PIT {field}")
+        provider_time = _timestamp(evidence["provider_timestamp"], f"{label} PIT provider_timestamp")
+        available_at = _timestamp(evidence["available_at"], f"{label} PIT available_at")
+        captured_at = _timestamp(evidence["captured_at"], f"{label} PIT captured_at")
+        if provider_time > available_at or available_at > captured_at:
+            raise NvdaResearchP511Error(f"{label} PIT timestamp order mismatch")
+    except (OSError, NvdaResearchP511Error) as exc:
+        return False, f"linked_pit_evidence_invalid:{exc}"
+    return True, "linked_pit_evidence_verified"
+
+
 def _validate_alpha_policy(
     *,
     private_root: Path,
     terms_review_path: Path,
     supplemental_adjudication_path: Path,
+    approval_receipt_path: Path | None = None,
+    approved_receipt_sha256: str | None = None,
+    approval_as_of: datetime,
 ) -> dict[str, Any]:
     terms = _json_object(terms_review_path)
     supplemental = _json_object(supplemental_adjudication_path)
@@ -150,25 +201,42 @@ def _validate_alpha_policy(
         raise NvdaResearchP511Error("Alpha Vantage local-display policy changed")
     if terms.get("public_display_permission") != "not_authorized":
         raise NvdaResearchP511Error("Alpha Vantage public-display policy must remain not_authorized")
-    receipt = terms.get("approval_receipt")
-    receipt_scopes = set(receipt.get("approved_scopes") or []) if isinstance(receipt, dict) else set()
-    receipt_valid = bool(
-        isinstance(receipt, dict)
-        and receipt.get("status") == "approved"
-        and isinstance(receipt.get("approved_by"), str)
-        and receipt.get("approved_by").strip()
-        and isinstance(receipt.get("approved_at"), str)
-        and receipt.get("approved_at").strip()
-    )
-    derived_authorized = receipt_valid and "derived_analysis" in receipt_scopes
-    display_authorized = receipt_valid and "local_display" in receipt_scopes
     document = terms.get("terms_document") or {}
-    _resolve_linked(
+    terms_document_path = _resolve_linked(
         private_root,
         document.get("relative_path"),
         document.get("pdf_sha256"),
         "Alpha Vantage terms document",
     )
+    receipt_valid = False
+    receipt_scopes: set[str] = set()
+    receipt_sha256 = None
+    if approval_receipt_path is not None or approved_receipt_sha256 is not None:
+        if approval_receipt_path is None or not isinstance(approved_receipt_sha256, str):
+            raise NvdaResearchP511Error("external approval receipt and pinned SHA-256 are both required")
+        approval_receipt_path = Path(approval_receipt_path)
+        receipt_sha256 = _file_sha256(approval_receipt_path)
+        if receipt_sha256 != approved_receipt_sha256:
+            raise NvdaResearchP511Error("external approval receipt SHA-256 mismatch")
+        receipt = _json_object(approval_receipt_path)
+        if receipt.get("receipt_version") != "alpha-vantage-rights-approval-receipt-v1":
+            raise NvdaResearchP511Error("external approval receipt version mismatch")
+        if receipt.get("approved_source_sha256") != _file_sha256(terms_document_path):
+            raise NvdaResearchP511Error("external approval receipt source SHA-256 mismatch")
+        approved_by = receipt.get("approved_by")
+        if not isinstance(approved_by, str) or not approved_by.strip():
+            raise NvdaResearchP511Error("external approval receipt approver is missing")
+        approved_at = _timestamp(receipt.get("approved_at"), "approval receipt approved_at")
+        expires_at = _timestamp(receipt.get("expires_at"), "approval receipt expires_at")
+        if approved_at > approval_as_of or approval_as_of >= expires_at:
+            raise NvdaResearchP511Error("external approval receipt is not valid at decision_time")
+        scopes = receipt.get("approved_scopes")
+        if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+            raise NvdaResearchP511Error("external approval receipt scopes are invalid")
+        receipt_scopes = set(scopes)
+        receipt_valid = True
+    derived_authorized = receipt_valid and "derived_analysis" in receipt_scopes
+    display_authorized = receipt_valid and "local_display" in receipt_scopes
 
     if supplemental.get("adjudication_version") != "alpha-vantage-supplemental-adjudication-p5.0.2-v1":
         raise NvdaResearchP511Error("supplemental adjudication version mismatch")
@@ -213,6 +281,9 @@ def _validate_alpha_policy(
         "alpha_vantage_usage": "internal_integrity_and_row_quality_audit_only",
         "prohibited_uses": sorted(required_prohibitions),
         "approval_receipt_present": receipt_valid,
+        "approval_receipt_sha256": receipt_sha256,
+        "approval_receipt_path": str(approval_receipt_path) if approval_receipt_path else None,
+        "approval_receipt_validation": "external_pinned_file_only",
         "derived_analysis_authorized": derived_authorized,
         "local_display_authorized": display_authorized,
         "derived_analysis_status": derived_status,
@@ -364,6 +435,7 @@ def build_peer_proxy(
     industry_map: dict[str, Any],
     decision_time: datetime,
     market_session: date,
+    evidence_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build a price-independent peer multiple or an explicit blocked result."""
 
@@ -379,7 +451,12 @@ def build_peer_proxy(
     target_basis = nvda.get("accountingBasis")
     target_eps_basis = nvda.get("epsBasis")
     target_basis_explicit = _explicit_basis(target_basis) and _explicit_basis(target_eps_basis)
-    target_pit_verified = nvda.get("providerTimestampVerified") is True
+    target_pit_verified, target_pit_reason = _pit_evidence_status(
+        nvda,
+        evidence_root=evidence_root,
+        decision_time=decision_time,
+        label="NVDA consensus",
+    )
     accepted: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     future_rows: list[dict[str, Any]] = []
@@ -422,11 +499,32 @@ def build_peer_proxy(
         if row.get("asOf") != market_session.isoformat():
             excluded.append({"ticker": ticker, "reason": "same_session_valuation_missing"})
             continue
-        if not target_pit_verified or peer.get("providerTimestampVerified") is not True:
-            excluded.append({"ticker": ticker, "reason": "consensus_point_in_time_unverified"})
+        peer_pit_verified, peer_pit_reason = _pit_evidence_status(
+            peer,
+            evidence_root=evidence_root,
+            decision_time=decision_time,
+            label=f"{ticker} consensus",
+        )
+        row_pit_verified, row_pit_reason = _pit_evidence_status(
+            row,
+            evidence_root=evidence_root,
+            decision_time=decision_time,
+            label=f"{ticker} valuation",
+        )
+        if not target_pit_verified or not peer_pit_verified:
+            excluded.append({
+                "ticker": ticker,
+                "reason": "consensus_linked_pit_evidence_unverified",
+                "target_pit_reason": target_pit_reason,
+                "peer_pit_reason": peer_pit_reason,
+            })
             continue
-        if row.get("pointInTimeVerified") is not True:
-            excluded.append({"ticker": ticker, "reason": "valuation_point_in_time_unverified"})
+        if not row_pit_verified:
+            excluded.append({
+                "ticker": ticker,
+                "reason": "valuation_linked_pit_evidence_unverified",
+                "valuation_pit_reason": row_pit_reason,
+            })
             continue
         if row.get("estimatePeriod") != target_period or "Nasdaq 컨센서스 EPS" not in str(row.get("estimateKind") or ""):
             excluded.append({"ticker": ticker, "reason": "valuation_basis_or_period_mismatch"})
@@ -470,6 +568,8 @@ def build_peer_proxy(
         "required_eps_basis": target_eps_basis,
         "target_basis_explicit": target_basis_explicit,
         "target_point_in_time_verified": target_pit_verified,
+        "target_pit_evidence_reason": target_pit_reason,
+        "self_asserted_provider_timestamp_ignored": nvda.get("providerTimestampVerified") is True,
         "minimum_peer_count": MINIMUM_PEERS,
         "pre_outlier_peers": accepted,
         "pre_outlier_median": statistics.median(row["expected_pe"] for row in accepted) if accepted else None,
@@ -523,6 +623,8 @@ def build_p511_artifacts(
     supersession_output_path: str | Path | None = None,
     peer_output_path: str | Path | None = None,
     decision_output_path: str | Path | None = None,
+    approval_receipt_path: str | Path | None = None,
+    approved_receipt_sha256: str | None = None,
     generated_at: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Build P5.1.2 artifacts without changing P5.1/P5.1.1 evidence."""
@@ -536,18 +638,33 @@ def build_p511_artifacts(
         p51_read_model_path=p51_read_model_path,
         p51_decision_path=p51_decision_path,
     )
+    generated_at = generated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    decision_time = _timestamp(generated_at, "diagnostic_time")
+    legacy_evidence_available_at = _timestamp(
+        read_model.get("available_at"), "P5.1 evidence available_at"
+    )
+    if legacy_evidence_available_at > decision_time:
+        raise NvdaResearchP511Error("P5.1 evidence is later than diagnostic_time")
     alpha_policy = _validate_alpha_policy(
         private_root=private_root,
         terms_review_path=Path(terms_review_path),
         supplemental_adjudication_path=Path(supplemental_adjudication_path),
+        approval_receipt_path=Path(approval_receipt_path) if approval_receipt_path else None,
+        approved_receipt_sha256=approved_receipt_sha256,
+        approval_as_of=decision_time,
     )
-    decision_time = _timestamp(read_model.get("available_at"), "decision_time")
     price_history = _json_object(price_history_path)
     consensus = _json_object(consensus_path)
     valuation = _json_object(valuation_history_path)
     industry = _json_object(industry_map_path)
     macro = _json_object(macro_path)
-    _require_before(macro.get("generatedAt"), decision_time, "macro.generatedAt")
+    macro_eligible = True
+    macro_exclusion_reason = None
+    try:
+        _require_before(macro.get("generatedAt"), decision_time, "macro.generatedAt")
+    except NvdaResearchP511Error as exc:
+        macro_eligible = False
+        macro_exclusion_reason = str(exc)
     price = _latest_top10_price(price_history, decision_time)
     market_session = _exact_date(price["as_of"], "market_session")
     top10_eps = _top10_consensus_input(consensus, decision_time)
@@ -557,8 +674,13 @@ def build_p511_artifacts(
         industry_map=industry,
         decision_time=decision_time,
         market_session=market_session,
+        evidence_root=Path(consensus_path).parent,
     )
-    regime_adjustment, regime_trace = _regime_adjustment(macro)
+    if macro_eligible:
+        regime_adjustment, regime_trace = _regime_adjustment(macro)
+    else:
+        regime_adjustment = 0.0
+        regime_trace = ["future macro snapshot excluded from P5.1.2 diagnostics"]
     current_implied = price["value"] / top10_eps["average"]
     scenario_table = [
         {
@@ -569,8 +691,11 @@ def build_p511_artifacts(
         for multiple in FALLBACK_MULTIPLES
     ]
 
-    target_multiple = peer_proxy["post_outlier_median"]
-    pre_regime_target = target_multiple
+    diagnostic_peer_median = peer_proxy["post_outlier_median"]
+    # P5.1.2 is permanently diagnostic-only. Even a future peer-gate pass must
+    # not create valuation or action fields; that belongs to Decision Model v2.
+    target_multiple = None
+    pre_regime_target = None
     base_value = None
     sensitivity = None
     ladder = None
@@ -578,31 +703,7 @@ def build_p511_artifacts(
     action_text = None
     valuation_signal_status = "not_generated"
     control_action = "no_new_position_signal"
-    if peer_proxy["peer_gate_passed"]:
-        target_multiple = float(target_multiple) * (1.0 + regime_adjustment)
-        sensitivity = {
-            "low": top10_eps["low"] * target_multiple,
-            "base": top10_eps["average"] * target_multiple,
-            "high": top10_eps["high"] * target_multiple,
-        }
-        base_value = sensitivity["base"]
-        ladder = [round(base_value * factor, 2) for factor in (0.97, 0.93, 0.89)]
-        span = (ladder[0] - ladder[-1]) / base_value
-        if not 0.05 <= span <= 0.12:
-            raise NvdaResearchP511Error("independent-base ladder is outside the 5%-12% range")
-        if price["value"] <= ladder[0]:
-            action = "분할매수"
-            action_text = f"독립 피어 기준을 통과해 ${ladder[0]:,.2f}부터 3회 분할매수를 시작합니다."
-        elif price["value"] >= base_value * 1.15:
-            action = "비중축소"
-            action_text = f"독립 피어 기준값보다 15% 이상 높아 신규 매수를 중단하고 비중 축소를 검토합니다."
-        else:
-            action = "대기"
-            action_text = f"현재는 대기하고 ${ladder[0]:,.2f}부터 3회 분할매수를 시작합니다."
-        valuation_signal_status = "provider_homogeneous_proxy_generated"
-        control_action = "research_signal_available"
 
-    generated_at = generated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     supersession = {
         "supersession_version": SUPERSESSION_VERSION,
         "generated_at": generated_at,
@@ -640,8 +741,16 @@ def build_p511_artifacts(
         "research_decision_version": RESEARCH_DECISION_VERSION,
         "generated_at": generated_at,
         "ticker": EXPECTED_TICKER,
-        "decision_time": read_model["available_at"],
-        "decision_status": "research_inputs_incomplete",
+        "decision_time": generated_at,
+        "diagnostic_time": generated_at,
+        "legacy_evidence_available_at": read_model["available_at"],
+        "decision_status": "diagnostic_only_p5_closed",
+        "artifact_versions": {
+            "supersession": SUPERSESSION_VERSION,
+            "peer_proxy": PEER_PROXY_VERSION,
+            "decision": RESEARCH_DECISION_VERSION,
+            "target_multiple_policy": TARGET_MULTIPLE_POLICY_VERSION,
+        },
         "current_price": price,
         "consensus_input": top10_eps,
         "alpha_vantage_internal_audit": {
@@ -664,6 +773,14 @@ def build_p511_artifacts(
         "alpha_vantage_policy": alpha_policy,
         "current_implied_forward_multiple": current_implied,
         "peer_proxy_status": peer_proxy["status"],
+        "peer_diagnostic": {
+            "status": peer_proxy["status"],
+            "gate_passed": peer_proxy["peer_gate_passed"],
+            "pre_outlier_tickers": [row["ticker"] for row in peer_proxy["pre_outlier_peers"]],
+            "post_outlier_tickers": [row["ticker"] for row in peer_proxy["post_outlier_peers"]],
+            "pre_outlier_median": peer_proxy["pre_outlier_median"],
+            "post_outlier_median": diagnostic_peer_median,
+        },
         "target_multiple_policy": {
             "policy_version": TARGET_MULTIPLE_POLICY_VERSION,
             "data_as_of": market_session.isoformat(),
@@ -672,9 +789,9 @@ def build_p511_artifacts(
             "period_normalization": "exact provider fiscalEnd match; no FY1/NTM conversion",
             "growth_revision_adjustment": "not applied unless comparable explicit basis is verified",
             "regime_adjustment_before_after": {
-                "before": pre_regime_target,
+                "before": None,
                 "adjustment": regime_adjustment,
-                "after": target_multiple if peer_proxy["peer_gate_passed"] else None,
+                "after": None,
             },
             "current_price_used_in_target": False,
             "performance_measurement_plan": (
@@ -695,11 +812,13 @@ def build_p511_artifacts(
             "source": "Nasdaq Top10 cross_project_market_proxy",
             "source_hash": _file_sha256(Path(macro_path)),
             "as_of": macro.get("generatedAt"),
+            "source_eligible": macro_eligible,
+            "exclusion_reason": macro_exclusion_reason,
             "adjustment": regime_adjustment,
-            "applied_to_target": peer_proxy["peer_gate_passed"],
+            "applied_to_target": False,
             "trace": regime_trace,
         },
-        "independent_target_multiple": target_multiple if peer_proxy["peer_gate_passed"] else None,
+        "independent_target_multiple": None,
         "independent_research_base_value": base_value,
         "fair_value": base_value,
         "eps_sensitivity": sensitivity,
@@ -710,7 +829,7 @@ def build_p511_artifacts(
         "provisional_research_buy_prices": ladder,
         "buy_range": ladder,
         "sell_range": None,
-        "buy_ladder_status": "available_from_independent_base" if ladder else "not_created_peer_gate_failed",
+        "buy_ladder_status": "not_generated_p5_diagnostic_only",
         "accounting_basis": "unknown",
         "pit_limit": "cross-project peer data are not independently point-in-time verified",
         "superseded_p51_status": "superseded_circular_price_anchor",
@@ -745,7 +864,7 @@ def build_p511_artifacts(
             "macro": str(Path(macro_path)),
         },
     }
-    decision["calculation_sha256"] = _canonical_sha256(decision)
+    decision["calculation_sha256"] = _decision_calculation_sha256(decision)
     if decision_output_path is not None:
         atomic_write_json(Path(decision_output_path), decision)
     return supersession, peer_proxy, decision
@@ -773,12 +892,30 @@ def load_p511_artifacts(
         raise NvdaResearchP511Error("P5.1.2 peer proxy version mismatch")
     if decision.get("research_decision_version") != RESEARCH_DECISION_VERSION:
         raise NvdaResearchP511Error("P5.1.2 decision version mismatch")
+    recorded_calculation_sha = decision.get("calculation_sha256")
+    if recorded_calculation_sha != _decision_calculation_sha256(decision):
+        raise NvdaResearchP511Error("P5.1.2 calculation SHA-256 mismatch")
+    versions = decision.get("artifact_versions") or {}
+    if versions != {
+        "supersession": SUPERSESSION_VERSION,
+        "peer_proxy": PEER_PROXY_VERSION,
+        "decision": RESEARCH_DECISION_VERSION,
+        "target_multiple_policy": TARGET_MULTIPLE_POLICY_VERSION,
+    }:
+        raise NvdaResearchP511Error("P5.1.2 cross-artifact version mismatch")
     hashes = decision.get("source_hashes") or {}
     if hashes.get("p512_supersession") != _file_sha256(supersession_path):
         raise NvdaResearchP511Error("P5.1.2 supersession hash mismatch")
     if hashes.get("p512_peer_proxy") != _file_sha256(peer_proxy_path):
         raise NvdaResearchP511Error("P5.1.2 peer proxy hash mismatch")
     paths = decision.get("source_paths") or {}
+    for path_key, actual_path in (
+        ("p512_supersession", supersession_path),
+        ("p512_peer_proxy", peer_proxy_path),
+    ):
+        recorded = Path(str(paths.get(path_key) or ""))
+        if recorded.resolve() != actual_path.resolve():
+            raise NvdaResearchP511Error(f"P5.1.2 source path mismatch: {path_key}")
     for path_key, hash_key in (
         ("p51_adjudication", "p51_adjudication"),
         ("p51_read_model", "p51_read_model"),
@@ -796,6 +933,26 @@ def load_p511_artifacts(
             raise NvdaResearchP511Error(f"P5.1.2 source mismatch: {path_key}")
     if decision.get("superseded_p51_status") != "superseded_circular_price_anchor":
         raise NvdaResearchP511Error("P5.1.2 decision did not withdraw superseded action anchors")
+    if decision.get("peer_gate_passed") is not peer.get("peer_gate_passed"):
+        raise NvdaResearchP511Error("P5.1.2 decision/peer gate mismatch")
+    if decision.get("peer_proxy_status") != peer.get("status"):
+        raise NvdaResearchP511Error("P5.1.2 decision/peer status mismatch")
+    peer_diagnostic = decision.get("peer_diagnostic") or {}
+    expected_peer_diagnostic = {
+        "status": peer.get("status"),
+        "gate_passed": peer.get("peer_gate_passed"),
+        "pre_outlier_tickers": [row.get("ticker") for row in (peer.get("pre_outlier_peers") or [])],
+        "post_outlier_tickers": [row.get("ticker") for row in (peer.get("post_outlier_peers") or [])],
+        "pre_outlier_median": peer.get("pre_outlier_median"),
+        "post_outlier_median": peer.get("post_outlier_median"),
+    }
+    if peer_diagnostic != expected_peer_diagnostic:
+        raise NvdaResearchP511Error("P5.1.2 decision/peer diagnostic mismatch")
+    policy = decision.get("target_multiple_policy") or {}
+    if policy.get("policy_version") != TARGET_MULTIPLE_POLICY_VERSION:
+        raise NvdaResearchP511Error("P5.1.2 target-multiple policy version mismatch")
+    if policy.get("peer_tickers") != expected_peer_diagnostic["post_outlier_tickers"]:
+        raise NvdaResearchP511Error("P5.1.2 decision/peer ticker list mismatch")
     if decision.get("operational_decision") is not None or decision.get("operational_eligible") is not False:
         raise NvdaResearchP511Error("P5.1.2 attempted operational promotion")
     alpha_policy = decision.get("alpha_vantage_policy") or {}
@@ -806,21 +963,32 @@ def load_p511_artifacts(
             raise NvdaResearchP511Error("manual review was treated as derived-analysis approval")
         if alpha_policy.get("local_display_authorized") is not False:
             raise NvdaResearchP511Error("manual review was treated as local-display approval")
-    if decision.get("peer_gate_passed") is not True:
-        if any(
-            decision.get(key) is not None
-            for key in (
-                "research_action",
-                "first_review_rule",
-                "fair_value",
-                "buy_range",
-                "sell_range",
-                "independent_target_multiple",
-            )
+    else:
+        receipt_path = Path(str(alpha_policy.get("approval_receipt_path") or ""))
+        if not receipt_path.is_file() or _file_sha256(receipt_path) != alpha_policy.get(
+            "approval_receipt_sha256"
         ):
-            raise NvdaResearchP511Error("P5.1.2 gate failure leaked a valuation or action")
-        if decision.get("valuation_signal_status") != "not_generated":
-            raise NvdaResearchP511Error("P5.1.2 gate failure status mismatch")
-        if decision.get("control_action") != "no_new_position_signal":
-            raise NvdaResearchP511Error("P5.1.2 gate failure control action mismatch")
+            raise NvdaResearchP511Error("external approval receipt linkage mismatch")
+    if any(
+        decision.get(key) is not None
+        for key in (
+            "research_action",
+            "research_action_text",
+            "first_review_rule",
+            "fair_value",
+            "buy_range",
+            "sell_range",
+            "independent_target_multiple",
+            "independent_research_base_value",
+            "provisional_research_buy_prices",
+            "eps_sensitivity",
+        )
+    ):
+        raise NvdaResearchP511Error("P5.1.2 diagnostic artifact leaked a valuation or action")
+    if decision.get("valuation_signal_status") != "not_generated":
+        raise NvdaResearchP511Error("P5.1.2 diagnostic signal status mismatch")
+    if decision.get("control_action") != "no_new_position_signal":
+        raise NvdaResearchP511Error("P5.1.2 diagnostic control action mismatch")
+    if decision.get("buy_ladder_status") != "not_generated_p5_diagnostic_only":
+        raise NvdaResearchP511Error("P5.1.2 diagnostic ladder status mismatch")
     return supersession, peer, decision

@@ -21,6 +21,7 @@ from stocklens.personal.nvda_research_p511 import (
     PEER_PROXY_VERSION as NVDA_P511_PEER_PROXY_VERSION,
     RESEARCH_DECISION_VERSION as NVDA_P511_DECISION_VERSION,
     SUPERSESSION_VERSION as NVDA_P511_SUPERSESSION_VERSION,
+    TARGET_MULTIPLE_POLICY_VERSION as NVDA_P511_POLICY_VERSION,
 )
 
 
@@ -355,8 +356,19 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         "p512_supersession": _sha256(supersession_path),
         "p512_peer_proxy": _sha256(peer_path),
     })
-    p512_decision_path.write_text(json.dumps({
+    p512_source_paths = {name: str(path) for name, path in p512_sources.items()}
+    p512_source_paths.update({
+        "p512_supersession": str(supersession_path),
+        "p512_peer_proxy": str(peer_path),
+    })
+    p512_decision = {
         "research_decision_version": NVDA_P511_DECISION_VERSION,
+        "artifact_versions": {
+            "supersession": NVDA_P511_SUPERSESSION_VERSION,
+            "peer_proxy": NVDA_P511_PEER_PROXY_VERSION,
+            "decision": NVDA_P511_DECISION_VERSION,
+            "target_multiple_policy": NVDA_P511_POLICY_VERSION,
+        },
         "superseded_p51_status": "superseded_circular_price_anchor",
         "current_price": {"value": 214.13, "as_of": "2026-10-16", "available_at": "2026-10-16T22:36:45.419Z"},
         "consensus_input": {
@@ -378,6 +390,19 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
             "local_display_authorized": False, "public_display_permission": "not_authorized",
         },
         "peer_gate_passed": False,
+        "peer_proxy_status": "provider_homogeneous_proxy",
+        "peer_diagnostic": {
+            "status": "provider_homogeneous_proxy",
+            "gate_passed": False,
+            "pre_outlier_tickers": ["MRVL"],
+            "post_outlier_tickers": ["MRVL"],
+            "pre_outlier_median": None,
+            "post_outlier_median": None,
+        },
+        "target_multiple_policy": {
+            "policy_version": NVDA_P511_POLICY_VERSION,
+            "peer_tickers": ["MRVL"],
+        },
         "valuation_signal_status": "not_generated",
         "control_action": "no_new_position_signal",
         "pre_regime_target_multiple": None,
@@ -392,13 +417,20 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         "fair_value": None,
         "buy_range": None,
         "sell_range": None,
+        "eps_sensitivity": None,
+        "buy_ladder_status": "not_generated_p5_diagnostic_only",
         "accounting_basis": "unknown",
         "pit_limit": "cross-project peer data are not independently point-in-time verified",
         "source_hashes": source_hashes,
-        "source_paths": {name: str(path) for name, path in p512_sources.items()},
+        "source_paths": p512_source_paths,
         "operational_decision": None,
         "operational_eligible": False,
-    }), encoding="utf-8")
+    }
+    encoded = json.dumps(
+        p512_decision, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    p512_decision["calculation_sha256"] = hashlib.sha256(encoded).hexdigest().upper()
+    p512_decision_path.write_text(json.dumps(p512_decision), encoding="utf-8")
     monkeypatch.setenv("STOCKLENS_NVDA_P512_SUPERSESSION_PATH", str(supersession_path))
     monkeypatch.setenv("STOCKLENS_NVDA_P512_PEER_PROXY_PATH", str(peer_path))
     monkeypatch.setenv("STOCKLENS_NVDA_P512_DECISION_PATH", str(p512_decision_path))

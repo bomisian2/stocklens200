@@ -289,24 +289,22 @@ def _render_nvda_p512_research(
     with st.expander(f"제외 피어 {len(excluded)}개와 사유"):
         st.dataframe(pd.DataFrame(excluded), hide_index=True, width="stretch")
 
-    if decision["peer_gate_passed"]:
-        buy_prices = decision["provisional_research_buy_prices"]
-        st.success(f"잠정 연구 행동: {decision['research_action']} · {decision['research_action_text']}")
-        st.write(f"잠정 연구 분할구간: ${buy_prices[0]:,.2f} / ${buy_prices[1]:,.2f} / ${buy_prices[2]:,.2f}")
-    else:
-        st.error(
-            f"피어 게이트 미충족: {peer_proxy['block_reason']}. 적정가·매수구간·매도구간·연구 행동은 모두 미생성입니다."
-        )
-        st.dataframe(
-            pd.DataFrame(decision["conditional_multiple_table"]),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "multiple": st.column_config.NumberColumn("명시 배수", format="%.0f배"),
-                "price": st.column_config.NumberColumn("단순 역산 가격", format="$%.2f"),
-            },
-        )
-        st.caption("20·22·24배는 선택 근거가 없는 민감도 표이며 대표값·매수 검토 기준·행동 신호가 아닙니다.")
+    st.error(
+        "P5.1.2는 데이터 품질·피어 게이트 진단 전용으로 마감됐습니다. "
+        f"gate={peer_proxy['peer_gate_passed']} · {peer_proxy.get('block_reason') or 'gate diagnostic completed'}. "
+        "적정가·매수구간·매도구간·연구 행동은 모두 미생성입니다. "
+        "입력 상태가 바뀌어도 P5.1.2에서는 생성하지 않습니다."
+    )
+    st.dataframe(
+        pd.DataFrame(decision["conditional_multiple_table"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "multiple": st.column_config.NumberColumn("명시 배수", format="%.0f배"),
+            "price": st.column_config.NumberColumn("단순 역산 가격", format="$%.2f"),
+        },
+    )
+    st.caption("20·22·24배는 선택 근거가 없는 민감도 표이며 대표값·매수 검토 기준·행동 신호가 아닙니다.")
 
     with st.expander("시점·국면·회계 기준 검증", expanded=True):
         st.write(f"- 철회 상태: {supersession['status']}")
