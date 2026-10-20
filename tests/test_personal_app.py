@@ -317,90 +317,91 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_SHA256", audit_sha256)
     monkeypatch.setenv("STOCKLENS_SAME_DATE_LEGACY_INPUT_PATH", str(legacy_path))
 
-    # P5.1.1 artifacts are synthetic UI fixtures. The loader still re-hashes every
-    # declared source and rejects the superseded P5.1 version.
-    p511_source_dir = tmp_path / "p511-sources"
-    p511_source_dir.mkdir()
-    p511_sources = {}
+    # P5.1.2 artifacts are synthetic UI fixtures. The loader still re-hashes every
+    # declared source and rejects superseded P5.1/P5.1.1 versions.
+    p512_source_dir = tmp_path / "p512-sources"
+    p512_source_dir.mkdir()
+    p512_sources = {}
     for name in (
         "p51_adjudication", "p51_read_model", "p51_decision", "price_history",
         "consensus", "valuation_history", "industry_map", "macro", "terms_review",
         "supplemental_adjudication",
     ):
-        path = p511_source_dir / f"{name}.json"
+        path = p512_source_dir / f"{name}.json"
         path.write_text(json.dumps({"fixture": name}), encoding="utf-8")
-        p511_sources[name] = path
-    forward_records = []
-    for period_date, horizon, average in (
-        ("2026-10-31", "fiscal quarter", 2.4733),
-        ("2027-01-31", "fiscal quarter", 2.7462),
-        ("2027-01-31", "fiscal year", 9.3124),
-        ("2028-01-31", "fiscal year", 15.9146),
-    ):
-        forward_records.append({
-            "period_date": period_date, "horizon": horizon,
-            "eps": {"low": average * 0.95, "average": average, "high": average * 1.05, "analyst_count": 10, "revision_up_30d": 2, "revision_down_30d": 1},
-            "revenue": {"low": 1.0, "average": 2.0, "high": 3.0, "analyst_count": 10},
-            "available_at": "2026-10-18T00:38:27.040534Z",
-        })
-    supersession_path = decision_dir / "nvda-p511-supersession.json"
+        p512_sources[name] = path
+    supersession_path = decision_dir / "nvda-p512-supersession.json"
     supersession_path.write_text(json.dumps({
         "supersession_version": NVDA_P511_SUPERSESSION_VERSION,
         "status": "superseded_circular_price_anchor",
         "operational_eligible": False,
     }), encoding="utf-8")
-    peer_path = decision_dir / "nvda-p511-peer.json"
+    peer_path = decision_dir / "nvda-p512-peer.json"
     peer_path.write_text(json.dumps({
         "peer_proxy_version": NVDA_P511_PEER_PROXY_VERSION,
-        "status": "cross_project_peer_proxy",
+        "status": "provider_homogeneous_proxy",
         "minimum_peer_count": 5,
         "pre_outlier_peers": [{"ticker": "MRVL", "expected_pe": 22.0, "as_of": "2026-10-16"}],
         "post_outlier_peers": [{"ticker": "MRVL", "expected_pe": 22.0, "as_of": "2026-10-16"}],
         "excluded_peers": [{"ticker": "AMD", "reason": "fiscal_period_mismatch"}],
         "peer_gate_passed": False,
-        "block_reason": "same-basis peers 1/5",
+        "block_reason": "explicit-basis, point-in-time, same-session peers 0/5",
+        "current_price_used_in_target_multiple": False,
         "operational_eligible": False,
     }), encoding="utf-8")
-    p511_decision_path = decision_dir / "nvda-p511-decision.json"
-    source_hashes = {name: _sha256(path) for name, path in p511_sources.items()}
+    p512_decision_path = decision_dir / "nvda-p512-decision.json"
+    source_hashes = {name: _sha256(path) for name, path in p512_sources.items()}
     source_hashes.update({
-        "p511_supersession": _sha256(supersession_path),
-        "p511_peer_proxy": _sha256(peer_path),
+        "p512_supersession": _sha256(supersession_path),
+        "p512_peer_proxy": _sha256(peer_path),
     })
-    p511_decision_path.write_text(json.dumps({
+    p512_decision_path.write_text(json.dumps({
         "research_decision_version": NVDA_P511_DECISION_VERSION,
         "superseded_p51_status": "superseded_circular_price_anchor",
         "current_price": {"value": 214.13, "as_of": "2026-10-16", "available_at": "2026-10-16T22:36:45.419Z"},
-        "consensus_input": {"period": "Jan 2027", "low": 9.01, "average": 9.27, "high": 9.71, "available_at": "2026-10-16T22:38:40.679Z"},
+        "consensus_input": {
+            "period": "Jan 2027",
+            "low": 9.01,
+            "average": 9.27,
+            "high": 9.71,
+            "available_at": "2026-10-16T22:38:40.679Z",
+            "eps_basis": "unknown",
+        },
         "current_implied_forward_multiple": 214.13 / 9.27,
-        "alpha_vantage_data_quality": {
+        "alpha_vantage_internal_audit": {
             "available_at": "2026-10-18T00:38:27.040534Z", "data_quality_status": "partial_valid",
             "accounting_basis": "unknown", "raw_unchanged": True,
-            "row_counts": {"total": 41, "valid": 40, "quarantined": 1, "future_valid": 4, "future_quarantined": 0},
-            "quarantined_records": [{"position": 25, "date": "2021-07-31", "horizon": "fiscal quarter", "reason": "estimate_revenue_range_invalid", "canonical_sha256": "A" * 64}],
-            "forward_records": forward_records,
+            "valuation_input": False, "trading_decision_input": False,
         },
-        "alpha_vantage_cross_validation": {"alpha_vantage_average": 9.3124, "top10_average": 9.27, "difference_percent_of_top10": 9.3124 / 9.27 - 1.0},
+        "alpha_vantage_policy": {
+            "approval_receipt_present": False, "derived_analysis_authorized": False,
+            "local_display_authorized": False, "public_display_permission": "not_authorized",
+        },
         "peer_gate_passed": False,
+        "valuation_signal_status": "not_generated",
+        "control_action": "no_new_position_signal",
         "pre_regime_target_multiple": None,
         "independent_target_multiple": None,
         "independent_research_base_value": None,
-        "regime": {"adjustment": -0.03, "trace": ["HYG 약세 프록시: -3%"]},
+        "regime": {"adjustment": -0.03, "applied_to_target": False, "trace": ["HYG 약세 프록시: -3%"]},
         "conditional_multiple_table": [{"multiple": value, "price": 9.27 * value} for value in (20.0, 22.0, 24.0)],
-        "first_review_rule": {"multiple_at_or_below": 22.0, "price_at_or_below": 203.94},
-        "research_action": "대기",
-        "research_action_text": "동일 basis 피어가 1/5로 부족해 22배 조건 가격 이하에서만 1차 검토합니다.",
+        "first_review_rule": None,
+        "research_action": None,
+        "research_action_text": None,
         "provisional_research_buy_prices": None,
+        "fair_value": None,
+        "buy_range": None,
+        "sell_range": None,
         "accounting_basis": "unknown",
         "pit_limit": "cross-project peer data are not independently point-in-time verified",
         "source_hashes": source_hashes,
-        "source_paths": {name: str(path) for name, path in p511_sources.items()},
+        "source_paths": {name: str(path) for name, path in p512_sources.items()},
         "operational_decision": None,
         "operational_eligible": False,
     }), encoding="utf-8")
-    monkeypatch.setenv("STOCKLENS_NVDA_P511_SUPERSESSION_PATH", str(supersession_path))
-    monkeypatch.setenv("STOCKLENS_NVDA_P511_PEER_PROXY_PATH", str(peer_path))
-    monkeypatch.setenv("STOCKLENS_NVDA_P511_DECISION_PATH", str(p511_decision_path))
+    monkeypatch.setenv("STOCKLENS_NVDA_P512_SUPERSESSION_PATH", str(supersession_path))
+    monkeypatch.setenv("STOCKLENS_NVDA_P512_PEER_PROXY_PATH", str(peer_path))
+    monkeypatch.setenv("STOCKLENS_NVDA_P512_DECISION_PATH", str(p512_decision_path))
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
         timeout=APPTEST_TIMEOUT_SECONDS
@@ -493,21 +494,22 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "StockLens 로컬 가격이 없어 v23 연구 입력만 표시합니다" in nvda_info
     assert "NVDA Q2 FCF: null 유지" in nvda_captions
     assert nvda_metrics["정상 관심 후보 · 연구 전용"] != "미산출"
-    assert nvda_metrics["Alpha 전체 행"] == "41건"
-    assert nvda_metrics["정상 행"] == "40건"
-    assert nvda_metrics["격리 행"] == "1건"
-    assert nvda_metrics["미래 교차검증"] == "4건"
     assert nvda_metrics["현재가"] == "$214.13"
-    assert nvda_metrics["독립 목표 배수"] == "미산출"
-    assert nvda_metrics["독립 연구 기준값"] == "미산출"
+    assert nvda_metrics["피어 목표 배수"] == "미생성"
+    assert nvda_metrics["가치·행동 신호"] == "not_generated"
     nvda_rendered = " ".join(item.value for item in [*app.subheader, *app.warning, *app.info, *app.caption, *app.success, *app.error, *app.markdown])
-    assert "부분유효 컨센서스" in nvda_rendered
+    assert "P5.1.1의 임의 22배 행동 기준을 모두 철회" in nvda_rendered
     assert "superseded_circular_price_anchor" in nvda_rendered
-    assert "적정가와 승인된 분할매수 가격을 생성하지 않습니다" in nvda_rendered
-    assert "203.94 이하에서 1차 검토" in nvda_rendered
+    assert "적정가·매수구간·매도구간·연구 행동은 모두 미생성" in nvda_rendered
+    assert "203.94 이하에서 1차 검토" not in nvda_rendered
+    assert "조건부 연구 행동: 대기" not in nvda_rendered
+    assert "research_action=null" in nvda_rendered
+    assert "first_review_rule=null" in nvda_rendered
+    assert "20·22·24배는 선택 근거가 없는 민감도 표" in nvda_rendered
+    assert "approval_receipt_present" not in nvda_rendered
     for withdrawn in ("214.08", "203.42", "195.93", "188.43"):
         assert withdrawn not in nvda_rendered
-    assert "operational_decision=None / operational_eligible=false" in nvda_rendered
+    assert "operational_decision=null · operational_eligible=false" in nvda_rendered
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"

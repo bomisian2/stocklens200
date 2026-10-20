@@ -32,7 +32,13 @@ def _write(path: Path, value: dict) -> Path:
     return path
 
 
-def _fixture(tmp_path: Path, *, price: float = 214.13, peer_count: int = 5) -> dict[str, Path]:
+def _fixture(
+    tmp_path: Path,
+    *,
+    price: float = 214.13,
+    peer_count: int = 5,
+    verified_peers: bool = False,
+) -> dict[str, Path]:
     private = tmp_path / "private_data"
     raw = _write(private / "raw" / "alpha.json", {"fixture": "raw"})
     capture = _write(private / "raw" / "alpha.manifest.json", {"fixture": "manifest"})
@@ -103,7 +109,10 @@ def _fixture(tmp_path: Path, *, price: float = 214.13, peer_count: int = 5) -> d
             "ticker": "NVDA", "collectedAt": "2026-10-16T22:38:40.679Z",
             "fiscalEnd": "Jan 2027", "consensusEps": 9.27, "lowEps": 9.01, "highEps": 9.71,
             "analystCount": 16, "revisionsUp4w": 2, "revisionsDown4w": 0,
-            "epsBasis": "unknown", "accountingBasis": "provider_adjusted_unspecified", "collectionStatus": "success",
+            "epsBasis": "forward_diluted_adjusted" if verified_peers else "unknown",
+            "accountingBasis": "non_gaap_adjusted" if verified_peers else "provider_adjusted_unspecified",
+            "providerTimestampVerified": verified_peers,
+            "collectionStatus": "success",
         }
     }
     valuations: dict[str, list[dict]] = {}
@@ -114,11 +123,15 @@ def _fixture(tmp_path: Path, *, price: float = 214.13, peer_count: int = 5) -> d
             "ticker": ticker, "collectedAt": "2026-10-16T22:38:40.679Z",
             "fiscalEnd": "Jan 2027", "consensusEps": 5.0, "lowEps": 4.0, "highEps": 6.0,
             "analystCount": 8, "revisionsUp4w": 0, "revisionsDown4w": 0,
-            "epsBasis": "unknown", "accountingBasis": "provider_adjusted_unspecified", "collectionStatus": "success",
+            "epsBasis": "forward_diluted_adjusted" if verified_peers else "unknown",
+            "accountingBasis": "non_gaap_adjusted" if verified_peers else "provider_adjusted_unspecified",
+            "providerTimestampVerified": verified_peers,
+            "collectionStatus": "success",
         }
         valuations[ticker] = [{
             "asOf": "2026-10-16", "expectedPe": 18.0 + index * 2.0,
             "estimateKind": "Nasdaq 컨센서스 EPS (8명)", "estimatePeriod": "Jan 2027",
+            "pointInTimeVerified": verified_peers,
         }]
         industries[ticker] = {"sector": "반도체", "etf": "SOXX"}
     consensus = _write(data / "top100-consensus.json", {
@@ -146,9 +159,9 @@ def _fixture(tmp_path: Path, *, price: float = 214.13, peer_count: int = 5) -> d
         "valuation": valuation,
         "industry": industry,
         "macro": macro,
-        "supersession": private / "decision" / "supersession-p511.json",
-        "peer": private / "normalized" / "peer-p511.json",
-        "decision": private / "decision" / "decision-p511.json",
+        "supersession": private / "decision" / "supersession-p512.json",
+        "peer": private / "normalized" / "peer-p512.json",
+        "decision": private / "decision" / "decision-p512.json",
     }
 
 
@@ -175,7 +188,7 @@ def _build(paths: dict[str, Path]):
 def test_price_changes_only_implied_multiple_not_independent_target(tmp_path: Path) -> None:
     results = []
     for value in (100.0, 214.13, 999.0):
-        paths = _fixture(tmp_path / str(value), price=value)
+        paths = _fixture(tmp_path / str(value), price=value, verified_peers=True)
         _, peer, decision = _build(paths)
         results.append((peer, decision))
     assert [item[0]["post_outlier_median"] for item in results] == [22.0, 22.0, 22.0]
@@ -185,29 +198,41 @@ def test_price_changes_only_implied_multiple_not_independent_target(tmp_path: Pa
         [100.0 / 9.27, 214.13 / 9.27, 999.0 / 9.27]
     )
     assert all(item[1]["provisional_research_buy_prices"] == [197.82, 189.66, 181.51] for item in results)
+    assert all(item[0]["current_price_used_in_target_multiple"] is False for item in results)
+    assert all(item[1]["target_multiple_policy"]["current_price_used_in_target"] is False for item in results)
+    assert len({item[1]["target_multiple_policy"]["policy_version"] for item in results}) == 1
 
 
 def test_insufficient_actual_basis_peers_uses_only_conditional_table(tmp_path: Path) -> None:
-    paths = _fixture(tmp_path, peer_count=1)
+    paths = _fixture(tmp_path, peer_count=5)
     supersession, peer, decision = _build(paths)
     assert supersession["status"] == "superseded_circular_price_anchor"
     assert peer["peer_gate_passed"] is False
-    assert [row["ticker"] for row in peer["post_outlier_peers"]] == ["P1"]
+    assert peer["status"] == "provider_homogeneous_proxy"
+    assert peer["post_outlier_peers"] == []
+    assert peer["target_basis_explicit"] is False
+    assert peer["point_in_time_verified"] is False
     assert decision["independent_target_multiple"] is None
     assert decision["independent_research_base_value"] is None
     assert decision["provisional_research_buy_prices"] is None
     assert decision["buy_ladder_status"] == "not_created_peer_gate_failed"
-    assert decision["research_action"] == "대기"
+    assert decision["valuation_signal_status"] == "not_generated"
+    assert decision["control_action"] == "no_new_position_signal"
+    assert decision["research_action"] is None
+    assert decision["research_action_text"] is None
+    assert decision["first_review_rule"] is None
+    assert decision["fair_value"] is None
+    assert decision["buy_range"] is None
+    assert decision["sell_range"] is None
     assert [row["price"] for row in decision["conditional_multiple_table"]] == pytest.approx([185.4, 203.94, 222.48])
-    assert decision["first_review_rule"]["price_at_or_below"] == pytest.approx(203.94)
-    assert decision["alpha_vantage_cross_validation"]["valuation_input"] is False
-    assert decision["alpha_vantage_cross_validation"]["trading_decision_input"] is False
+    assert decision["alpha_vantage_internal_audit"]["valuation_input"] is False
+    assert decision["alpha_vantage_internal_audit"]["trading_decision_input"] is False
     assert decision["operational_decision"] is None
     assert decision["operational_eligible"] is False
 
 
 def test_future_valuation_row_is_excluded_and_cannot_change_target(tmp_path: Path) -> None:
-    paths = _fixture(tmp_path)
+    paths = _fixture(tmp_path, verified_peers=True)
     payload = json.loads(paths["valuation"].read_text(encoding="utf-8"))
     payload["records"]["P1"].append({
         "asOf": "2026-10-17", "expectedPe": 999.0,
@@ -215,12 +240,13 @@ def test_future_valuation_row_is_excluded_and_cannot_change_target(tmp_path: Pat
     })
     _write(paths["valuation"], payload)
     _, peer, decision = _build(paths)
-    assert peer["post_outlier_median"] == pytest.approx(22.0)
+    assert peer["post_outlier_median"] is None
     assert {row["expected_pe"] for row in peer["post_outlier_peers"]} == {18.0, 20.0, 22.0, 24.0, 26.0}
     assert peer["excluded_future_valuation_rows"] == [{
         "ticker": "P1", "as_of": "2026-10-17", "reason": "future_valuation_row",
     }]
-    assert decision["independent_target_multiple"] == pytest.approx(22.0)
+    assert decision["independent_target_multiple"] is None
+    assert decision["valuation_signal_status"] == "not_generated"
 
 
 def test_alpha_prohibited_use_contract_is_mandatory_and_sources_stay_immutable(tmp_path: Path) -> None:
@@ -236,6 +262,36 @@ def test_alpha_prohibited_use_contract_is_mandatory_and_sources_stay_immutable(t
         _build(paths)
 
 
+def test_manual_review_required_is_not_an_approval(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    _, _, decision = _build(paths)
+    policy = decision["alpha_vantage_policy"]
+    assert policy["approval_receipt_present"] is False
+    assert policy["derived_analysis_authorized"] is False
+    assert policy["local_display_authorized"] is False
+    assert policy["public_display_permission"] == "not_authorized"
+
+
+def test_five_unknown_basis_peers_never_create_target_or_action(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path, peer_count=5, verified_peers=False)
+    _, peer, decision = _build(paths)
+    assert peer["peer_gate_passed"] is False
+    assert decision["independent_target_multiple"] is None
+    assert decision["first_review_rule"] is None
+    assert decision["research_action"] is None
+
+
+def test_point_in_time_false_blocks_target_even_with_explicit_basis(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path, verified_peers=True)
+    consensus = json.loads(paths["consensus"].read_text(encoding="utf-8"))
+    consensus["records"]["P1"]["providerTimestampVerified"] = False
+    _write(paths["consensus"], consensus)
+    _, peer, decision = _build(paths)
+    assert peer["peer_gate_passed"] is False
+    assert decision["fair_value"] is None
+    assert decision["buy_range"] is None
+
+
 def test_future_source_timestamp_fails_closed(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     payload = json.loads(paths["macro"].read_text(encoding="utf-8"))
@@ -245,7 +301,36 @@ def test_future_source_timestamp_fails_closed(tmp_path: Path) -> None:
         _build(paths)
 
 
-def test_loader_rejects_legacy_p51_decision_and_accepts_only_p511(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("source_key", "field"),
+    (("price", "generatedAt"), ("consensus", "generatedAt"), ("valuation", "generatedAt")),
+)
+def test_future_price_consensus_or_valuation_snapshot_fails_closed(
+    tmp_path: Path,
+    source_key: str,
+    field: str,
+) -> None:
+    paths = _fixture(tmp_path, verified_peers=True)
+    payload = json.loads(paths[source_key].read_text(encoding="utf-8"))
+    payload[field] = "2026-10-19T00:00:00Z"
+    _write(paths[source_key], payload)
+    with pytest.raises(NvdaResearchP511Error, match="later than decision_time"):
+        _build(paths)
+
+
+def test_future_peer_record_is_excluded_and_prevents_action(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path, verified_peers=True)
+    payload = json.loads(paths["consensus"].read_text(encoding="utf-8"))
+    payload["records"]["P1"]["collectedAt"] = "2026-10-19T00:00:00Z"
+    _write(paths["consensus"], payload)
+    _, peer, decision = _build(paths)
+    assert peer["peer_gate_passed"] is False
+    assert any(row["ticker"] == "P1" and "later than decision_time" in row["reason"] for row in peer["excluded_peers"])
+    assert decision["research_action"] is None
+    assert decision["fair_value"] is None
+
+
+def test_loader_rejects_p51_and_p511_decisions_and_accepts_only_p512(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     _build(paths)
     loaded = load_p511_artifacts(
@@ -255,7 +340,7 @@ def test_loader_rejects_legacy_p51_decision_and_accepts_only_p511(tmp_path: Path
     )
     assert loaded[2]["research_decision_version"] == RESEARCH_DECISION_VERSION
     paths["decision"].write_bytes(paths["p51_decision"].read_bytes())
-    with pytest.raises(NvdaResearchP511Error, match="P5.1.1 decision version mismatch"):
+    with pytest.raises(NvdaResearchP511Error, match="P5.1.2 decision version mismatch"):
         load_p511_artifacts(
             supersession_path=paths["supersession"],
             peer_proxy_path=paths["peer"],

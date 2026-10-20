@@ -34,14 +34,14 @@ def _paths(project_root: Path, top10_data_root: Path) -> dict[str, Path]:
         "valuation_history": top10_data_root / "valuation-history.json",
         "industry_map": top10_data_root / "industry-map.json",
         "macro": top10_data_root / "macro-snapshot.json",
-        "supersession": private_root / "decision" / "nvda-p51-supersession-p5.1.1.json",
-        "peer_proxy": private_root / "normalized" / "research" / "NVDA-peer-proxy-p5.1.1.json",
-        "decision": private_root / "decision" / "nvda-conditional-research-decision-p5.1.1.json",
+        "supersession": private_root / "decision" / "nvda-p511-supersession-p5.1.2.json",
+        "peer_proxy": private_root / "normalized" / "research" / "NVDA-peer-proxy-p5.1.2.json",
+        "decision": private_root / "decision" / "nvda-research-state-p5.1.2.json",
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build offline NVDA P5.1.1 non-circular research artifacts")
+    parser = argparse.ArgumentParser(description="Build offline NVDA P5.1.2 gated research artifacts")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--top10-data-root",
@@ -70,7 +70,7 @@ def main() -> int:
             str(paths[key].relative_to(paths["private_root"]))
             for key in ("supersession", "peer_proxy", "decision")
         ],
-        "alpha_vantage_usage": "integrity_quality_cross_validation_only",
+        "alpha_vantage_usage": "internal_integrity_and_row_quality_audit_only",
         "operational_eligible": False,
     }
     if not args.execute:
@@ -96,9 +96,9 @@ def main() -> int:
         )
         after = {key: _sha256(paths[key]) for key in immutable_keys}
         if before != after:
-            raise NvdaResearchP511Error("immutable evidence changed during P5.1.1 build")
+            raise NvdaResearchP511Error("immutable evidence changed during P5.1.2 build")
     except (OSError, ValueError, NvdaResearchP511Error) as exc:
-        print(f"P5.1.1 offline build failed: {exc}", file=sys.stderr)
+        print(f"P5.1.2 offline build failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({
         **plan,
@@ -109,6 +109,8 @@ def main() -> int:
         "peer_gate_passed": peer["peer_gate_passed"],
         "accepted_peers": [row["ticker"] for row in peer["post_outlier_peers"]],
         "research_action": decision["research_action"],
+        "valuation_signal_status": decision["valuation_signal_status"],
+        "control_action": decision["control_action"],
         "independent_target_multiple": decision["independent_target_multiple"],
         "independent_research_base_value": decision["independent_research_base_value"],
         "buy_ladder_status": decision["buy_ladder_status"],
