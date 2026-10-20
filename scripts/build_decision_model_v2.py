@@ -11,7 +11,7 @@ from stocklens.personal.decision_model_v2 import build_proxy_decision, write_dec
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build offline Decision Model v2 proxy artifact")
+    parser = argparse.ArgumentParser(description="Build offline Decision Model v2.1 proxy artifact")
     parser.add_argument("--top10-root", type=Path, required=True)
     parser.add_argument("--private-data-root", type=Path, required=True)
     parser.add_argument("--decision-time")
@@ -30,10 +30,10 @@ def main() -> int:
     )
     output, ledger = write_decision_and_ledger(
         decision=decision,
-        decision_path=private / "decision" / "nvda-decision-model-v2.json",
-        ledger_path=private / "decision" / "decision-model-v2-signal-ledger.json",
+        decision_path=private / "decision" / "nvda-decision-model-v2.1.json",
+        ledger_path=private / "decision" / "decision-model-v2.1-signal-ledger.json",
     )
-    print(f"Decision Model v2 written: {output.name}; ledger: {ledger.name}")
+    print(f"Decision Model v2.1 written: {output.name}; ledger: {ledger.name}")
     return 0
 
 

@@ -60,7 +60,11 @@ def _fixture(tmp_path: Path, *, price: float = 217.09, peer_count: int = 8) -> d
             "asOf": "2026-10-19", "expectedPe": multiples[index], "estimatePeriod": period,
             "pointInTimeVerified": False,
         }]
-        industries[ticker] = {"sector": "반도체", "etf": "SOXX"}
+        industries[ticker] = {
+            "sector": "반도체",
+            "etf": "SOXX",
+            "peerGroup": ["ai_chips", "networking", "analog_wireless", "chip_equipment", "chip_manufacturing"][index % 5],
+        }
     consensus_path = _write(data / "top100-consensus.json", {"generatedAt": generated, "records": records})
     valuation_path = _write(data / "valuation-history.json", {"generatedAt": generated, "records": valuations})
     industry_path = _write(data / "industry-map.json", {"generatedAt": generated, "records": industries})
@@ -91,11 +95,13 @@ def test_proxy_action_is_price_invariant_and_non_operational(tmp_path: Path) -> 
     bases = [row["scenario_values"]["base"] for row in results]
     assert multiples[0] == pytest.approx(multiples[1]) == pytest.approx(multiples[2])
     assert bases[0] == pytest.approx(bases[1]) == pytest.approx(bases[2])
-    assert [row["action"] for row in results] == [
-        "분할매수 시작", "분할매수 시작", "신규 매수 중단·비중 축소 검토",
-    ]
+    assert [row["action"] for row in results] == ["분할매수 시작", "분할매수 시작", "신규 매수 중단·비중 축소 검토"]
     assert all(row["calculation"]["current_price_used_in_target_multiple"] is False for row in results)
+    assert all(row["peer_gate"]["stability"]["current_price_used"] is False for row in results)
     assert all(row["verified_action"] is None and row["operational_eligible"] is False for row in results)
+    assert results[1]["execution_buy_prices"] == pytest.approx([217.09, 206.2355, 195.381])
+    assert all(value <= 217.09 for value in results[1]["execution_buy_prices"])
+    assert results[2]["execution_buy_prices"] is None
 
 
 def test_forward_period_boundary_and_minimum_peer_gate(tmp_path: Path) -> None:
@@ -142,7 +148,7 @@ def test_future_sources_and_future_valuation_rows_are_blocked_or_excluded(tmp_pa
         _build(paths)
 
 
-def test_adjustment_caps_ladder_and_action_branches(tmp_path: Path) -> None:
+def test_adjustment_caps_execution_ladder_and_invalidation_are_separate(tmp_path: Path) -> None:
     result = _build(_fixture(tmp_path))
     calc = result["calculation"]
     assert abs(calc["growth_adjustment"]) <= 0.15
@@ -150,12 +156,57 @@ def test_adjustment_caps_ladder_and_action_branches(tmp_path: Path) -> None:
     assert abs(calc["combined_growth_revision_adjustment"]) <= 0.20
     assert abs(calc["regime"]["adjustment"]) <= 0.10
     base = result["scenario_values"]["base"]
-    assert result["buy_prices"] == pytest.approx([base * 0.97, base * 0.93, base * 0.89])
+    assert result["valuation_entry_ceiling"] == pytest.approx(base * 0.97)
+    current = result["current_price"]["value"]
+    assert result["execution_buy_prices"] == pytest.approx([current, current * 0.95, current * 0.90])
+    assert "buy_prices" not in result
+    assert result["legacy_buy_prices_status"] == "deprecated_v2.1"
     assert result["reduction_review_price"] == pytest.approx(base * 1.15)
     expected_invalidation_eps = result["current_price"]["value"] / (
         result["calculation"]["target_forward_multiple"] * 0.97
     )
-    assert f"${expected_invalidation_eps:,.2f}" in result["invalidation_conditions"][0]
+    assert result["valuation_entry_eps_floor"]["value"] == pytest.approx(expected_invalidation_eps)
+    assert result["fundamental_invalidation"]["triggered"] is False
+    assert "current_price /" in result["valuation_entry_eps_floor"]["formula"]
+
+
+def test_wait_and_reduction_actions_do_not_precreate_execution_orders(tmp_path: Path) -> None:
+    baseline = _build(_fixture(tmp_path / "baseline", price=100.0))
+    base = baseline["scenario_values"]["base"]
+    ceiling = baseline["valuation_entry_ceiling"]
+    waiting = _build(_fixture(tmp_path / "wait", price=(ceiling + base) / 2))
+    assert waiting["action"] == "대기"
+    assert waiting["execution_buy_prices"] is None
+    assert waiting["execution_anchor_price"] is None
+    reducing = _build(_fixture(tmp_path / "reduce", price=base * 1.16))
+    assert reducing["action"] == "신규 매수 중단·비중 축소 검토"
+    assert reducing["execution_buy_prices"] is None
+
+
+def test_peer_stability_reports_leave_one_out_and_unstable_case(tmp_path: Path) -> None:
+    stable = _build(_fixture(tmp_path / "stable"))
+    stability = stable["peer_gate"]["stability"]
+    assert len(stability["leave_one_out"]) == stable["peer_gate"]["post_outlier_count"]
+    assert stability["minimum_forward_per"] <= stability["median_forward_per"] <= stability["maximum_forward_per"]
+    assert stability["trimmed_target_multiple"] > 0
+    assert len(stability["peer_contributions"]) == stable["peer_gate"]["post_outlier_count"]
+
+    paths = _fixture(tmp_path / "unstable", peer_count=5)
+    valuation = json.loads(paths["valuation"].read_text(encoding="utf-8"))
+    for ticker, multiple in zip(valuation["records"], [10.0, 10.0, 10.0, 20.0, 20.0]):
+        valuation["records"][ticker][0]["expectedPe"] = multiple
+    paths["valuation"].write_text(json.dumps(valuation), encoding="utf-8")
+    unstable = _build(paths)
+    assert unstable["peer_gate"]["stability"]["status"] == "peer_unstable"
+    assert unstable["proxy_value_range"]["low"] <= unstable["proxy_value_range"]["high"]
+
+
+def test_peer_group_diagnostics_do_not_replace_broad_proxy(tmp_path: Path) -> None:
+    result = _build(_fixture(tmp_path))
+    groups = {row["group"]: row for row in result["peer_gate"]["groups"]}
+    assert groups["broad_semiconductors"]["eligible_for_overall_proxy"] is True
+    assert groups["ai_compute_accelerator"]["diagnostic_only"] is True
+    assert groups["semiconductor_design_network"]["diagnostic_only"] is True
 
 
 def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path: Path) -> None:
@@ -167,9 +218,10 @@ def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path
     loaded = load_decision(decision_path)
     assert loaded["decision_status"] == "proxy_action"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert ledger["ledger_version"] == "decision-model-v2-signal-ledger-v1"
+    assert ledger["ledger_version"] == "decision-model-v2.1-signal-ledger-v1"
     assert len(ledger["records"]) == 1
     assert ledger["records"][0]["performance"]["return_6m"] is None
+    assert ledger["records"][0]["execution_policy_version"] == "current-price-ladder-v1"
 
     tampered = copy.deepcopy(result)
     tampered["calculation"]["target_forward_multiple"] += 1
@@ -181,6 +233,13 @@ def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path
         load_decision(decision_path)
 
 
+def test_artifact_tamper_of_execution_price_fails_closed(tmp_path: Path) -> None:
+    result = _build(_fixture(tmp_path))
+    result["execution_buy_prices"][1] += 1.0
+    with pytest.raises(DecisionModelV2Error, match="calculation SHA"):
+        validate_decision(result)
+
+
 def test_tukey_outlier_is_removed_and_proxy_is_never_verified(tmp_path: Path) -> None:
     result = _build(_fixture(tmp_path))
     assert result["peer_gate"]["pre_outlier_count"] == 8
@@ -189,3 +248,11 @@ def test_tukey_outlier_is_removed_and_proxy_is_never_verified(tmp_path: Path) ->
     assert result["proxy_classification"] == "provider_homogeneous_proxy"
     assert result["peer_gate"]["point_in_time_verified"] is False
     assert result["verified_action"] is None
+
+
+def test_decision_v21_has_no_p5_sources(tmp_path: Path) -> None:
+    result = _build(_fixture(tmp_path))
+    assert set(result["sources"]) == {
+        "price_history", "consensus", "valuation_history", "industry_map", "macro", "config"
+    }
+    assert not any("p5" in role.lower() for role in result["sources"])

@@ -18,9 +18,10 @@ from typing import Any
 from .storage import atomic_write_json
 
 
-MODEL_VERSION = "stocklens-decision-model-v2.0.0"
-POLICY_VERSION = "provider-homogeneous-proxy-v2.0.0"
-LEDGER_VERSION = "decision-model-v2-signal-ledger-v1"
+MODEL_VERSION = "stocklens-decision-model-v2.1.0"
+POLICY_VERSION = "provider-homogeneous-proxy-v2.1.0"
+EXECUTION_POLICY_VERSION = "current-price-ladder-v1"
+LEDGER_VERSION = "decision-model-v2.1-signal-ledger-v1"
 EXPECTED_PROVIDER = "nasdaq-analyst-earnings-forecast"
 EXPECTED_TICKER = "NVDA"
 
@@ -129,17 +130,39 @@ def load_config(path: str | Path) -> dict[str, Any]:
     allowed = {
         "model_version", "policy_version", "ticker", "minimum_peers",
         "forward_period_tolerance_days", "tukey_iqr_multiplier", "growth_revision",
-        "regime", "buy_ladder_multipliers", "reduction_review_multiplier",
+        "regime", "valuation_entry_ceiling_multiplier", "execution_ladder_multipliers",
+        "execution_policy_version", "reduction_review_multiplier", "fundamental_invalidation",
+        "peer_stability", "peer_groups",
     }
     if set(config) != allowed or config.get("ticker") != EXPECTED_TICKER:
         raise DecisionModelV2Error("Decision Model v2 config shape mismatch")
     if config.get("minimum_peers") != 5 or config.get("forward_period_tolerance_days") != 90:
         raise DecisionModelV2Error("Decision Model v2 peer gate policy mismatch")
-    ladder = config.get("buy_ladder_multipliers")
-    if ladder != [0.97, 0.93, 0.89]:
-        raise DecisionModelV2Error("Decision Model v2 buy ladder policy mismatch")
+    if config.get("execution_policy_version") != EXECUTION_POLICY_VERSION:
+        raise DecisionModelV2Error("Decision Model v2 execution policy version mismatch")
+    if _number(config.get("valuation_entry_ceiling_multiplier"), "entry ceiling multiplier") != 0.97:
+        raise DecisionModelV2Error("Decision Model v2 entry ceiling policy mismatch")
+    ladder = config.get("execution_ladder_multipliers")
+    if ladder != [1.0, 0.95, 0.9]:
+        raise DecisionModelV2Error("Decision Model v2 execution ladder policy mismatch")
     if _number(config.get("reduction_review_multiplier"), "reduction multiplier") != 1.15:
         raise DecisionModelV2Error("Decision Model v2 reduction policy mismatch")
+    if config.get("fundamental_invalidation") != {
+        "consensus_eps_cut_fraction": 0.1,
+        "growth_floor_relative_to_peer_median": 1.0,
+    }:
+        raise DecisionModelV2Error("Decision Model v2 fundamental invalidation policy mismatch")
+    if config.get("peer_stability") != {
+        "single_peer_change_limit": 0.15,
+        "wide_distribution_max_min_ratio": 3.0,
+    }:
+        raise DecisionModelV2Error("Decision Model v2 peer stability policy mismatch")
+    if config.get("peer_groups") != {
+        "ai_compute_accelerator": ["ai_chips"],
+        "semiconductor_design_network": ["ai_chips", "networking", "analog_wireless"],
+        "broad_semiconductors": ["*"],
+    }:
+        raise DecisionModelV2Error("Decision Model v2 peer group policy mismatch")
     return config
 
 
@@ -246,6 +269,166 @@ def _regime_adjustment(macro: dict[str, Any], config: dict[str, Any]) -> tuple[f
     adjustment = _clamp(bounded_score * float(rules["score_step"]), float(rules["maximum_adjustment"]))
     reasons = macro.get("reasons")
     return adjustment, [str(value) for value in reasons] if isinstance(reasons, list) else []
+
+
+def _adjusted_multiple(
+    peers: list[dict[str, Any]],
+    *,
+    target_growth: float,
+    target_revision: float,
+    config: dict[str, Any],
+    regime_adjustment: float,
+) -> dict[str, float]:
+    """Return a price-independent peer multiple and its transparent adjustments."""
+    if not peers:
+        raise DecisionModelV2Error("peer multiple calculation requires rows")
+    peer_median = statistics.median(float(row["forward_per"]) for row in peers)
+    peer_growth = statistics.median(float(row["eps_growth"]) for row in peers)
+    peer_revision = statistics.median(float(row["revision_score"]) for row in peers)
+    rules = config["growth_revision"]
+    growth_component = _clamp(
+        (target_growth - peer_growth) * float(rules["growth_coefficient"]),
+        float(rules["growth_component_limit"]),
+    )
+    revision_component = _clamp(
+        (target_revision - peer_revision) * float(rules["revision_coefficient"]),
+        float(rules["revision_component_limit"]),
+    )
+    combined = _clamp(growth_component + revision_component, float(rules["combined_limit"]))
+    after_growth = peer_median * (1.0 + combined)
+    return {
+        "peer_median": peer_median,
+        "peer_growth": peer_growth,
+        "peer_revision": peer_revision,
+        "growth_component": growth_component,
+        "revision_component": revision_component,
+        "combined": combined,
+        "after_growth": after_growth,
+        "target_multiple": after_growth * (1.0 + regime_adjustment),
+    }
+
+
+def _peer_stability(
+    peers: list[dict[str, Any]],
+    *,
+    target_growth: float,
+    target_revision: float,
+    config: dict[str, Any],
+    regime_adjustment: float,
+    base_target_multiple: float,
+) -> dict[str, Any]:
+    multiples = [float(row["forward_per"]) for row in peers]
+    q1 = _percentile(multiples, 0.25)
+    q3 = _percentile(multiples, 0.75)
+    leave_one_out: list[dict[str, Any]] = []
+    for removed in peers:
+        remaining = [row for row in peers if row is not removed]
+        recalculated = _adjusted_multiple(
+            remaining,
+            target_growth=target_growth,
+            target_revision=target_revision,
+            config=config,
+            regime_adjustment=regime_adjustment,
+        )["target_multiple"]
+        change = recalculated / base_target_multiple - 1.0
+        leave_one_out.append({
+            "removed_ticker": removed["ticker"],
+            "target_multiple_without_peer": recalculated,
+            "relative_change": change,
+            "peer_forward_per": float(removed["forward_per"]),
+        })
+    ordered = sorted(peers, key=lambda row: float(row["forward_per"]))
+    trimmed = ordered[1:-1] if len(ordered) > 2 else ordered
+    trimmed_stats = _adjusted_multiple(
+        trimmed,
+        target_growth=target_growth,
+        target_revision=target_revision,
+        config=config,
+        regime_adjustment=regime_adjustment,
+    )
+    max_change = max(abs(float(row["relative_change"])) for row in leave_one_out)
+    instability_limit = float(config["peer_stability"]["single_peer_change_limit"])
+    max_min_ratio = max(multiples) / min(multiples)
+    wide_limit = float(config["peer_stability"]["wide_distribution_max_min_ratio"])
+    candidates = [base_target_multiple, trimmed_stats["target_multiple"]] + [
+        float(row["target_multiple_without_peer"]) for row in leave_one_out
+    ]
+    range_low = _percentile(candidates, 0.25)
+    range_high = _percentile(candidates, 0.75)
+    contributions = []
+    peer_median = statistics.median(multiples)
+    for row, loo in zip(peers, leave_one_out):
+        contributions.append({
+            "ticker": row["ticker"],
+            "forward_per": float(row["forward_per"]),
+            "distance_from_peer_median": float(row["forward_per"]) - peer_median,
+            "leave_one_out_target_change": loo["relative_change"],
+        })
+    return {
+        "status": "peer_unstable" if max_change >= instability_limit else "stable",
+        "wide_distribution": max_min_ratio >= wide_limit,
+        "single_peer_change_limit": instability_limit,
+        "maximum_leave_one_out_change": max_change,
+        "leave_one_out": leave_one_out,
+        "trimmed_tickers": [row["ticker"] for row in trimmed],
+        "trimmed_peer_median": trimmed_stats["peer_median"],
+        "trimmed_target_multiple": trimmed_stats["target_multiple"],
+        "minimum_forward_per": min(multiples),
+        "median_forward_per": peer_median,
+        "maximum_forward_per": max(multiples),
+        "iqr": q3 - q1,
+        "population_standard_deviation": statistics.pstdev(multiples),
+        "max_min_ratio": max_min_ratio,
+        "proxy_target_multiple_range": {"low": range_low, "high": range_high},
+        "peer_contributions": contributions,
+        "current_price_used": False,
+    }
+
+
+def _peer_group_diagnostics(
+    peers: list[dict[str, Any]],
+    *,
+    target_growth: float,
+    target_revision: float,
+    config: dict[str, Any],
+    regime_adjustment: float,
+) -> list[dict[str, Any]]:
+    minimum = int(config["minimum_peers"])
+    results: list[dict[str, Any]] = []
+    for name, categories in config["peer_groups"].items():
+        members = peers if categories == ["*"] else [row for row in peers if row.get("peer_group") in categories]
+        item: dict[str, Any] = {
+            "group": name,
+            "tickers": [row["ticker"] for row in members],
+            "count": len(members),
+            "minimum_required": minimum,
+            "meets_minimum": len(members) >= minimum,
+            "eligible_for_overall_proxy": len(members) >= minimum and categories == ["*"],
+            "diagnostic_only": not (len(members) >= minimum and categories == ["*"]),
+        }
+        if members:
+            stats = _adjusted_multiple(
+                members,
+                target_growth=target_growth,
+                target_revision=target_revision,
+                config=config,
+                regime_adjustment=regime_adjustment,
+            )
+            item.update({
+                "median_forward_per": stats["peer_median"],
+                "median_eps_growth": stats["peer_growth"],
+                "median_revision_score": stats["peer_revision"],
+                "adjusted_nvda_multiple": stats["target_multiple"],
+            })
+        else:
+            item.update({
+                "median_forward_per": None,
+                "median_eps_growth": None,
+                "median_revision_score": None,
+                "adjusted_nvda_multiple": None,
+            })
+        results.append(item)
+    return results
 
 
 def _decision_calculation_sha256(decision: dict[str, Any]) -> str:
@@ -358,6 +541,7 @@ def build_proxy_decision(
             continue
         pre.append({
             "ticker": ticker,
+            "peer_group": str((industry_data.get("records") or {}).get(ticker, {}).get("peerGroup") or "unknown"),
             "forward_per": _number(valuation.get("expectedPe"), f"{ticker} expectedPe", positive=True),
             "price_as_of": str(valuation.get("asOf")),
             "forward_period": str(row.get("fiscalEnd")),
@@ -376,40 +560,85 @@ def build_proxy_decision(
     if len(post) < minimum:
         raise DecisionModelV2Error(f"proxy peer gate blocked after outlier filter: {len(post)}/{minimum}")
 
-    peer_median = statistics.median(float(row["forward_per"]) for row in post)
-    peer_growth = statistics.median(float(row["eps_growth"]) for row in post)
-    peer_revision = statistics.median(float(row["revision_score"]) for row in post)
-    rules = config["growth_revision"]
-    growth_component = _clamp(
-        (target_growth - peer_growth) * float(rules["growth_coefficient"]),
-        float(rules["growth_component_limit"]),
-    )
-    revision_component = _clamp(
-        (target_revision - peer_revision) * float(rules["revision_coefficient"]),
-        float(rules["revision_component_limit"]),
-    )
-    combined = _clamp(growth_component + revision_component, float(rules["combined_limit"]))
-    after_growth = peer_median * (1.0 + combined)
     regime_adjustment, regime_reasons = _regime_adjustment(macro_data, config)
-    target_multiple = after_growth * (1.0 + regime_adjustment)
+    adjusted = _adjusted_multiple(
+        post,
+        target_growth=target_growth,
+        target_revision=target_revision,
+        config=config,
+        regime_adjustment=regime_adjustment,
+    )
+    peer_median = adjusted["peer_median"]
+    peer_growth = adjusted["peer_growth"]
+    peer_revision = adjusted["peer_revision"]
+    growth_component = adjusted["growth_component"]
+    revision_component = adjusted["revision_component"]
+    combined = adjusted["combined"]
+    after_growth = adjusted["after_growth"]
+    target_multiple = adjusted["target_multiple"]
+    stability = _peer_stability(
+        post,
+        target_growth=target_growth,
+        target_revision=target_revision,
+        config=config,
+        regime_adjustment=regime_adjustment,
+        base_target_multiple=target_multiple,
+    )
+    groups = _peer_group_diagnostics(
+        post,
+        target_growth=target_growth,
+        target_revision=target_revision,
+        config=config,
+        regime_adjustment=regime_adjustment,
+    )
     values = {key: value * target_multiple for key, value in eps.items()}
-    ladder = [values["base"] * float(multiplier) for multiplier in config["buy_ladder_multipliers"]]
+    proxy_multiple_range = stability["proxy_target_multiple_range"]
+    proxy_value_range = {
+        "low": eps["base"] * float(proxy_multiple_range["low"]),
+        "high": eps["base"] * float(proxy_multiple_range["high"]),
+    }
+    entry_multiplier = float(config["valuation_entry_ceiling_multiplier"])
+    valuation_entry_ceiling = values["base"] * entry_multiplier
     reduction = values["base"] * float(config["reduction_review_multiplier"])
     current = float(price["value"])
-    if current <= ladder[0]:
-        action = "분할매수 시작"
-        action_text = f"현재 가격에서 1차 매수를 시작 · ${ladder[0]:,.2f}/${ladder[1]:,.2f}/${ladder[2]:,.2f} 3회 분할"
-    elif current < values["base"]:
-        action = "대기"
-        action_text = f"현재는 매수하지 말고 ${ladder[0]:,.2f}까지 기다림"
+    fundamental_rules = config["fundamental_invalidation"]
+    consensus_cut_floor = eps["base"] * (1.0 - float(fundamental_rules["consensus_eps_cut_fraction"]))
+    growth_floor = peer_growth * float(fundamental_rules["growth_floor_relative_to_peer_median"])
+    fundamental_triggered = target_growth < growth_floor
+    execution_prices: list[float] | None
+    if fundamental_triggered:
+        action = "판단 차단"
+        action_text = "예상 EPS 성장률이 피어 중앙 성장률 아래여서 proxy_action을 생성하지 않음"
+        execution_prices = None
     elif current >= reduction:
         action = "신규 매수 중단·비중 축소 검토"
         action_text = f"${reduction:,.2f} 이상에서는 신규 매수 중단·비중 축소 검토"
+        execution_prices = None
+    elif current <= valuation_entry_ceiling:
+        action = "분할매수 시작"
+        execution_prices = [current * float(multiplier) for multiplier in config["execution_ladder_multipliers"]]
+        action_text = (
+            "현재 가격에서 1차 매수를 시작 · "
+            f"${execution_prices[0]:,.2f} / ${execution_prices[1]:,.2f} / "
+            f"${execution_prices[2]:,.2f} 3회 분할"
+        )
+    elif current < values["base"]:
+        action = "대기"
+        action_text = f"현재는 매수하지 말고 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
+        execution_prices = None
     else:
         action = "대기"
-        action_text = f"현재는 기준 연구값 아래 ${ladder[0]:,.2f}까지 기다림"
-    first_buy_multiplier = float(config["buy_ladder_multipliers"][0])
-    invalidation_eps = current / (target_multiple * first_buy_multiplier)
+        action_text = f"현재는 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
+        execution_prices = None
+    valuation_entry_eps_floor = current / (target_multiple * entry_multiplier)
+    confidence_reasons = ["회계 basis와 원본 PIT가 미검증된 동일 공급자 프록시"]
+    confidence_score = 35
+    if stability["wide_distribution"]:
+        confidence_score -= 10
+        confidence_reasons.append("이상치 제거 후에도 피어 배수 범위가 넓음")
+    if stability["status"] == "peer_unstable":
+        confidence_score -= 10
+        confidence_reasons.append("단일 피어 제거 시 목표 배수 변화가 정책 한도를 초과")
     sources = {role: _source(path) for role, path in paths.items()}
     decision: dict[str, Any] = {
         "model_version": MODEL_VERSION,
@@ -419,7 +648,11 @@ def build_proxy_decision(
         "generated_at": decision_at.isoformat().replace("+00:00", "Z"),
         "decision_status": "proxy_action",
         "proxy_classification": "provider_homogeneous_proxy",
-        "confidence": {"label": "낮음", "score": 35, "reason": "회계 basis와 원본 PIT가 미검증된 동일 공급자 프록시"},
+        "confidence": {
+            "label": "매우 낮음" if confidence_score < 30 else "낮음",
+            "score": confidence_score,
+            "reason": " · ".join(confidence_reasons),
+        },
         "operational_eligible": False,
         "verified_action": None,
         "current_price": {**price, "available_at": generated_at["price_history"]},
@@ -434,6 +667,8 @@ def build_proxy_decision(
             "passed": True, "pre_outlier_peers": pre, "post_outlier_peers": post,
             "excluded_peers": excluded, "tukey": fences,
             "point_in_time_verified": False,
+            "stability": stability,
+            "groups": groups,
         },
         "calculation": {
             "current_price_used_in_target_multiple": False,
@@ -449,14 +684,50 @@ def build_proxy_decision(
             "target_forward_multiple": target_multiple,
         },
         "scenario_values": values,
-        "buy_prices": ladder,
+        "proxy_value_range": proxy_value_range,
+        "valuation_entry_ceiling": valuation_entry_ceiling,
+        "execution_buy_prices": execution_prices,
+        "execution_anchor_price": current if execution_prices else None,
+        "execution_policy_version": EXECUTION_POLICY_VERSION,
+        "legacy_buy_prices_status": "deprecated_v2.1",
         "reduction_review_price": reduction,
         "current_implied_forward_multiple": current / eps["base"],
         "action": action,
         "action_text": action_text,
+        "valuation_entry_eps_floor": {
+            "value": valuation_entry_eps_floor,
+            "formula": "current_price / (target_forward_multiple * valuation_entry_ceiling_multiplier)",
+            "inputs": {
+                "current_price": current,
+                "target_forward_multiple": target_multiple,
+                "valuation_entry_ceiling_multiplier": entry_multiplier,
+            },
+            "price_as_of": price["as_of"],
+            "meaning": "현재가가 가치평가상 진입 허용 상한에 놓이게 되는 기계적 EPS 기준",
+        },
+        "fundamental_invalidation": {
+            "triggered": fundamental_triggered,
+            "evaluation_status": "partial_no_prior_consensus_vintage",
+            "conditions": [
+                {
+                    "id": "consensus_eps_cut",
+                    "threshold": consensus_cut_floor,
+                    "rule": f"현재 스냅샷 기준 EPS 대비 {float(fundamental_rules['consensus_eps_cut_fraction']):.0%} 이상 하향",
+                    "evaluated": False,
+                },
+                {
+                    "id": "growth_below_peer_median",
+                    "threshold": growth_floor,
+                    "actual": target_growth,
+                    "rule": "NVDA 예상 EPS 성장률이 피어 중앙 성장률 아래로 하락",
+                    "evaluated": True,
+                },
+            ],
+            "as_of": str(target.get("collectedAt")),
+        },
         "invalidation_conditions": [
-            f"기준 Forward EPS가 ${invalidation_eps:,.2f} 아래로 하향되면 현재가 기준 1차 분할 조건 무효",
             "동일 공급자 피어가 5개 미만이거나 기준일·기간 허용 범위를 벗어나면 proxy_action 무효",
+            "입력 SHA 또는 계산 재현성이 깨지면 행동 판단 차단",
             "시장 국면 조정이 바뀌면 새 버전 신호로 재계산",
         ],
         "performance_tracking": {
@@ -507,14 +778,34 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(peers, list) or len(peers) < 5 or decision.get("peer_gate", {}).get("passed") is not True:
         raise DecisionModelV2Error("Decision Model v2 peer gate mismatch")
     base = _number(decision.get("scenario_values", {}).get("base"), "base value", positive=True)
-    ladder = decision.get("buy_prices")
-    if not isinstance(ladder, list) or len(ladder) != 3:
-        raise DecisionModelV2Error("Decision Model v2 buy ladder mismatch")
-    expected = [base * 0.97, base * 0.93, base * 0.89]
-    if any(not math.isclose(_number(actual, "buy price"), value, rel_tol=1e-12) for actual, value in zip(ladder, expected)):
-        raise DecisionModelV2Error("Decision Model v2 buy ladder arithmetic mismatch")
+    if "buy_prices" in decision:
+        raise DecisionModelV2Error("ambiguous legacy buy_prices field is not allowed")
+    if decision.get("execution_policy_version") != EXECUTION_POLICY_VERSION:
+        raise DecisionModelV2Error("Decision Model v2 execution policy mismatch")
+    ceiling = _number(decision.get("valuation_entry_ceiling"), "entry ceiling", positive=True)
+    if not math.isclose(ceiling, base * 0.97, rel_tol=1e-12):
+        raise DecisionModelV2Error("Decision Model v2 entry ceiling arithmetic mismatch")
+    current = _number(decision.get("current_price", {}).get("value"), "current price", positive=True)
+    ladder = decision.get("execution_buy_prices")
+    if decision.get("action") == "분할매수 시작":
+        if not isinstance(ladder, list) or len(ladder) != 3:
+            raise DecisionModelV2Error("Decision Model v2 execution ladder mismatch")
+        expected = [current, current * 0.95, current * 0.90]
+        if any(not math.isclose(_number(actual, "execution price"), value, rel_tol=1e-12) for actual, value in zip(ladder, expected)):
+            raise DecisionModelV2Error("Decision Model v2 execution ladder arithmetic mismatch")
+        if any(_number(value, "execution price") > current for value in ladder):
+            raise DecisionModelV2Error("Decision Model v2 execution price exceeds current price")
+        if decision.get("execution_anchor_price") != current:
+            raise DecisionModelV2Error("Decision Model v2 execution anchor mismatch")
+    elif ladder is not None or decision.get("execution_anchor_price") is not None:
+        raise DecisionModelV2Error("non-buy action must not create execution prices")
     if not math.isclose(_number(decision.get("reduction_review_price"), "reduction price"), base * 1.15, rel_tol=1e-12):
         raise DecisionModelV2Error("Decision Model v2 reduction arithmetic mismatch")
+    stability = decision.get("peer_gate", {}).get("stability")
+    if not isinstance(stability, dict) or stability.get("current_price_used") is not False:
+        raise DecisionModelV2Error("Decision Model v2 peer stability contract mismatch")
+    if len(stability.get("leave_one_out") or []) != len(peers):
+        raise DecisionModelV2Error("Decision Model v2 leave-one-out result mismatch")
     return decision
 
 
@@ -540,7 +831,11 @@ def write_decision_and_ledger(
         "decision_time": decision["decision_time"], "model_version": MODEL_VERSION,
         "decision_status": "proxy_action", "action": decision["action"],
         "current_price": decision["current_price"], "scenario_values": decision["scenario_values"],
-        "buy_prices": decision["buy_prices"], "reduction_review_price": decision["reduction_review_price"],
+        "valuation_entry_ceiling": decision["valuation_entry_ceiling"],
+        "execution_buy_prices": decision["execution_buy_prices"],
+        "execution_anchor_price": decision["execution_anchor_price"],
+        "execution_policy_version": decision["execution_policy_version"],
+        "reduction_review_price": decision["reduction_review_price"],
         "input_sha256": {key: value["sha256"] for key, value in decision["sources"].items()},
         "calculation_sha256": decision["calculation_sha256"],
         "performance": decision["performance_tracking"], "operational_eligible": False,

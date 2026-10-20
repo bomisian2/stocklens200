@@ -131,7 +131,7 @@ NVDA_P512_DECISION_PATH = Path(
 DECISION_V2_PATH = Path(
     os.environ.get(
         "STOCKLENS_DECISION_V2_PATH",
-        str(DATA_DIR / "decision" / "nvda-decision-model-v2.json"),
+        str(DATA_DIR / "decision" / "nvda-decision-model-v2.1.json"),
     )
 )
 
@@ -191,7 +191,6 @@ def load_same_date_inputs(
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=8)
 def load_nvda_p512_artifacts(
     supersession_path: str,
     supersession_mtime: int,
@@ -337,27 +336,41 @@ def _render_nvda_p512_research(
 
 
 def _render_decision_model_v2(decision: dict[str, Any]) -> None:
-    st.subheader("NVDA Decision Model v2 · proxy_action")
+    st.subheader("NVDA Decision Model v2.1 · proxy_action")
     st.warning(
         "provider_homogeneous_proxy · 낮은 신뢰도. 동일 공급자·동일 가격일·Forward 기간 ±90일 피어를 "
-        "사용한 잠정 행동 가격입니다. verified_action과 운영 신호는 생성되지 않았습니다."
+        "사용한 잠정 행동 가격입니다. 가치평가 상한과 실제 실행 가격을 분리했으며 "
+        "verified_action과 운영 신호는 생성되지 않았습니다."
     )
     price = decision["current_price"]
     values = decision["scenario_values"]
     calculation = decision["calculation"]
     peer_gate = decision["peer_gate"]
     with st.container(horizontal=True):
-        st.metric("현재가 · proxy", f"${price['value']:,.2f}", price["as_of"], border=True)
+        st.metric("Nasdaq Top10 proxy price", f"${price['value']:,.2f}", price["as_of"], border=True)
+        st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
         st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
         st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
         st.metric("현재 행동 · proxy", decision["action"], "operational=false", border=True)
 
     st.success(decision["action_text"])
-    st.write(
-        f"**잠정 연구 분할구간** · ${decision['buy_prices'][0]:,.2f} / "
-        f"${decision['buy_prices'][1]:,.2f} / ${decision['buy_prices'][2]:,.2f}"
+    st.metric(
+        "가치평가상 진입 허용 상한",
+        f"${decision['valuation_entry_ceiling']:,.2f}",
+        "실제 주문 가격 아님",
+        border=True,
     )
-    st.write(f"**비중 축소 검토** · ${decision['reduction_review_price']:,.2f} 이상")
+    execution = decision.get("execution_buy_prices")
+    if execution:
+        st.markdown("#### 실제 3회 실행 가격")
+        st.text(f"${execution[0]:,.2f} / ${execution[1]:,.2f} / ${execution[2]:,.2f}")
+        st.caption(
+            f"anchor=${decision['execution_anchor_price']:,.2f} · "
+            f"정책 {decision['execution_policy_version']} · 현재가 / -5% / -10%"
+        )
+    else:
+        st.info("현재 행동에서는 실제 실행 주문 가격을 생성하지 않습니다.")
+    st.metric("proxy 비중 축소 검토 기준", f"${decision['reduction_review_price']:,.2f}", "신규 매수 중단", border=True)
     st.caption(
         f"decision_time {decision['decision_time']} · 가격 {price['as_of']} · "
         f"컨센서스 {decision['consensus']['period']} / {decision['consensus']['available_at']} · "
@@ -391,6 +404,64 @@ def _render_decision_model_v2(decision: dict[str, Any]) -> None:
         f"시장 국면 **{calculation['regime']['state']}** · score {calculation['regime']['score']} · "
         f"배수 조정 {calculation['regime']['adjustment']:+.1%}"
     )
+
+    stability = peer_gate["stability"]
+    st.markdown("#### 피어 배수 안정성")
+    with st.container(horizontal=True):
+        st.metric("안정성", stability["status"], f"최대 LOO 변화 {stability['maximum_leave_one_out_change']:.1%}", border=True)
+        st.metric(
+            "피어 배수 min / median / max",
+            f"{stability['minimum_forward_per']:.2f} / {stability['median_forward_per']:.2f} / {stability['maximum_forward_per']:.2f}",
+            f"IQR {stability['iqr']:.2f}",
+            border=True,
+        )
+        st.metric(
+            "trimmed 목표 배수",
+            f"{stability['trimmed_target_multiple']:.2f}배",
+            "상·하 1개 제외",
+            border=True,
+        )
+    if stability["wide_distribution"] or stability["status"] == "peer_unstable":
+        proxy_range = decision["proxy_value_range"]
+        st.warning(
+            "피어 분포가 넓거나 단일 피어 민감도가 높아 단일 연구값의 신뢰도를 낮췄습니다. "
+            f"안정성 기반 좁은 proxy 범위: ${proxy_range['low']:,.2f} ~ ${proxy_range['high']:,.2f}"
+        )
+    st.dataframe(
+        pd.DataFrame(stability["leave_one_out"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "target_multiple_without_peer": st.column_config.NumberColumn(format="%.2f배"),
+            "relative_change": st.column_config.NumberColumn(format="%.1%%"),
+            "peer_forward_per": st.column_config.NumberColumn(format="%.2f배"),
+        },
+    )
+    with st.expander("피어별 배수 기여도", expanded=False):
+        st.dataframe(
+            pd.DataFrame(stability["peer_contributions"]),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "forward_per": st.column_config.NumberColumn(format="%.2f배"),
+                "distance_from_peer_median": st.column_config.NumberColumn(format="%+.2f배"),
+                "leave_one_out_target_change": st.column_config.NumberColumn(format="%.1%%"),
+            },
+        )
+
+    st.markdown("#### 피어 집단 진단")
+    st.dataframe(
+        pd.DataFrame(peer_gate["groups"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "median_forward_per": st.column_config.NumberColumn(format="%.2f배"),
+            "median_eps_growth": st.column_config.NumberColumn(format="%.1%%"),
+            "median_revision_score": st.column_config.NumberColumn(format="%.1%%"),
+            "adjusted_nvda_multiple": st.column_config.NumberColumn(format="%.2f배"),
+        },
+    )
+    st.caption("5개 미만 집단은 진단 전용이며 전체 proxy 목표 배수 계산에는 사용하지 않습니다.")
 
     st.markdown("#### EPS 민감도")
     eps = decision["consensus"]["eps"]
@@ -427,7 +498,19 @@ def _render_decision_model_v2(decision: dict[str, Any]) -> None:
     with st.expander(f"제외 피어 {len(peer_gate['excluded_peers'])}개"):
         st.dataframe(pd.DataFrame(peer_gate["excluded_peers"]), hide_index=True, width="stretch")
 
-    st.markdown("#### 판단 변경 조건")
+    st.markdown("#### EPS 기준과 판단 무효화 조건")
+    eps_floor = decision["valuation_entry_eps_floor"]
+    st.write(
+        f"- 가치평가 진입 EPS floor: ${eps_floor['value']:,.2f} · "
+        f"공식 `{eps_floor['formula']}` · 가격 기준일 {eps_floor['price_as_of']}"
+    )
+    st.caption(eps_floor["meaning"] + "이며 기업 펀더멘털 무효화 조건과 다릅니다.")
+    fundamental = decision["fundamental_invalidation"]
+    st.write(
+        f"- fundamental_invalidation: triggered={fundamental['triggered']} · "
+        f"상태={fundamental['evaluation_status']} · as_of={fundamental['as_of']}"
+    )
+    st.dataframe(pd.DataFrame(fundamental["conditions"]), hide_index=True, width="stretch")
     for condition in decision["invalidation_conditions"]:
         st.write(f"- {condition}")
     st.caption(
@@ -1301,7 +1384,12 @@ if ticker == "NVDA":
             )
             _render_nvda_p512_research(p512_supersession, p512_peer_proxy, p512_decision)
         except (OSError, json.JSONDecodeError, NvdaResearchP511Error, KeyError, TypeError, ValueError) as exc:
-            st.error(f"NVDA P5.1.2 연구 자료 검증 실패: {exc}")
+            if "source mismatch" in str(exc):
+                st.info("P5.1.2 보관 진단 자료")
+                st.caption("현재 macro 원본과 SHA가 달라 최신 계산에는 사용하지 않음")
+                st.caption("Decision Model v2.1 계산에는 유입되지 않음")
+            else:
+                st.error(f"NVDA P5.1.2 보관 진단 자료 검증 실패: {exc}")
     else:
         st.caption("NVDA P5.1.2 피어 게이트 연구 산출물이 아직 생성되지 않았습니다.")
 
@@ -1310,9 +1398,9 @@ if ticker == "NVDA":
             decision_v2 = load_decision_v2_artifact(str(DECISION_V2_PATH), _mtime(DECISION_V2_PATH))
             _render_decision_model_v2(decision_v2)
         except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
-            st.error(f"Decision Model v2 무결성 검증 실패: {exc}")
+            st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
     else:
-        st.caption("Decision Model v2 프록시 산출물이 아직 생성되지 않았습니다.")
+        st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
 
 v23_self_history = _render_v23_comparison(
     ticker,

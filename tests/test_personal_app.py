@@ -363,11 +363,11 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         config_path=Path(__file__).parents[1] / "config" / "decision-model-v2.json",
         decision_time="2026-10-14T12:52:02.418Z",
     )
-    v2_path = decision_dir / "nvda-decision-model-v2.json"
+    v2_path = decision_dir / "nvda-decision-model-v2.1.json"
     write_decision_and_ledger(
         decision=v2_decision,
         decision_path=v2_path,
-        ledger_path=decision_dir / "decision-model-v2-ledger.json",
+        ledger_path=decision_dir / "decision-model-v2.1-ledger.json",
     )
     monkeypatch.setenv("STOCKLENS_DECISION_V2_PATH", str(v2_path))
 
@@ -595,13 +595,19 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     for withdrawn in ("214.08", "203.42", "195.93", "188.43"):
         assert withdrawn not in nvda_rendered
     assert "operational_decision=null · operational_eligible=false" in nvda_rendered
-    assert "NVDA Decision Model v2 · proxy_action" in nvda_rendered
+    assert "NVDA Decision Model v2.1 · proxy_action" in nvda_rendered
     assert "provider_homogeneous_proxy" in nvda_rendered
     assert "verified_action=null · operational_eligible=false" in nvda_rendered
     assert "현재 가격에서 1차 매수를 시작" in nvda_rendered
-    assert nvda_metrics["현재가 · proxy"] == "$228.52"
+    assert nvda_metrics["Nasdaq Top10 proxy price"] == "$228.52"
+    assert nvda_metrics["StockLens 공식 가격 원장"] == "unavailable"
     assert nvda_metrics["현재 행동 · proxy"] == "분할매수 시작"
     assert nvda_metrics["목표 Forward 배수"] != "미생성"
+    assert nvda_metrics["가치평가상 진입 허용 상한"] != "미생성"
+    assert nvda_metrics["proxy 비중 축소 검토 기준"] != "미생성"
+    nvda_plain_text = " ".join(item.value for item in app.text)
+    assert "$228.52 / $217.09 / $205.67" in nvda_plain_text
+    assert "$$" not in nvda_plain_text
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
@@ -610,6 +616,16 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["기준 적정가"] == "미산출"
     assert nvda_metrics["현재 행동"] == "비활성"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
+
+    # A stale P5 source becomes an archived diagnostic, while the independently
+    # pinned v2.1 decision remains visible and does not ingest P5 inputs.
+    p512_sources["macro"].write_text(json.dumps({"fixture": "changed-after-p5"}), encoding="utf-8")
+    app.selectbox[0].set_value("NVDA").run(timeout=APPTEST_TIMEOUT_SECONDS)
+    stale_rendered = " ".join(item.value for item in [*app.info, *app.caption, *app.subheader])
+    assert "P5.1.2 보관 진단 자료" in stale_rendered
+    assert "현재 macro 원본과 SHA가 달라 최신 계산에는 사용하지 않음" in stale_rendered
+    assert "Decision Model v2.1 계산에는 유입되지 않음" in stale_rendered
+    assert "NVDA Decision Model v2.1 · proxy_action" in stale_rendered
 
     original_builder = decision_model.build_decision_analysis_snapshot
 
