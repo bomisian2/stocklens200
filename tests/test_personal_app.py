@@ -362,6 +362,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         macro_path=macro_path,
         config_path=Path(__file__).parents[1] / "config" / "decision-model-v2.json",
         decision_time="2026-10-14T12:52:02.418Z",
+        code_commit_sha="b" * 40,
     )
     v2_path = decision_dir / "nvda-decision-model-v2.1.json"
     write_decision_and_ledger(
@@ -603,6 +604,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["StockLens 공식 가격 원장"] == "unavailable"
     assert nvda_metrics["현재 행동 · proxy"] == "분할매수 시작"
     assert nvda_metrics["목표 Forward 배수"] != "미생성"
+    assert nvda_metrics["프록시 신뢰도"] == f"{v2_decision['confidence']['score']}/100"
     assert nvda_metrics["가치평가상 진입 허용 상한"] != "미생성"
     assert nvda_metrics["proxy 비중 축소 검토 기준"] != "미생성"
     nvda_plain_text = " ".join(item.value for item in app.text)

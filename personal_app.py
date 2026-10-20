@@ -351,6 +351,12 @@ def _render_decision_model_v2(decision: dict[str, Any]) -> None:
         st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
         st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
         st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
+        st.metric(
+            "프록시 신뢰도",
+            f"{decision['confidence']['score']}/100",
+            decision["confidence"]["label"],
+            border=True,
+        )
         st.metric("현재 행동 · proxy", decision["action"], "operational=false", border=True)
 
     st.success(decision["action_text"])

@@ -11,12 +11,14 @@ from stocklens.personal.decision_model_v2 import (
     DecisionModelV2Error,
     build_proxy_decision,
     load_decision,
+    preserve_existing_artifacts,
     validate_decision,
     write_decision_and_ledger,
 )
 
 
 DECISION_TIME = "2026-10-20T01:32:32.832654Z"
+TEST_COMMIT_SHA = "a" * 40
 
 
 def _write(path: Path, value: dict) -> Path:
@@ -83,6 +85,7 @@ def _build(paths: dict[str, Path]) -> dict:
         price_history_path=paths["price"], consensus_path=paths["consensus"],
         valuation_history_path=paths["valuation"], industry_map_path=paths["industry"],
         macro_path=paths["macro"], config_path=paths["config"], decision_time=DECISION_TIME,
+        code_commit_sha=TEST_COMMIT_SHA,
     )
 
 
@@ -207,6 +210,60 @@ def test_peer_group_diagnostics_do_not_replace_broad_proxy(tmp_path: Path) -> No
     assert groups["broad_semiconductors"]["eligible_for_overall_proxy"] is True
     assert groups["ai_compute_accelerator"]["diagnostic_only"] is True
     assert groups["semiconductor_design_network"]["diagnostic_only"] is True
+    required = {
+        "count", "minimum_required", "meets_minimum",
+        "eligible_for_overall_proxy", "diagnostic_only",
+    }
+    assert all(required <= set(group) for group in groups.values())
+
+
+def test_build_write_load_recalculate_round_trip(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    built = _build(paths)
+    decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = tmp_path / "private_data" / "decision" / "decision-model-v2.1-signal-ledger.json"
+    write_decision_and_ledger(
+        decision=built,
+        decision_path=decision_path,
+        ledger_path=ledger_path,
+        replace_ledger=True,
+    )
+    loaded = load_decision(decision_path)
+    rebuilt = _build(paths)
+    assert loaded == built == rebuilt
+    assert loaded["calculation_sha256"] == rebuilt["calculation_sha256"]
+    assert loaded["code_commit_sha"] == TEST_COMMIT_SHA
+    assert loaded["generator_version"] == "decision-model-v2.1-generator-v2"
+
+
+def test_legacy_v21_missing_meets_minimum_has_specific_error(tmp_path: Path) -> None:
+    result = _build(_fixture(tmp_path))
+    result["peer_gate"]["groups"][0].pop("meets_minimum")
+    with pytest.raises(
+        DecisionModelV2Error,
+        match="peer_gate group schema mismatch: meets_minimum missing",
+    ):
+        validate_decision(result)
+
+
+def test_existing_artifacts_are_archived_before_rebuild(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    result = _build(paths)
+    decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = tmp_path / "private_data" / "decision" / "decision-model-v2.1-signal-ledger.json"
+    write_decision_and_ledger(decision=result, decision_path=decision_path, ledger_path=ledger_path)
+    decision_bytes = decision_path.read_bytes()
+    ledger_bytes = ledger_path.read_bytes()
+    audit_path = preserve_existing_artifacts(
+        decision_path=decision_path,
+        ledger_path=ledger_path,
+        reason="schema drift — peer group meets_minimum field missing",
+    )
+    assert audit_path is not None
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["replacement_reason"] == "schema drift — peer group meets_minimum field missing"
+    assert Path(audit["previous_decision"]["archive_path"]).read_bytes() == decision_bytes
+    assert Path(audit["previous_ledger"]["archive_path"]).read_bytes() == ledger_bytes
 
 
 def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path: Path) -> None:

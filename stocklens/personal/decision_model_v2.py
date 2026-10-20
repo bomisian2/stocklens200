@@ -15,15 +15,23 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .storage import atomic_write_json
+from .storage import atomic_write_bytes, atomic_write_json
 
 
 MODEL_VERSION = "stocklens-decision-model-v2.1.0"
 POLICY_VERSION = "provider-homogeneous-proxy-v2.1.0"
 EXECUTION_POLICY_VERSION = "current-price-ladder-v1"
 LEDGER_VERSION = "decision-model-v2.1-signal-ledger-v1"
+GENERATOR_VERSION = "decision-model-v2.1-generator-v2"
 EXPECTED_PROVIDER = "nasdaq-analyst-earnings-forecast"
 EXPECTED_TICKER = "NVDA"
+PEER_GROUP_REQUIRED_FIELDS = {
+    "count",
+    "minimum_required",
+    "meets_minimum",
+    "eligible_for_overall_proxy",
+    "diagnostic_only",
+}
 
 
 class DecisionModelV2Error(ValueError):
@@ -42,6 +50,14 @@ def _canonical_sha256(value: Any) -> str:
     return _sha256_bytes(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
+
+
+def _commit_sha(value: Any) -> str:
+    if not isinstance(value, str) or len(value) != 40:
+        raise DecisionModelV2Error("code_commit_sha must be a full 40-character Git SHA")
+    if any(character not in "0123456789abcdefABCDEF" for character in value):
+        raise DecisionModelV2Error("code_commit_sha must be hexadecimal")
+    return value.lower()
 
 
 def _json_object(path: str | Path) -> dict[str, Any]:
@@ -444,6 +460,7 @@ def build_proxy_decision(
     macro_path: str | Path,
     config_path: str | Path,
     decision_time: str,
+    code_commit_sha: str,
 ) -> dict[str, Any]:
     paths = {
         "price_history": Path(price_history_path),
@@ -454,6 +471,7 @@ def build_proxy_decision(
         "config": Path(config_path),
     }
     config = load_config(paths["config"])
+    commit_sha = _commit_sha(code_commit_sha)
     decision_at = _timestamp(decision_time, "decision_time")
     price_data = _json_object(paths["price_history"])
     consensus_data = _json_object(paths["consensus"])
@@ -641,6 +659,8 @@ def build_proxy_decision(
         confidence_reasons.append("단일 피어 제거 시 목표 배수 변화가 정책 한도를 초과")
     sources = {role: _source(path) for role, path in paths.items()}
     decision: dict[str, Any] = {
+        "code_commit_sha": commit_sha,
+        "generator_version": GENERATOR_VERSION,
         "model_version": MODEL_VERSION,
         "policy_version": POLICY_VERSION,
         "ticker": EXPECTED_TICKER,
@@ -746,10 +766,29 @@ def build_proxy_decision(
 def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
     if decision.get("model_version") != MODEL_VERSION or decision.get("policy_version") != POLICY_VERSION:
         raise DecisionModelV2Error("Decision Model v2 artifact version mismatch")
+    if decision.get("generator_version") != GENERATOR_VERSION:
+        raise DecisionModelV2Error("Decision Model v2 generator version mismatch")
+    _commit_sha(decision.get("code_commit_sha"))
     if decision.get("decision_status") != "proxy_action" or decision.get("proxy_classification") != "provider_homogeneous_proxy":
         raise DecisionModelV2Error("Decision Model v2 proxy state mismatch")
     if decision.get("operational_eligible") is not False or decision.get("verified_action") is not None:
         raise DecisionModelV2Error("Decision Model v2 cannot be operational")
+    groups = decision.get("peer_gate", {}).get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise DecisionModelV2Error("peer_gate group schema mismatch: groups missing")
+    for group in groups:
+        if not isinstance(group, dict):
+            raise DecisionModelV2Error("peer_gate group schema mismatch: group is not an object")
+        missing = sorted(PEER_GROUP_REQUIRED_FIELDS - set(group))
+        if missing:
+            raise DecisionModelV2Error(
+                f"peer_gate group schema mismatch: {missing[0]} missing"
+            )
+        if not isinstance(group["meets_minimum"], bool):
+            raise DecisionModelV2Error("peer_gate group schema mismatch: meets_minimum must be boolean")
+        expected_minimum = int(group["count"]) >= int(group["minimum_required"])
+        if group["meets_minimum"] is not expected_minimum:
+            raise DecisionModelV2Error("peer_gate group schema mismatch: meets_minimum inconsistent")
     if decision.get("calculation_sha256") != _decision_calculation_sha256(decision):
         raise DecisionModelV2Error("Decision Model v2 calculation SHA-256 mismatch")
     sources = decision.get("sources")
@@ -769,6 +808,7 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
         macro_path=sources["macro"]["path"],
         config_path=sources["config"]["path"],
         decision_time=str(decision.get("decision_time") or ""),
+        code_commit_sha=str(decision.get("code_commit_sha") or ""),
     )
     if rebuilt != decision:
         raise DecisionModelV2Error("Decision Model v2 artifact does not reproduce from pinned sources")
@@ -814,7 +854,8 @@ def load_decision(path: str | Path) -> dict[str, Any]:
 
 
 def write_decision_and_ledger(
-    *, decision: dict[str, Any], decision_path: str | Path, ledger_path: str | Path
+    *, decision: dict[str, Any], decision_path: str | Path, ledger_path: str | Path,
+    replace_ledger: bool = False,
 ) -> tuple[Path, Path]:
     validate_decision(decision)
     decision_path = Path(decision_path)
@@ -829,6 +870,8 @@ def write_decision_and_ledger(
     record = {
         "signal_id": signal_id, "ticker": EXPECTED_TICKER,
         "decision_time": decision["decision_time"], "model_version": MODEL_VERSION,
+        "generator_version": decision["generator_version"],
+        "code_commit_sha": decision["code_commit_sha"],
         "decision_status": "proxy_action", "action": decision["action"],
         "current_price": decision["current_price"], "scenario_values": decision["scenario_values"],
         "valuation_entry_ceiling": decision["valuation_entry_ceiling"],
@@ -840,7 +883,7 @@ def write_decision_and_ledger(
         "calculation_sha256": decision["calculation_sha256"],
         "performance": decision["performance_tracking"], "operational_eligible": False,
     }
-    if ledger_path.exists():
+    if ledger_path.exists() and not replace_ledger:
         ledger = _json_object(ledger_path)
         if ledger.get("ledger_version") != LEDGER_VERSION or not isinstance(ledger.get("records"), list):
             raise DecisionModelV2Error("Decision Model v2 ledger is invalid")
@@ -853,3 +896,60 @@ def write_decision_and_ledger(
         ledger["records"].append(record)
         atomic_write_json(ledger_path, ledger)
     return decision_path, ledger_path
+
+
+def preserve_existing_artifacts(
+    *, decision_path: str | Path, ledger_path: str | Path, reason: str
+) -> Path | None:
+    """Archive existing private artifacts byte-for-byte before a schema rebuild."""
+    decision_path = Path(decision_path)
+    ledger_path = Path(ledger_path)
+    if not decision_path.exists() and not ledger_path.exists():
+        return None
+    if not decision_path.is_file() or not ledger_path.is_file():
+        raise DecisionModelV2Error("existing v2.1 artifact pair is incomplete")
+    decision_bytes = decision_path.read_bytes()
+    ledger_bytes = ledger_path.read_bytes()
+    decision_sha = _sha256_bytes(decision_bytes)
+    ledger_sha = _sha256_bytes(ledger_bytes)
+    try:
+        existing = json.loads(decision_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DecisionModelV2Error("existing decision artifact is not valid JSON") from exc
+    if not isinstance(existing, dict):
+        raise DecisionModelV2Error("existing decision artifact must be an object")
+    archive_dir = decision_path.parent / "archive"
+    archived_decision = archive_dir / f"{decision_path.stem}.{decision_sha}.json"
+    archived_ledger = archive_dir / f"{ledger_path.stem}.{ledger_sha}.json"
+    for target, payload in ((archived_decision, decision_bytes), (archived_ledger, ledger_bytes)):
+        if target.exists() and target.read_bytes() != payload:
+            raise DecisionModelV2Error(f"artifact archive collision: {target.name}")
+        if not target.exists():
+            atomic_write_bytes(target, payload)
+    audit = {
+        "audit_version": "decision-model-v2.1-schema-rebuild-audit-v1",
+        "replacement_reason": reason,
+        "previous_decision": {
+            "path": str(decision_path.resolve()),
+            "archive_path": str(archived_decision.resolve()),
+            "sha256": decision_sha,
+            "calculation_sha256": existing.get("calculation_sha256"),
+            "generated_at": existing.get("generated_at"),
+            "decision_time": existing.get("decision_time"),
+            "model_version": existing.get("model_version"),
+            "policy_version": existing.get("policy_version"),
+            "execution_policy_version": existing.get("execution_policy_version"),
+        },
+        "previous_ledger": {
+            "path": str(ledger_path.resolve()),
+            "archive_path": str(archived_ledger.resolve()),
+            "sha256": ledger_sha,
+        },
+    }
+    audit_path = decision_path.parent / f"nvda-decision-model-v2.1-pre-rebuild.{decision_sha}.json"
+    if audit_path.exists():
+        if _json_object(audit_path) != audit:
+            raise DecisionModelV2Error("pre-rebuild audit collision")
+    else:
+        atomic_write_json(audit_path, audit)
+    return audit_path
