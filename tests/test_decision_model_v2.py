@@ -152,6 +152,10 @@ def test_adjustment_caps_ladder_and_action_branches(tmp_path: Path) -> None:
     base = result["scenario_values"]["base"]
     assert result["buy_prices"] == pytest.approx([base * 0.97, base * 0.93, base * 0.89])
     assert result["reduction_review_price"] == pytest.approx(base * 1.15)
+    expected_invalidation_eps = result["current_price"]["value"] / (
+        result["calculation"]["target_forward_multiple"] * 0.97
+    )
+    assert f"${expected_invalidation_eps:,.2f}" in result["invalidation_conditions"][0]
 
 
 def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path: Path) -> None:

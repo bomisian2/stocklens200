@@ -408,7 +408,8 @@ def build_proxy_decision(
     else:
         action = "대기"
         action_text = f"현재는 기준 연구값 아래 ${ladder[0]:,.2f}까지 기다림"
-    invalidation_eps = current / target_multiple
+    first_buy_multiplier = float(config["buy_ladder_multipliers"][0])
+    invalidation_eps = current / (target_multiple * first_buy_multiplier)
     sources = {role: _source(path) for role, path in paths.items()}
     decision: dict[str, Any] = {
         "model_version": MODEL_VERSION,
