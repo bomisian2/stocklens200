@@ -10,6 +10,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from stocklens.personal import decision_model
+from stocklens.personal.decision_model_v2 import build_proxy_decision, write_decision_and_ledger
 from stocklens.personal.decision_evidence import (
     AUDIT_VERSION,
     REQUIRED_REQUIREMENT_IDS,
@@ -88,6 +89,11 @@ def _write_ready_audit(
 def _top10_consensus_fixture() -> dict:
     shared = {
         "collectedAt": "2026-10-14T12:52:02.418Z",
+        "providerId": "nasdaq-analyst-earnings-forecast",
+        "collectionStatus": "success",
+        "currency": "USD",
+        "epsBasis": "unknown",
+        "accountingBasis": "provider_adjusted_unspecified",
         "revisionsUp4w": 1,
         "revisionsDown4w": 0,
         "revisionState": "상향 우세",
@@ -108,6 +114,16 @@ def _top10_consensus_fixture() -> dict:
                 "consensusEps": 9.25, "lowEps": 9.01, "highEps": 9.71,
                 "analystCount": 17, "nextFiscalEnd": "Jan 2028", "nextConsensusEps": 15.53,
                 "sourceUrl": "https://api.nasdaq.com/api/analyst/NVDA/earnings-forecast",
+            },
+            **{
+                f"P{index}": {
+                    **shared, "ticker": f"P{index}", "fiscalEnd": "Dec 2026",
+                    "consensusEps": 5.0, "lowEps": 4.5, "highEps": 5.5,
+                    "analystCount": 10, "nextFiscalEnd": "Dec 2027",
+                    "nextConsensusEps": 6.0 + index * 0.1,
+                    "sourceUrl": f"https://api.nasdaq.com/api/analyst/P{index}/earnings-forecast",
+                }
+                for index in range(1, 7)
             },
         },
     }
@@ -297,6 +313,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     price_history_path.write_text(
         json.dumps(
             {
+                "generatedAt": "2026-10-13T22:35:27.276Z",
                 "records": {
                     "AVGO": [{"date": "2026-10-13", "close": 357.31}],
                     "NVDA": [{"date": "2026-10-13", "close": 228.52}],
@@ -317,6 +334,42 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_PATH", str(audit_path))
     monkeypatch.setenv("STOCKLENS_DECISION_AUDIT_SHA256", audit_sha256)
     monkeypatch.setenv("STOCKLENS_SAME_DATE_LEGACY_INPUT_PATH", str(legacy_path))
+
+    valuation_path = top10_dir / "valuation-history.json"
+    valuation_path.write_text(json.dumps({
+        "generatedAt": "2026-10-14T12:52:02.418Z",
+        "records": {
+            f"P{index}": [{
+                "asOf": "2026-10-13", "expectedPe": 20.0 + index * 3.0,
+                "estimatePeriod": "Dec 2026", "pointInTimeVerified": False,
+            }]
+            for index in range(1, 7)
+        },
+    }), encoding="utf-8")
+    industry_path = top10_dir / "industry-map.json"
+    industry_path.write_text(json.dumps({
+        "generatedAt": "2026-10-14T12:52:02.418Z",
+        "records": {
+            "NVDA": {"sector": "AI 반도체", "etf": "SOXX"},
+            **{f"P{index}": {"sector": "반도체", "etf": "SOXX"} for index in range(1, 7)},
+        },
+    }), encoding="utf-8")
+    v2_decision = build_proxy_decision(
+        price_history_path=price_history_path,
+        consensus_path=consensus_path,
+        valuation_history_path=valuation_path,
+        industry_map_path=industry_path,
+        macro_path=macro_path,
+        config_path=Path(__file__).parents[1] / "config" / "decision-model-v2.json",
+        decision_time="2026-10-14T12:52:02.418Z",
+    )
+    v2_path = decision_dir / "nvda-decision-model-v2.json"
+    write_decision_and_ledger(
+        decision=v2_decision,
+        decision_path=v2_path,
+        ledger_path=decision_dir / "decision-model-v2-ledger.json",
+    )
+    monkeypatch.setenv("STOCKLENS_DECISION_V2_PATH", str(v2_path))
 
     # P5.1.2 artifacts are synthetic UI fixtures. The loader still re-hashes every
     # declared source and rejects superseded P5.1/P5.1.1 versions.
@@ -542,6 +595,13 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     for withdrawn in ("214.08", "203.42", "195.93", "188.43"):
         assert withdrawn not in nvda_rendered
     assert "operational_decision=null · operational_eligible=false" in nvda_rendered
+    assert "NVDA Decision Model v2 · proxy_action" in nvda_rendered
+    assert "provider_homogeneous_proxy" in nvda_rendered
+    assert "verified_action=null · operational_eligible=false" in nvda_rendered
+    assert "현재 가격에서 1차 매수를 시작" in nvda_rendered
+    assert nvda_metrics["현재가 · proxy"] == "$228.52"
+    assert nvda_metrics["현재 행동 · proxy"] == "분할매수 시작"
+    assert nvda_metrics["목표 Forward 배수"] != "미생성"
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"

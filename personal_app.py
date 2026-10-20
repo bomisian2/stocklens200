@@ -20,6 +20,10 @@ from stocklens.personal.decision_model import (
     load_decision_config,
     load_decision_inputs,
 )
+from stocklens.personal.decision_model_v2 import (
+    DecisionModelV2Error,
+    load_decision as load_decision_v2,
+)
 from stocklens.personal.market_data import compute_technical_snapshot
 from stocklens.personal.nvda_research_p511 import (
     NvdaResearchP511Error,
@@ -124,6 +128,12 @@ NVDA_P512_DECISION_PATH = Path(
         str(DATA_DIR / "decision" / "nvda-research-state-p5.1.2.json"),
     )
 )
+DECISION_V2_PATH = Path(
+    os.environ.get(
+        "STOCKLENS_DECISION_V2_PATH",
+        str(DATA_DIR / "decision" / "nvda-decision-model-v2.json"),
+    )
+)
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -196,6 +206,12 @@ def load_nvda_p512_artifacts(
         peer_proxy_path=peer_proxy_path,
         decision_path=decision_path,
     )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def load_decision_v2_artifact(path_text: str, modified_ns: int) -> dict[str, Any]:
+    del modified_ns
+    return load_decision_v2(path_text)
 
 
 def _mtime(path: Path) -> int:
@@ -317,6 +333,106 @@ def _render_nvda_p512_research(
     st.caption(
         "research_action=null · first_review_rule=null · fair_value=null · buy_range=null · sell_range=null · "
         "operational_decision=null · operational_eligible=false"
+    )
+
+
+def _render_decision_model_v2(decision: dict[str, Any]) -> None:
+    st.subheader("NVDA Decision Model v2 · proxy_action")
+    st.warning(
+        "provider_homogeneous_proxy · 낮은 신뢰도. 동일 공급자·동일 가격일·Forward 기간 ±90일 피어를 "
+        "사용한 잠정 행동 가격입니다. verified_action과 운영 신호는 생성되지 않았습니다."
+    )
+    price = decision["current_price"]
+    values = decision["scenario_values"]
+    calculation = decision["calculation"]
+    peer_gate = decision["peer_gate"]
+    with st.container(horizontal=True):
+        st.metric("현재가 · proxy", f"${price['value']:,.2f}", price["as_of"], border=True)
+        st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
+        st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
+        st.metric("현재 행동 · proxy", decision["action"], "operational=false", border=True)
+
+    st.success(decision["action_text"])
+    st.write(
+        f"**잠정 연구 분할구간** · ${decision['buy_prices'][0]:,.2f} / "
+        f"${decision['buy_prices'][1]:,.2f} / ${decision['buy_prices'][2]:,.2f}"
+    )
+    st.write(f"**비중 축소 검토** · ${decision['reduction_review_price']:,.2f} 이상")
+    st.caption(
+        f"decision_time {decision['decision_time']} · 가격 {price['as_of']} · "
+        f"컨센서스 {decision['consensus']['period']} / {decision['consensus']['available_at']} · "
+        f"회계 basis={decision['consensus']['accounting_basis']} · EPS basis={decision['consensus']['eps_basis']}"
+    )
+
+    st.markdown("#### 계산 경로")
+    calculation_rows = [
+        {"단계": "피어 중앙값", "값": f"{calculation['peer_median_before_adjustment']:.2f}배", "조정": "없음"},
+        {
+            "단계": "성장률·추정치 변화",
+            "값": f"{calculation['multiple_after_growth_revision']:.2f}배",
+            "조정": f"{calculation['combined_growth_revision_adjustment']:+.1%}",
+        },
+        {
+            "단계": "시장 국면",
+            "값": f"{calculation['target_forward_multiple']:.2f}배",
+            "조정": f"{calculation['regime']['adjustment']:+.1%}",
+        },
+    ]
+    st.dataframe(pd.DataFrame(calculation_rows), hide_index=True, width="stretch")
+    st.write(
+        f"NVDA EPS 성장률 {calculation['target_eps_growth']:.1%} vs 피어 중앙값 "
+        f"{calculation['peer_median_eps_growth']:.1%} · 성장 조정 {calculation['growth_adjustment']:+.1%}"
+    )
+    st.write(
+        f"NVDA 수정 점수 {calculation['target_revision_score']:.1%} vs 피어 중앙값 "
+        f"{calculation['peer_median_revision_score']:.1%} · 수정 조정 {calculation['revision_adjustment']:+.1%}"
+    )
+    st.write(
+        f"시장 국면 **{calculation['regime']['state']}** · score {calculation['regime']['score']} · "
+        f"배수 조정 {calculation['regime']['adjustment']:+.1%}"
+    )
+
+    st.markdown("#### EPS 민감도")
+    eps = decision["consensus"]["eps"]
+    st.dataframe(
+        pd.DataFrame([
+            {"시나리오": "low", "Forward EPS": eps["low"], "proxy 연구값": values["low"]},
+            {"시나리오": "base", "Forward EPS": eps["base"], "proxy 연구값": values["base"]},
+            {"시나리오": "high", "Forward EPS": eps["high"], "proxy 연구값": values["high"]},
+        ]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Forward EPS": st.column_config.NumberColumn(format="$%.2f"),
+            "proxy 연구값": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+    st.write(f"현재 implied Forward multiple: **{decision['current_implied_forward_multiple']:.2f}배**")
+
+    st.markdown("#### 피어 게이트와 제외 사유")
+    st.write(
+        f"이상치 제거 전 {peer_gate['pre_outlier_count']}개 · 제거 후 {peer_gate['post_outlier_count']}개 · "
+        f"최소 {peer_gate['minimum']}개 · 기간 허용 ±{peer_gate['period_tolerance_days']}일"
+    )
+    st.dataframe(
+        pd.DataFrame(peer_gate["post_outlier_peers"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "forward_per": st.column_config.NumberColumn(format="%.2f배"),
+            "eps_growth": st.column_config.NumberColumn(format="%.1%%"),
+            "revision_score": st.column_config.NumberColumn(format="%.1%%"),
+        },
+    )
+    with st.expander(f"제외 피어 {len(peer_gate['excluded_peers'])}개"):
+        st.dataframe(pd.DataFrame(peer_gate["excluded_peers"]), hide_index=True, width="stretch")
+
+    st.markdown("#### 판단 변경 조건")
+    for condition in decision["invalidation_conditions"]:
+        st.write(f"- {condition}")
+    st.caption(
+        f"proxy_action · verified_action=null · operational_eligible=false · "
+        f"성과 추적={decision['performance_tracking']['status']} · 계산 SHA {decision['calculation_sha256'][:16]}…"
     )
 
 
@@ -1188,6 +1304,15 @@ if ticker == "NVDA":
             st.error(f"NVDA P5.1.2 연구 자료 검증 실패: {exc}")
     else:
         st.caption("NVDA P5.1.2 피어 게이트 연구 산출물이 아직 생성되지 않았습니다.")
+
+    if DECISION_V2_PATH.is_file():
+        try:
+            decision_v2 = load_decision_v2_artifact(str(DECISION_V2_PATH), _mtime(DECISION_V2_PATH))
+            _render_decision_model_v2(decision_v2)
+        except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
+            st.error(f"Decision Model v2 무결성 검증 실패: {exc}")
+    else:
+        st.caption("Decision Model v2 프록시 산출물이 아직 생성되지 않았습니다.")
 
 v23_self_history = _render_v23_comparison(
     ticker,

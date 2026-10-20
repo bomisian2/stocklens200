@@ -1,0 +1,22 @@
+{
+  "model_version": "stocklens-decision-model-v2.0.0",
+  "policy_version": "provider-homogeneous-proxy-v2.0.0",
+  "ticker": "NVDA",
+  "minimum_peers": 5,
+  "forward_period_tolerance_days": 90,
+  "tukey_iqr_multiplier": 1.5,
+  "growth_revision": {
+    "growth_coefficient": 0.25,
+    "growth_component_limit": 0.15,
+    "revision_coefficient": 0.2,
+    "revision_component_limit": 0.05,
+    "combined_limit": 0.2
+  },
+  "regime": {
+    "maximum_adjustment": 0.1,
+    "score_step": 0.03,
+    "maximum_absolute_score": 3
+  },
+  "buy_ladder_multipliers": [0.97, 0.93, 0.89],
+  "reduction_review_multiplier": 1.15
+}
