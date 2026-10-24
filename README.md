@@ -14,7 +14,7 @@
 - yfinance 호출은 60초 제한 subprocess에서 실행해 전체 작업이 무기한 멈추지 않게 합니다.
 - Streamlit은 외부 API를 호출하지 않고 저장 스냅샷만 읽습니다.
 - `exchange-calendars`의 XNYS 캘린더로 휴장일과 EDT/EST 정규장 마감 시각을 판정합니다.
-- GitHub Actions는 PR에서 읽기 권한으로 테스트하고, 예약 작업에서만 쓰기 권한으로 데이터를 갱신합니다.
+- GitHub Actions는 PR에서 외부 호출 없는 코드/AppTest와 저장 스냅샷 무결성을 각각 검사하고, 예약 작업에서만 쓰기 권한으로 데이터를 갱신합니다.
 
 23:15 UTC는 미국 동부 서머타임(EDT)에는 19:15, 표준시(EST)에는 18:15이므로 두 경우 모두 16:00 정규장 마감 이후입니다. 예약 작업 자체는 평일 휴장일에도 시작할 수 있지만, XNYS 캘린더가 최근 완료 거래 세션을 계산합니다. 거래 시각이 그 세션과 일치하지 않으면 `stale`, 시각을 검증할 수 없으면 `unverified`, 일부 시각·품질 문제가 있으면 `degraded`로 분류하고 신규 스냅샷을 게시하지 않습니다.
 
@@ -23,6 +23,8 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 `engine.py`의 기존 적정가/신호 코드는 프로토타입 참고용이며 v2 앱에 연결되어 있지 않습니다. 재무 데이터의 시점 일관성, QQQ 벤치마크, 워크포워드 검증이 끝나기 전까지 정상 기능으로 표시하지 않습니다.
 
 ## 로컬 실행
+
+지원·CI 실행 환경은 **Python 3.12**입니다. `.python-version`과 GitHub Actions를 3.12로 고정했습니다. Python 3.14와 Streamlit 1.65 조합의 AppTest는 독립 환경에서 반환되지 않은 사례가 있어 현재 지원 범위에 포함하지 않습니다.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -33,10 +35,18 @@ streamlit run app.py
 테스트:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-personal.txt
+python -m pytest -q -m "not streamlit"
+python scripts/run_streamlit_apptests.py --timeout-seconds 180
 python -m pytest -q
-python scripts/validate_snapshot.py --strict
+python scripts/validate_snapshot.py
 ```
+
+`run_streamlit_apptests.py`는 먼저 정확히 6개의 AppTest가 수집되는지 확인한 뒤 별도 프로세스에서 실행합니다. 0개 또는 6개가 아닌 수가 수집되면 종료 코드 2, 전체 수집·실행이 180초를 넘기면 종료 코드 124로 실패합니다. Python 3.12가 아니어도 종료 코드 2로 즉시 차단하므로 AppTest 내부 timeout에 의존해 무한 대기하지 않습니다.
+
+Same-Date P5.0.1의 외부 호출 없는 보충 수집 계획과 공급자 중립 로컬 import 계약은 [docs/same-date-p5-data-recovery.md](docs/same-date-p5-data-recovery.md)에 기록합니다. 보충 수집기는 하나의 요청이라도 HTTP·네트워크·구조·티커·공급자 검증에 실패하면 다음 대기와 요청 전에 중단합니다. 별도 승인 전 `--show-plan`만 허용하며, 기존 약관과 AVGO 일봉을 재호출하지 않습니다. 로컬 import 통과는 컨테이너·manifest·해시·권리 계약 검증일 뿐이며 행 단위 의미 검증 전에는 실제 데이터 자격을 부여하지 않습니다.
+
+`--strict`는 현재 최신 완료 시장 세션과 비교하는 라이브 운영 검사입니다. 과거에 정상 저장된 스냅샷의 재현성 검사와 혼동하지 않으며, PR의 오프라인 코드 검사에는 사용하지 않습니다.
 
 ## 데이터 파일
 
@@ -73,7 +83,7 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
                                                                   Streamlit 읽기 전용 표시
 ```
 
-하루 한 번 15분 제한의 단일 예약 작업과 작은 CSV/JSON만 사용합니다. PR CI는 `contents: read`, 예약 갱신 job만 `contents: write`입니다. API 키가 필요 없으며 `.streamlit/secrets.toml`은 Git에서 제외됩니다. 향후 키가 필요한 공급원을 추가할 때는 GitHub Actions Secrets와 Streamlit Secrets만 사용하고 값이나 응답 본문을 로그에 기록하지 않아야 합니다.
+하루 한 번 15분 제한의 단일 예약 작업과 작은 CSV/JSON만 사용합니다. PR CI는 `contents: read`이며 외부 공급원을 호출하지 않습니다. 신규 공급원 실수집 진단은 별도 수동 워크플로로 격리되어 있고, 운영자 확인과 `config/provider-rights.json`의 승인 상태를 모두 통과해야 네트워크 호출 단계에 진입합니다. 현재 권리 매니페스트는 Yahoo/Nasdaq의 공개 GitHub runner 자동 수집 권한이 미확정이므로 진단 호출을 차단합니다. 예약 갱신 job만 `contents: write`입니다. API 키가 필요 없으며 `.streamlit/secrets.toml`은 Git에서 제외됩니다. 향후 키가 필요한 공급원을 추가할 때는 GitHub Actions Secrets와 Streamlit Secrets만 사용하고 값이나 응답 본문을 로그에 기록하지 않아야 합니다.
 
 ## 다음 단계(아직 미완료)
 

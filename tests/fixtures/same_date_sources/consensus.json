@@ -1,0 +1,35 @@
+{
+  "generatedAt": "2026-10-14T12:52:02.418Z",
+  "source": "synthetic Nasdaq-shaped fixture",
+  "methodology": "fixture unverified Street EPS",
+  "records": {
+    "AVGO": {
+      "ticker": "AVGO",
+      "collectedAt": "2026-10-14T12:52:02.418Z",
+      "fiscalEnd": "Oct 2026",
+      "consensusEps": 10.37,
+      "lowEps": 10.06,
+      "highEps": 12.38,
+      "analystCount": 13,
+      "revisionsUp4w": 1,
+      "revisionsDown4w": 0,
+      "revisionState": "상향 우세",
+      "nextFiscalEnd": "Oct 2027",
+      "nextConsensusEps": 17.45
+    },
+    "NVDA": {
+      "ticker": "NVDA",
+      "collectedAt": "2026-10-14T12:52:02.418Z",
+      "fiscalEnd": "Jan 2027",
+      "consensusEps": 9.25,
+      "lowEps": 9.01,
+      "highEps": 9.71,
+      "analystCount": 17,
+      "revisionsUp4w": 1,
+      "revisionsDown4w": 0,
+      "revisionState": "상향 우세",
+      "nextFiscalEnd": "Jan 2028",
+      "nextConsensusEps": 15.53
+    }
+  }
+}

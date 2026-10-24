@@ -1,0 +1,37 @@
+{
+  "model_version": "stocklens-decision-model-v2.1.0",
+  "policy_version": "provider-homogeneous-proxy-v2.1.0",
+  "execution_policy_version": "current-price-ladder-v1",
+  "ticker": "NVDA",
+  "minimum_peers": 5,
+  "forward_period_tolerance_days": 90,
+  "tukey_iqr_multiplier": 1.5,
+  "growth_revision": {
+    "growth_coefficient": 0.25,
+    "growth_component_limit": 0.15,
+    "revision_coefficient": 0.2,
+    "revision_component_limit": 0.05,
+    "combined_limit": 0.2
+  },
+  "regime": {
+    "maximum_adjustment": 0.1,
+    "score_step": 0.03,
+    "maximum_absolute_score": 3
+  },
+  "valuation_entry_ceiling_multiplier": 0.97,
+  "execution_ladder_multipliers": [1.0, 0.95, 0.9],
+  "reduction_review_multiplier": 1.15,
+  "fundamental_invalidation": {
+    "consensus_eps_cut_fraction": 0.1,
+    "growth_floor_relative_to_peer_median": 1.0
+  },
+  "peer_stability": {
+    "single_peer_change_limit": 0.15,
+    "wide_distribution_max_min_ratio": 3.0
+  },
+  "peer_groups": {
+    "ai_compute_accelerator": ["ai_chips"],
+    "semiconductor_design_network": ["ai_chips", "networking", "analog_wireless"],
+    "broad_semiconductors": ["*"]
+  }
+}
