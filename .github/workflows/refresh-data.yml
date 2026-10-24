@@ -33,6 +33,17 @@ jobs:
         run: python scripts/update_data.py
       - name: Validate refreshed snapshot
         run: python scripts/validate_snapshot.py --strict
+      - name: Refresh valuations only from an operator-supplied official SEC manifest
+        shell: bash
+        run: |
+          if [[ -f data/sec-import/manifest.json ]]; then
+            python scripts/update_valuations.py \
+              --financial-source offline \
+              --sec-manifest data/sec-import/manifest.json
+            python scripts/validate_valuations.py
+          else
+            echo "Valuation refresh skipped: no verified official SEC offline manifest is present."
+          fi
       - name: Commit changed snapshots
         run: |
           if git diff --quiet -- data/; then
@@ -41,6 +52,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/universe.csv data/status.json
+          git add -A data
           git commit -m "data: refresh StockLens 200 snapshot"
           git push
