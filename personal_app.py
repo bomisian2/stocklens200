@@ -211,9 +211,12 @@ def load_nvda_p512_artifacts(
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def load_decision_v2_artifact(
-    path_text: str, modified_ns: int, artifact_sha256: str
+    path_text: str,
+    modified_ns: int,
+    artifact_sha256: str,
+    bundle_signature: str,
 ) -> dict[str, Any]:
-    del modified_ns, artifact_sha256
+    del modified_ns, artifact_sha256, bundle_signature
     return load_decision_v2(path_text)
 
 
@@ -231,6 +234,34 @@ def _mtime(path: Path) -> int:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper() if path.is_file() else ""
+
+
+def _decision_bundle_signature(decision_path: Path) -> str:
+    """Bind the Streamlit cache key to every immutable bundle byte.
+
+    The decision artifact itself does not change when a bundled source is
+    corrupted.  Hashing the small, fixed bundle here ensures a rerun cannot
+    reuse a previously validated decision after any internal file changes.
+    The signature only enters the server-side cache key and is never rendered.
+    """
+    try:
+        artifact = json.loads(decision_path.read_text(encoding="utf-8"))
+        bundle_path = Path(str((artifact.get("input_bundle") or {}).get("path") or ""))
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        return "decision-or-bundle-unreadable"
+    if not bundle_path.is_dir():
+        return "bundle-missing"
+    digest = hashlib.sha256()
+    try:
+        files = sorted(path for path in bundle_path.rglob("*") if path.is_file())
+        for path in files:
+            digest.update(str(path.relative_to(bundle_path)).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return "bundle-unreadable"
+    return digest.hexdigest().upper()
 
 
 def _decision_parent_signature(decision: dict[str, Any]) -> str:
@@ -1442,6 +1473,7 @@ if ticker == "NVDA":
                 str(DECISION_V2_PATH),
                 _mtime(DECISION_V2_PATH),
                 _sha256(DECISION_V2_PATH),
+                _decision_bundle_signature(DECISION_V2_PATH),
             )
             bundle_path = str(decision_v2["input_bundle"]["path"])
             update_status = load_decision_v2_update_status(
