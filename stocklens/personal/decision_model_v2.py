@@ -15,6 +15,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .decision_input_bundle import (
+    BUNDLE_VERSION,
+    DecisionInputBundleError,
+    bundled_source_paths,
+    validate_input_bundle,
+)
 from .storage import atomic_write_bytes, atomic_write_json
 
 
@@ -22,7 +28,7 @@ MODEL_VERSION = "stocklens-decision-model-v2.1.0"
 POLICY_VERSION = "provider-homogeneous-proxy-v2.1.0"
 EXECUTION_POLICY_VERSION = "current-price-ladder-v1"
 LEDGER_VERSION = "decision-model-v2.1-signal-ledger-v1"
-GENERATOR_VERSION = "decision-model-v2.1-generator-v2"
+GENERATOR_VERSION = "decision-model-v2.1-generator-v3"
 EXPECTED_PROVIDER = "nasdaq-analyst-earnings-forecast"
 EXPECTED_TICKER = "NVDA"
 PEER_GROUP_REQUIRED_FIELDS = {
@@ -461,6 +467,7 @@ def build_proxy_decision(
     config_path: str | Path,
     decision_time: str,
     code_commit_sha: str,
+    input_bundle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     paths = {
         "price_history": Path(price_history_path),
@@ -667,6 +674,8 @@ def build_proxy_decision(
         "decision_time": decision_at.isoformat().replace("+00:00", "Z"),
         "generated_at": decision_at.isoformat().replace("+00:00", "Z"),
         "decision_status": "proxy_action",
+        "personal_action_status": "active_proxy",
+        "data_grade": "provider_homogeneous_proxy",
         "proxy_classification": "provider_homogeneous_proxy",
         "confidence": {
             "label": "매우 낮음" if confidence_score < 30 else "낮음",
@@ -675,6 +684,7 @@ def build_proxy_decision(
         },
         "operational_eligible": False,
         "verified_action": None,
+        "market_session": price["as_of"],
         "current_price": {**price, "available_at": generated_at["price_history"]},
         "consensus": {
             "period": str(target.get("fiscalEnd")), "available_at": str(target.get("collectedAt")),
@@ -709,6 +719,7 @@ def build_proxy_decision(
         "execution_buy_prices": execution_prices,
         "execution_anchor_price": current if execution_prices else None,
         "execution_policy_version": EXECUTION_POLICY_VERSION,
+        "execution_allocation_weights": [33, 33, 34] if execution_prices else None,
         "legacy_buy_prices_status": "deprecated_v2.1",
         "reduction_review_price": reduction,
         "current_implied_forward_multiple": current / eps["base"],
@@ -759,11 +770,50 @@ def build_proxy_decision(
         "source_generated_at": generated_at,
         "sources": sources,
     }
+    if input_bundle is not None:
+        decision["input_bundle"] = input_bundle
     decision["calculation_sha256"] = _decision_calculation_sha256(decision)
     return decision
 
 
-def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
+def build_proxy_decision_from_bundle(
+    *, bundle_dir: str | Path, manifest_sha256: str, code_commit_sha: str | None = None
+) -> dict[str, Any]:
+    """Build exclusively from verified bytes inside an immutable bundle."""
+    try:
+        manifest, actual_manifest_sha = validate_input_bundle(
+            bundle_dir, expected_manifest_sha256=manifest_sha256
+        )
+    except DecisionInputBundleError as exc:
+        raise DecisionModelV2Error(str(exc)) from exc
+    bundle_path = Path(bundle_dir).resolve()
+    paths = bundled_source_paths(bundle_path, manifest)
+    commit_sha = code_commit_sha or str(manifest.get("code_commit_sha") or "")
+    if _commit_sha(commit_sha) != str(manifest.get("code_commit_sha") or "").lower():
+        raise DecisionModelV2Error("input bundle code_commit_sha mismatch")
+    bundle_reference = {
+        "bundle_version": BUNDLE_VERSION,
+        "decision_id": manifest["decision_id"],
+        "path": str(bundle_path),
+        "manifest_path": str((bundle_path / "bundle-manifest.json").resolve()),
+        "manifest_sha256": actual_manifest_sha,
+    }
+    return build_proxy_decision(
+        price_history_path=paths["price_history"],
+        consensus_path=paths["consensus"],
+        valuation_history_path=paths["valuation_history"],
+        industry_map_path=paths["industry_map"],
+        macro_path=paths["macro"],
+        config_path=paths["config"],
+        decision_time=str(manifest["decision_time"]),
+        code_commit_sha=commit_sha,
+        input_bundle=bundle_reference,
+    )
+
+
+def validate_decision(
+    decision: dict[str, Any], *, require_input_bundle: bool = False
+) -> dict[str, Any]:
     if decision.get("model_version") != MODEL_VERSION or decision.get("policy_version") != POLICY_VERSION:
         raise DecisionModelV2Error("Decision Model v2 artifact version mismatch")
     if decision.get("generator_version") != GENERATOR_VERSION:
@@ -771,6 +821,10 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
     _commit_sha(decision.get("code_commit_sha"))
     if decision.get("decision_status") != "proxy_action" or decision.get("proxy_classification") != "provider_homogeneous_proxy":
         raise DecisionModelV2Error("Decision Model v2 proxy state mismatch")
+    if decision.get("personal_action_status") != "active_proxy":
+        raise DecisionModelV2Error("Decision Model v2 personal action state mismatch")
+    if decision.get("data_grade") != "provider_homogeneous_proxy":
+        raise DecisionModelV2Error("Decision Model v2 data grade mismatch")
     if decision.get("operational_eligible") is not False or decision.get("verified_action") is not None:
         raise DecisionModelV2Error("Decision Model v2 cannot be operational")
     groups = decision.get("peer_gate", {}).get("groups")
@@ -800,16 +854,46 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
         path = Path(str(source.get("path")))
         if not path.is_file() or _file_sha256(path) != source.get("sha256"):
             raise DecisionModelV2Error(f"{role} source hash mismatch")
-    rebuilt = build_proxy_decision(
-        price_history_path=sources["price_history"]["path"],
-        consensus_path=sources["consensus"]["path"],
-        valuation_history_path=sources["valuation_history"]["path"],
-        industry_map_path=sources["industry_map"]["path"],
-        macro_path=sources["macro"]["path"],
-        config_path=sources["config"]["path"],
-        decision_time=str(decision.get("decision_time") or ""),
-        code_commit_sha=str(decision.get("code_commit_sha") or ""),
-    )
+    bundle = decision.get("input_bundle")
+    if require_input_bundle and not isinstance(bundle, dict):
+        raise DecisionModelV2Error("Decision Model v2 immutable input bundle is missing")
+    if isinstance(bundle, dict):
+        if set(bundle) != {"bundle_version", "decision_id", "path", "manifest_path", "manifest_sha256"}:
+            raise DecisionModelV2Error("Decision Model v2 input bundle reference mismatch")
+        if bundle.get("bundle_version") != BUNDLE_VERSION:
+            raise DecisionModelV2Error("Decision Model v2 input bundle version mismatch")
+        bundle_path = Path(str(bundle.get("path") or "")).resolve()
+        manifest_path = Path(str(bundle.get("manifest_path") or "")).resolve()
+        if manifest_path != bundle_path / "bundle-manifest.json":
+            raise DecisionModelV2Error("Decision Model v2 input bundle manifest path mismatch")
+        try:
+            manifest, manifest_sha = validate_input_bundle(
+                bundle_path,
+                expected_manifest_sha256=str(bundle.get("manifest_sha256") or ""),
+            )
+        except DecisionInputBundleError as exc:
+            raise DecisionModelV2Error(str(exc)) from exc
+        if manifest_sha != bundle.get("manifest_sha256") or manifest.get("decision_id") != bundle.get("decision_id"):
+            raise DecisionModelV2Error("Decision Model v2 input bundle identity mismatch")
+        bundled_paths = bundled_source_paths(bundle_path, manifest)
+        if any(Path(sources[role]["path"]).resolve() != bundled_paths[role] for role in sources):
+            raise DecisionModelV2Error("Decision Model v2 source is outside the input bundle")
+        rebuilt = build_proxy_decision_from_bundle(
+            bundle_dir=bundle_path,
+            manifest_sha256=manifest_sha,
+            code_commit_sha=str(decision.get("code_commit_sha") or ""),
+        )
+    else:
+        rebuilt = build_proxy_decision(
+            price_history_path=sources["price_history"]["path"],
+            consensus_path=sources["consensus"]["path"],
+            valuation_history_path=sources["valuation_history"]["path"],
+            industry_map_path=sources["industry_map"]["path"],
+            macro_path=sources["macro"]["path"],
+            config_path=sources["config"]["path"],
+            decision_time=str(decision.get("decision_time") or ""),
+            code_commit_sha=str(decision.get("code_commit_sha") or ""),
+        )
     if rebuilt != decision:
         raise DecisionModelV2Error("Decision Model v2 artifact does not reproduce from pinned sources")
     if decision.get("calculation", {}).get("current_price_used_in_target_multiple") is not False:
@@ -822,6 +906,9 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
         raise DecisionModelV2Error("ambiguous legacy buy_prices field is not allowed")
     if decision.get("execution_policy_version") != EXECUTION_POLICY_VERSION:
         raise DecisionModelV2Error("Decision Model v2 execution policy mismatch")
+    expected_weights = [33, 33, 34] if decision.get("execution_buy_prices") else None
+    if decision.get("execution_allocation_weights") != expected_weights:
+        raise DecisionModelV2Error("Decision Model v2 execution allocation mismatch")
     ceiling = _number(decision.get("valuation_entry_ceiling"), "entry ceiling", positive=True)
     if not math.isclose(ceiling, base * 0.97, rel_tol=1e-12):
         raise DecisionModelV2Error("Decision Model v2 entry ceiling arithmetic mismatch")
@@ -850,17 +937,15 @@ def validate_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_decision(path: str | Path) -> dict[str, Any]:
-    return validate_decision(_json_object(path))
+    return validate_decision(_json_object(path), require_input_bundle=True)
 
 
 def write_decision_and_ledger(
     *, decision: dict[str, Any], decision_path: str | Path, ledger_path: str | Path,
-    replace_ledger: bool = False,
 ) -> tuple[Path, Path]:
-    validate_decision(decision)
+    validate_decision(decision, require_input_bundle=True)
     decision_path = Path(decision_path)
     ledger_path = Path(ledger_path)
-    atomic_write_json(decision_path, decision)
     signal_id = _canonical_sha256({
         "model_version": MODEL_VERSION,
         "decision_time": decision["decision_time"],
@@ -873,17 +958,23 @@ def write_decision_and_ledger(
         "generator_version": decision["generator_version"],
         "code_commit_sha": decision["code_commit_sha"],
         "decision_status": "proxy_action", "action": decision["action"],
+        "personal_action_status": decision["personal_action_status"],
+        "data_grade": decision["data_grade"],
+        "confidence_score": decision["confidence"]["score"],
+        "confidence_label": decision["confidence"]["label"],
         "current_price": decision["current_price"], "scenario_values": decision["scenario_values"],
         "valuation_entry_ceiling": decision["valuation_entry_ceiling"],
         "execution_buy_prices": decision["execution_buy_prices"],
         "execution_anchor_price": decision["execution_anchor_price"],
         "execution_policy_version": decision["execution_policy_version"],
+        "execution_allocation_weights": decision["execution_allocation_weights"],
         "reduction_review_price": decision["reduction_review_price"],
         "input_sha256": {key: value["sha256"] for key, value in decision["sources"].items()},
         "calculation_sha256": decision["calculation_sha256"],
+        "input_bundle": decision["input_bundle"],
         "performance": decision["performance_tracking"], "operational_eligible": False,
     }
-    if ledger_path.exists() and not replace_ledger:
+    if ledger_path.exists():
         ledger = _json_object(ledger_path)
         if ledger.get("ledger_version") != LEDGER_VERSION or not isinstance(ledger.get("records"), list):
             raise DecisionModelV2Error("Decision Model v2 ledger is invalid")
@@ -892,6 +983,7 @@ def write_decision_and_ledger(
     existing = next((row for row in ledger["records"] if row.get("signal_id") == signal_id), None)
     if existing is not None and existing != record:
         raise DecisionModelV2Error("Decision Model v2 ledger signal collision")
+    atomic_write_json(decision_path, decision)
     if existing is None:
         ledger["records"].append(record)
         atomic_write_json(ledger_path, ledger)

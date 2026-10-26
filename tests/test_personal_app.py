@@ -10,7 +10,11 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from stocklens.personal import decision_model
-from stocklens.personal.decision_model_v2 import build_proxy_decision, write_decision_and_ledger
+from stocklens.personal.decision_input_bundle import create_input_bundle
+from stocklens.personal.decision_model_v2 import (
+    build_proxy_decision_from_bundle,
+    write_decision_and_ledger,
+)
 from stocklens.personal.decision_evidence import (
     AUDIT_VERSION,
     REQUIRED_REQUIREMENT_IDS,
@@ -278,6 +282,24 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     consensus_bytes = json.dumps(_top10_consensus_fixture(), sort_keys=True).encode("utf-8")
     consensus_path = top10_dir / "top100-consensus.json"
     consensus_path.write_bytes(consensus_bytes)
+    consensus_sha = hashlib.sha256(consensus_bytes).hexdigest()
+    consensus_evidence = top10_dir / "consensus-evidence" / "2026-10-14" / f"{consensus_sha}.json"
+    consensus_evidence.parent.mkdir(parents=True)
+    consensus_evidence.write_bytes(consensus_bytes)
+    (top10_dir / "consensus-evidence" / "manifest.json").write_text(
+        json.dumps({
+            "version": 1,
+            "artifacts": {
+                consensus_sha: {
+                    "evidenceFile": f"consensus-evidence/2026-10-14/{consensus_sha}.json",
+                    "evidenceGeneratedAt": "2026-10-14T12:52:02.418Z",
+                    "evidenceCommitSha": None,
+                    "evidenceArtifactId": f"sha256:{consensus_sha}",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("STOCKLENS_TOP10_CONSENSUS_PATH", str(consensus_path))
     monkeypatch.setenv(
         "STOCKLENS_TOP10_CONSENSUS_SHA256",
@@ -354,14 +376,16 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
             **{f"P{index}": {"sector": "반도체", "etf": "SOXX"} for index in range(1, 7)},
         },
     }), encoding="utf-8")
-    v2_decision = build_proxy_decision(
-        price_history_path=price_history_path,
-        consensus_path=consensus_path,
-        valuation_history_path=valuation_path,
-        industry_map_path=industry_path,
-        macro_path=macro_path,
+    bundle_dir, _bundle_manifest, bundle_manifest_sha = create_input_bundle(
+        data_root=top10_dir,
         config_path=Path(__file__).parents[1] / "config" / "decision-model-v2.json",
+        decision_root=decision_dir,
         decision_time="2026-10-14T12:52:02.418Z",
+        code_commit_sha="b" * 40,
+    )
+    v2_decision = build_proxy_decision_from_bundle(
+        bundle_dir=bundle_dir,
+        manifest_sha256=bundle_manifest_sha,
         code_commit_sha="b" * 40,
     )
     v2_path = decision_dir / "nvda-decision-model-v2.1.json"
@@ -596,20 +620,20 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     for withdrawn in ("214.08", "203.42", "195.93", "188.43"):
         assert withdrawn not in nvda_rendered
     assert "operational_decision=null · operational_eligible=false" in nvda_rendered
-    assert "NVDA Decision Model v2.1 · proxy_action" in nvda_rendered
+    assert "NVDA Decision Model v2.1" in nvda_rendered
     assert "provider_homogeneous_proxy" in nvda_rendered
     assert "verified_action=null · operational_eligible=false" in nvda_rendered
     assert "현재 가격에서 1차 매수를 시작" in nvda_rendered
     assert nvda_metrics["Nasdaq Top10 proxy price"] == "$228.52"
     assert nvda_metrics["StockLens 공식 가격 원장"] == "unavailable"
-    assert nvda_metrics["현재 행동 · proxy"] == "분할매수 시작"
+    assert nvda_metrics["현재 행동 · 프록시"] == "분할매수 시작"
     assert nvda_metrics["목표 Forward 배수"] != "미생성"
-    assert nvda_metrics["프록시 신뢰도"] == f"{v2_decision['confidence']['score']}/100"
+    assert nvda_metrics["판단 신뢰도"] == f"{v2_decision['confidence']['score']}/100"
     assert nvda_metrics["가치평가상 진입 허용 상한"] != "미생성"
-    assert nvda_metrics["proxy 비중 축소 검토 기준"] != "미생성"
-    nvda_plain_text = " ".join(item.value for item in app.text)
-    assert "$228.52 / $217.09 / $205.67" in nvda_plain_text
-    assert "$$" not in nvda_plain_text
+    assert nvda_metrics["신규 매수 중단·비중 축소 검토"] != "미생성"
+    assert nvda_metrics["1차 33%"] == "$228.52"
+    assert nvda_metrics["2차 33%"] == "$217.09"
+    assert nvda_metrics["3차 34%"] == "$205.67"
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
@@ -619,6 +643,48 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert nvda_metrics["현재 행동"] == "비활성"
     assert "동일 가격일 2026-09-11 교차검증" not in " ".join(item.value for item in app.success)
 
+    # A newer mutable parent snapshot asks for refresh without invalidating the
+    # immutable decision bundle already used by the screen.
+    evidence_manifest_path = top10_dir / "consensus-evidence" / "manifest.json"
+    evidence_manifest = json.loads(evidence_manifest_path.read_text(encoding="utf-8"))
+    newer_consensus = dict(_top10_consensus_fixture())
+    newer_consensus["generatedAt"] = "2026-10-15T12:52:02.418Z"
+    newer_bytes = json.dumps(newer_consensus, sort_keys=True).encode("utf-8")
+    newer_sha = hashlib.sha256(newer_bytes).hexdigest()
+    newer_path = top10_dir / "consensus-evidence" / "2026-10-15" / f"{newer_sha}.json"
+    newer_path.parent.mkdir(parents=True)
+    newer_path.write_bytes(newer_bytes)
+    evidence_manifest["artifacts"][newer_sha] = {
+        "evidenceFile": f"consensus-evidence/2026-10-15/{newer_sha}.json",
+        "evidenceGeneratedAt": "2026-10-15T12:52:02.418Z",
+        "evidenceCommitSha": None,
+        "evidenceArtifactId": f"sha256:{newer_sha}",
+    }
+    evidence_manifest_path.write_text(json.dumps(evidence_manifest), encoding="utf-8")
+    app.run(timeout=APPTEST_TIMEOUT_SECONDS)
+    assert not app.exception
+    assert "새 입력 있음·판단 갱신 필요" in " ".join(item.value for item in app.info)
+
+    # Bundle corruption hides the actionable ladder and exposes the precise
+    # integrity error instead of falling back to mutable parent files.
+    bundled_consensus_path = Path(v2_decision["sources"]["consensus"]["path"])
+    bundled_consensus_bytes = bundled_consensus_path.read_bytes()
+    try:
+        bundled_consensus_path.write_bytes(bundled_consensus_bytes + b" ")
+        blocked_v2_app = AppTest.from_file(
+            str(Path(__file__).parents[1] / "personal_app.py")
+        ).run(timeout=APPTEST_TIMEOUT_SECONDS)
+        blocked_v2_app.selectbox[0].set_value("NVDA").run(timeout=APPTEST_TIMEOUT_SECONDS)
+        assert not blocked_v2_app.exception
+        blocked_text = " ".join(item.value for item in blocked_v2_app.error)
+        assert "Decision Model v2.1 무결성 검증 실패" in blocked_text
+        blocked_labels = [item.label for item in blocked_v2_app.metric]
+        assert "1차 33%" not in blocked_labels
+        assert "2차 33%" not in blocked_labels
+        assert "3차 34%" not in blocked_labels
+    finally:
+        bundled_consensus_path.write_bytes(bundled_consensus_bytes)
+
     # A stale P5 source becomes an archived diagnostic, while the independently
     # pinned v2.1 decision remains visible and does not ingest P5 inputs.
     p512_sources["macro"].write_text(json.dumps({"fixture": "changed-after-p5"}), encoding="utf-8")
@@ -627,7 +693,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "P5.1.2 보관 진단 자료" in stale_rendered
     assert "현재 macro 원본과 SHA가 달라 최신 계산에는 사용하지 않음" in stale_rendered
     assert "Decision Model v2.1 계산에는 유입되지 않음" in stale_rendered
-    assert "NVDA Decision Model v2.1 · proxy_action" in stale_rendered
+    assert "NVDA Decision Model v2.1" in stale_rendered
 
     original_builder = decision_model.build_decision_analysis_snapshot
 

@@ -10,10 +10,16 @@ import pytest
 from stocklens.personal.decision_model_v2 import (
     DecisionModelV2Error,
     build_proxy_decision,
+    build_proxy_decision_from_bundle,
     load_decision,
     preserve_existing_artifacts,
     validate_decision,
     write_decision_and_ledger,
+)
+from stocklens.personal.decision_input_bundle import (
+    create_input_bundle,
+    detect_parent_input_updates,
+    file_sha256,
 )
 
 
@@ -68,6 +74,21 @@ def _fixture(tmp_path: Path, *, price: float = 217.09, peer_count: int = 8) -> d
             "peerGroup": ["ai_chips", "networking", "analog_wireless", "chip_equipment", "chip_manufacturing"][index % 5],
         }
     consensus_path = _write(data / "top100-consensus.json", {"generatedAt": generated, "records": records})
+    evidence_hash = hashlib.sha256(consensus_path.read_bytes()).hexdigest()
+    evidence_path = data / "consensus-evidence" / "2026-10-19" / f"{evidence_hash}.json"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_bytes(consensus_path.read_bytes())
+    _write(data / "consensus-evidence" / "manifest.json", {
+        "version": 1,
+        "artifacts": {
+            evidence_hash: {
+                "evidenceFile": f"consensus-evidence/2026-10-19/{evidence_hash}.json",
+                "evidenceGeneratedAt": generated,
+                "evidenceCommitSha": None,
+                "evidenceArtifactId": f"sha256:{evidence_hash}",
+            }
+        },
+    })
     valuation_path = _write(data / "valuation-history.json", {"generatedAt": generated, "records": valuations})
     industry_path = _write(data / "industry-map.json", {"generatedAt": generated, "records": industries})
     macro_path = _write(data / "macro-snapshot.json", {
@@ -87,6 +108,22 @@ def _build(paths: dict[str, Path]) -> dict:
         macro_path=paths["macro"], config_path=paths["config"], decision_time=DECISION_TIME,
         code_commit_sha=TEST_COMMIT_SHA,
     )
+
+
+def _build_bundled(paths: dict[str, Path], private_root: Path) -> tuple[dict, Path, str]:
+    bundle_dir, _manifest, manifest_sha = create_input_bundle(
+        data_root=paths["price"].parent,
+        config_path=paths["config"],
+        decision_root=private_root / "decision",
+        decision_time=DECISION_TIME,
+        code_commit_sha=TEST_COMMIT_SHA,
+    )
+    decision = build_proxy_decision_from_bundle(
+        bundle_dir=bundle_dir,
+        manifest_sha256=manifest_sha,
+        code_commit_sha=TEST_COMMIT_SHA,
+    )
+    return decision, bundle_dir, manifest_sha
 
 
 def test_proxy_action_is_price_invariant_and_non_operational(tmp_path: Path) -> None:
@@ -219,21 +256,24 @@ def test_peer_group_diagnostics_do_not_replace_broad_proxy(tmp_path: Path) -> No
 
 def test_build_write_load_recalculate_round_trip(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
-    built = _build(paths)
+    built, _bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
     decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
     ledger_path = tmp_path / "private_data" / "decision" / "decision-model-v2.1-signal-ledger.json"
     write_decision_and_ledger(
         decision=built,
         decision_path=decision_path,
         ledger_path=ledger_path,
-        replace_ledger=True,
     )
     loaded = load_decision(decision_path)
-    rebuilt = _build(paths)
+    rebuilt = build_proxy_decision_from_bundle(
+        bundle_dir=built["input_bundle"]["path"],
+        manifest_sha256=built["input_bundle"]["manifest_sha256"],
+        code_commit_sha=TEST_COMMIT_SHA,
+    )
     assert loaded == built == rebuilt
     assert loaded["calculation_sha256"] == rebuilt["calculation_sha256"]
     assert loaded["code_commit_sha"] == TEST_COMMIT_SHA
-    assert loaded["generator_version"] == "decision-model-v2.1-generator-v2"
+    assert loaded["generator_version"] == "decision-model-v2.1-generator-v3"
 
 
 def test_legacy_v21_missing_meets_minimum_has_specific_error(tmp_path: Path) -> None:
@@ -248,7 +288,7 @@ def test_legacy_v21_missing_meets_minimum_has_specific_error(tmp_path: Path) -> 
 
 def test_existing_artifacts_are_archived_before_rebuild(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
-    result = _build(paths)
+    result, _bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
     decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
     ledger_path = tmp_path / "private_data" / "decision" / "decision-model-v2.1-signal-ledger.json"
     write_decision_and_ledger(decision=result, decision_path=decision_path, ledger_path=ledger_path)
@@ -268,7 +308,7 @@ def test_existing_artifacts_are_archived_before_rebuild(tmp_path: Path) -> None:
 
 def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
-    result = _build(paths)
+    result, bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
     decision_path = tmp_path / "private_data" / "decision" / "nvda-v2.json"
     ledger_path = tmp_path / "private_data" / "decision" / "ledger-v2.json"
     write_decision_and_ledger(decision=result, decision_path=decision_path, ledger_path=ledger_path)
@@ -286,8 +326,8 @@ def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path
         validate_decision(tampered)
 
     paths["macro"].write_text(json.dumps({"generatedAt": "2026-10-19T22:35:57Z", "score": 0}), encoding="utf-8")
-    with pytest.raises(DecisionModelV2Error, match="source hash"):
-        load_decision(decision_path)
+    assert load_decision(decision_path) == loaded
+    assert detect_parent_input_updates(bundle_dir)["new_input_available"] is True
 
 
 def test_artifact_tamper_of_execution_price_fails_closed(tmp_path: Path) -> None:
@@ -313,3 +353,115 @@ def test_decision_v21_has_no_p5_sources(tmp_path: Path) -> None:
         "price_history", "consensus", "valuation_history", "industry_map", "macro", "config"
     }
     assert not any("p5" in role.lower() for role in result["sources"])
+
+
+def test_bundle_consensus_byte_tamper_fails_closed(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    decision, bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
+    decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = tmp_path / "private_data" / "decision" / "ledger.json"
+    write_decision_and_ledger(decision=decision, decision_path=decision_path, ledger_path=ledger_path)
+    consensus_path = bundle_dir / "consensus.json"
+    consensus_path.write_bytes(consensus_path.read_bytes() + b" ")
+    with pytest.raises(DecisionModelV2Error, match="consensus .*hash mismatch"):
+        load_decision(decision_path)
+
+
+def test_bundle_manifest_hash_tamper_fails_closed(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    decision, bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
+    decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = tmp_path / "private_data" / "decision" / "ledger.json"
+    write_decision_and_ledger(decision=decision, decision_path=decision_path, ledger_path=ledger_path)
+    manifest_path = bundle_dir / "bundle-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["created_at"] = "2026-10-20T01:32:33Z"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(DecisionModelV2Error, match="manifest SHA-256 mismatch"):
+        load_decision(decision_path)
+
+
+def test_append_only_ledger_preserves_records_and_is_idempotent(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    private_root = tmp_path / "private_data"
+    first, _bundle, _manifest_sha = _build_bundled(paths, private_root)
+    decision_path = private_root / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = private_root / "decision" / "decision-model-v2.1-signal-ledger.json"
+    write_decision_and_ledger(decision=first, decision_path=decision_path, ledger_path=ledger_path)
+    original_record = json.loads(ledger_path.read_text(encoding="utf-8"))["records"][0]
+    write_decision_and_ledger(decision=first, decision_path=decision_path, ledger_path=ledger_path)
+    assert len(json.loads(ledger_path.read_text(encoding="utf-8"))["records"]) == 1
+
+    later_time = "2026-10-20T02:32:32.832654Z"
+    bundle_dir, _manifest, manifest_sha = create_input_bundle(
+        data_root=paths["price"].parent,
+        config_path=paths["config"],
+        decision_root=private_root / "decision",
+        decision_time=later_time,
+        code_commit_sha=TEST_COMMIT_SHA,
+    )
+    second = build_proxy_decision_from_bundle(
+        bundle_dir=bundle_dir,
+        manifest_sha256=manifest_sha,
+        code_commit_sha=TEST_COMMIT_SHA,
+    )
+    write_decision_and_ledger(decision=second, decision_path=decision_path, ledger_path=ledger_path)
+    records = json.loads(ledger_path.read_text(encoding="utf-8"))["records"]
+    assert len(records) == 2
+    assert records[0] == original_record
+    assert records[1]["decision_time"] == later_time
+
+
+def test_bundle_creation_blocks_future_source_before_promotion(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    macro = json.loads(paths["macro"].read_text(encoding="utf-8"))
+    macro["generatedAt"] = "2026-10-21T00:00:00Z"
+    paths["macro"].write_text(json.dumps(macro), encoding="utf-8")
+    with pytest.raises(ValueError, match="future data"):
+        create_input_bundle(
+            data_root=paths["price"].parent,
+            config_path=paths["config"],
+            decision_root=tmp_path / "private_data" / "decision",
+            decision_time=DECISION_TIME,
+            code_commit_sha=TEST_COMMIT_SHA,
+        )
+    bundle_root = tmp_path / "private_data" / "decision" / "input-bundles"
+    assert not bundle_root.exists() or not list(bundle_root.iterdir())
+
+
+def test_new_parent_consensus_is_update_not_integrity_failure(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    decision, bundle_dir, _manifest_sha = _build_bundled(paths, tmp_path / "private_data")
+    decision_path = tmp_path / "private_data" / "decision" / "nvda-decision-model-v2.1.json"
+    ledger_path = tmp_path / "private_data" / "decision" / "ledger.json"
+    write_decision_and_ledger(decision=decision, decision_path=decision_path, ledger_path=ledger_path)
+    manifest_path = paths["price"].parent / "consensus-evidence" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    newer = paths["price"].parent / "consensus-evidence" / "2026-10-20" / "new.json"
+    newer.parent.mkdir(parents=True, exist_ok=True)
+    newer.write_text("{}", encoding="utf-8")
+    newer_hash = hashlib.sha256(newer.read_bytes()).hexdigest()
+    newer_hashed = newer.with_name(f"{newer_hash}.json")
+    newer.rename(newer_hashed)
+    manifest["artifacts"][newer_hash] = {
+        "evidenceFile": f"consensus-evidence/2026-10-20/{newer_hash}.json",
+        "evidenceGeneratedAt": "2026-10-20T02:00:00Z",
+        "evidenceCommitSha": None,
+        "evidenceArtifactId": f"sha256:{newer_hash}",
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert load_decision(decision_path) == decision
+    update = detect_parent_input_updates(bundle_dir)
+    assert update["new_input_available"] is True
+    assert "consensus" in update["changed_roles"]
+
+
+def test_bundle_sources_are_internal_and_manifest_hash_is_recorded(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    decision, bundle_dir, manifest_sha = _build_bundled(paths, tmp_path / "private_data")
+    assert decision["input_bundle"]["manifest_sha256"] == manifest_sha
+    assert file_sha256(bundle_dir / "bundle-manifest.json") == manifest_sha
+    for source in decision["sources"].values():
+        Path(source["path"]).resolve().relative_to(bundle_dir.resolve())
+    assert decision["personal_action_status"] == "active_proxy"
+    assert decision["execution_allocation_weights"] == [33, 33, 34]

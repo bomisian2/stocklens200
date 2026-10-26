@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from stocklens.personal.decision_model_v2 import (
     DecisionModelV2Error,
     load_decision as load_decision_v2,
 )
+from stocklens.personal.decision_input_bundle import detect_parent_input_updates
 from stocklens.personal.market_data import compute_technical_snapshot
 from stocklens.personal.nvda_research_p511 import (
     NvdaResearchP511Error,
@@ -208,13 +210,51 @@ def load_nvda_p512_artifacts(
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
-def load_decision_v2_artifact(path_text: str, modified_ns: int) -> dict[str, Any]:
-    del modified_ns
+def load_decision_v2_artifact(
+    path_text: str, modified_ns: int, artifact_sha256: str
+) -> dict[str, Any]:
+    del modified_ns, artifact_sha256
     return load_decision_v2(path_text)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def load_decision_v2_update_status(
+    bundle_path: str, parent_signature: str
+) -> dict[str, Any]:
+    del parent_signature
+    return detect_parent_input_updates(bundle_path)
 
 
 def _mtime(path: Path) -> int:
     return path.stat().st_mtime_ns if path.exists() else 0
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper() if path.is_file() else ""
+
+
+def _decision_parent_signature(decision: dict[str, Any]) -> str:
+    bundle_path = Path(str((decision.get("input_bundle") or {}).get("path") or ""))
+    manifest_path = bundle_path / "bundle-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "bundle-manifest-unreadable"
+    paths = [
+        Path(str(row.get("original_local_path") or ""))
+        for row in manifest.get("sources") or []
+        if isinstance(row, dict) and row.get("role") != "consensus"
+    ]
+    selection = manifest.get("consensus_selection") or {}
+    paths.append(Path(str(selection.get("evidence_manifest_original_path") or "")))
+    metadata = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            metadata.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            metadata.append((str(path), None, None))
+    return hashlib.sha256(repr(metadata).encode("utf-8")).hexdigest()
 
 
 def _format_value(value: Any) -> str:
@@ -335,48 +375,69 @@ def _render_nvda_p512_research(
     )
 
 
-def _render_decision_model_v2(decision: dict[str, Any]) -> None:
-    st.subheader("NVDA Decision Model v2.1 · proxy_action")
+def _render_decision_model_v2(
+    decision: dict[str, Any], update_status: dict[str, Any]
+) -> None:
+    st.subheader("NVDA Decision Model v2.1")
     st.warning(
-        "provider_homogeneous_proxy · 낮은 신뢰도. 동일 공급자·동일 가격일·Forward 기간 ±90일 피어를 "
-        "사용한 잠정 행동 가격입니다. 가치평가 상한과 실제 실행 가격을 분리했으며 "
-        "verified_action과 운영 신호는 생성되지 않았습니다."
+        "개인 행동 상태 active_proxy · provider_homogeneous_proxy. "
+        "verified_action=null이며 공개 운영·자동주문 자격은 비활성입니다."
     )
+    if update_status.get("new_input_available"):
+        st.info("새 입력 있음·판단 갱신 필요 · 기존 판단과 입력 번들의 무결성은 유지됩니다.")
     price = decision["current_price"]
     values = decision["scenario_values"]
     calculation = decision["calculation"]
     peer_gate = decision["peer_gate"]
     with st.container(horizontal=True):
-        st.metric("Nasdaq Top10 proxy price", f"${price['value']:,.2f}", price["as_of"], border=True)
-        st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
-        st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
-        st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
+        st.metric("현재 행동 · 프록시", decision["action"], decision["personal_action_status"], border=True)
+        st.metric("판단 시각", decision["decision_time"], decision["market_session"], border=True)
         st.metric(
-            "프록시 신뢰도",
+            "판단 신뢰도",
             f"{decision['confidence']['score']}/100",
             decision["confidence"]["label"],
             border=True,
         )
-        st.metric("현재 행동 · proxy", decision["action"], "operational=false", border=True)
+        st.metric("데이터 등급", decision["data_grade"], "operational=false", border=True)
 
     st.success(decision["action_text"])
+    execution = decision.get("execution_buy_prices")
+    weights = decision.get("execution_allocation_weights")
+    if execution and weights:
+        st.markdown("#### 3회 실행 계획")
+        with st.container(horizontal=True):
+            for index, (value, weight) in enumerate(zip(execution, weights), start=1):
+                st.metric(f"{index}차 {weight}%", f"${value:,.2f}", border=True)
+        st.caption(
+            f"정책 {decision['execution_policy_version']} · 계획한 전체 NVDA 진입 비중 기준 · "
+            "현재가 / -5% / -10%"
+        )
+    else:
+        st.info("현재 행동에서는 실제 실행 주문 가격을 생성하지 않습니다.")
+    st.metric(
+        "신규 매수 중단·비중 축소 검토",
+        f"${decision['reduction_review_price']:,.2f}",
+        "proxy 기준 연구값 대비 +15%",
+        border=True,
+    )
+    st.caption(
+        f"가격 {price['as_of']} · 컨센서스 {decision['consensus']['period']} / "
+        f"{decision['consensus']['available_at']} · 무효화 조건: "
+        f"{decision['invalidation_conditions'][0]}"
+    )
+
+    st.markdown("#### 가치평가와 입력 상태")
+    with st.container(horizontal=True):
+        st.metric("Nasdaq Top10 proxy price", f"${price['value']:,.2f}", price["as_of"], border=True)
+        st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
+        st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
+        st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
     st.metric(
         "가치평가상 진입 허용 상한",
         f"${decision['valuation_entry_ceiling']:,.2f}",
         "실제 주문 가격 아님",
         border=True,
     )
-    execution = decision.get("execution_buy_prices")
-    if execution:
-        st.markdown("#### 실제 3회 실행 가격")
-        st.text(f"${execution[0]:,.2f} / ${execution[1]:,.2f} / ${execution[2]:,.2f}")
-        st.caption(
-            f"anchor=${decision['execution_anchor_price']:,.2f} · "
-            f"정책 {decision['execution_policy_version']} · 현재가 / -5% / -10%"
-        )
-    else:
-        st.info("현재 행동에서는 실제 실행 주문 가격을 생성하지 않습니다.")
-    st.metric("proxy 비중 축소 검토 기준", f"${decision['reduction_review_price']:,.2f}", "신규 매수 중단", border=True)
     st.caption(
         f"decision_time {decision['decision_time']} · 가격 {price['as_of']} · "
         f"컨센서스 {decision['consensus']['period']} / {decision['consensus']['available_at']} · "
@@ -1375,6 +1436,24 @@ elif ticker in DECISION_SUPPORTED_TICKERS:
             )
 
 if ticker == "NVDA":
+    if DECISION_V2_PATH.is_file():
+        try:
+            decision_v2 = load_decision_v2_artifact(
+                str(DECISION_V2_PATH),
+                _mtime(DECISION_V2_PATH),
+                _sha256(DECISION_V2_PATH),
+            )
+            bundle_path = str(decision_v2["input_bundle"]["path"])
+            update_status = load_decision_v2_update_status(
+                bundle_path,
+                _decision_parent_signature(decision_v2),
+            )
+            _render_decision_model_v2(decision_v2, update_status)
+        except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
+            st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
+    else:
+        st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
+
     p512_paths = (
         NVDA_P512_SUPERSESSION_PATH,
         NVDA_P512_PEER_PROXY_PATH,
@@ -1400,15 +1479,6 @@ if ticker == "NVDA":
                 st.error(f"NVDA P5.1.2 보관 진단 자료 검증 실패: {exc}")
     else:
         st.caption("NVDA P5.1.2 피어 게이트 연구 산출물이 아직 생성되지 않았습니다.")
-
-    if DECISION_V2_PATH.is_file():
-        try:
-            decision_v2 = load_decision_v2_artifact(str(DECISION_V2_PATH), _mtime(DECISION_V2_PATH))
-            _render_decision_model_v2(decision_v2)
-        except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
-            st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
-    else:
-        st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
 
 v23_self_history = _render_v23_comparison(
     ticker,
