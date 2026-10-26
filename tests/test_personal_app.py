@@ -826,6 +826,7 @@ def test_personal_app_loads_official_macro_snapshot_and_explains_directions(tmp_
     )
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("STOCKLENS_REGIME_SNAPSHOT_PATH", str(snapshot_path))
+    monkeypatch.setenv("STOCKLENS_ANALYSIS_AS_OF", payload["analysis_as_of"])
 
     app = AppTest.from_file(str(Path(__file__).parents[1] / "personal_app.py")).run(
         timeout=APPTEST_TIMEOUT_SECONDS

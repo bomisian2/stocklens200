@@ -1037,7 +1037,9 @@ st.info(
 qqq_path = DATA_DIR / "market" / "QQQ.csv"
 comparison_qqq = load_market(str(qqq_path), _mtime(qqq_path))
 qqq_manifest_path = DATA_DIR / "market" / "QQQ.manifest.json"
-analysis_as_of = datetime.now(timezone.utc).isoformat()
+analysis_as_of = os.environ.get("STOCKLENS_ANALYSIS_AS_OF") or datetime.now(
+    timezone.utc
+).isoformat()
 regime_error: str | None = None
 try:
     default_regime_snapshot = DATA_DIR / "macro" / "market_regime_snapshot.json"
