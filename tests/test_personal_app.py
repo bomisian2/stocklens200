@@ -623,17 +623,19 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "NVDA Decision Model v2.1" in nvda_rendered
     assert "provider_homogeneous_proxy" in nvda_rendered
     assert "verified_action=null · operational_eligible=false" in nvda_rendered
-    assert "현재 가격에서 1차 매수를 시작" in nvda_rendered
+    assert "현재 가격에서 제한적 분할매수 1차 실행" in nvda_rendered
     assert nvda_metrics["Nasdaq Top10 proxy price"] == "$228.52"
     assert nvda_metrics["StockLens 공식 가격 원장"] == "unavailable"
-    assert nvda_metrics["현재 행동 · 프록시"] == "분할매수 시작"
+    assert nvda_metrics["현재 행동 · 프록시"] == "제한적 분할매수"
+    assert nvda_metrics["최대 허용 투입"] == "계획 비중의 50%"
     assert nvda_metrics["목표 Forward 배수"] != "미생성"
     assert nvda_metrics["판단 신뢰도"] == f"{v2_decision['confidence']['score']}/100"
     assert nvda_metrics["가치평가상 진입 허용 상한"] != "미생성"
     assert nvda_metrics["신규 매수 중단·비중 축소 검토"] != "미생성"
-    assert nvda_metrics["1차 33%"] == "$228.52"
-    assert nvda_metrics["2차 33%"] == "$217.09"
-    assert nvda_metrics["3차 34%"] == "$205.67"
+    assert nvda_metrics["1차 17%"] == "$228.52"
+    assert nvda_metrics["2차 16%"] == "$217.09"
+    assert nvda_metrics["3차 17%"] == "$205.67"
+    assert "미투입 50%는 데이터·성과 확인 전 보류" in nvda_rendered
     assert nvda_metrics["자기 역사 정상 관심 후보"] != "미산출"
     assert nvda_metrics["국면 조정 후보 · 연구 전용"] == nvda_metrics["자기 역사 정상 관심 후보"]
     assert nvda_metrics["사용 표본"] == "36/36"
@@ -678,10 +680,14 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         assert not blocked_v2_app.exception
         blocked_text = " ".join(item.value for item in blocked_v2_app.error)
         assert "Decision Model v2.1 무결성 검증 실패" in blocked_text
+        blocked_metrics = {item.label: item.value for item in blocked_v2_app.metric}
+        assert blocked_metrics["현재 행동 · 프록시"] == "신규 진입 중단"
+        assert blocked_metrics["최대 허용 투입"] == "계획 비중의 0%"
+        assert "현재 가격에서" not in " ".join(item.value for item in blocked_v2_app.success)
         blocked_labels = [item.label for item in blocked_v2_app.metric]
-        assert "1차 33%" not in blocked_labels
-        assert "2차 33%" not in blocked_labels
-        assert "3차 34%" not in blocked_labels
+        assert "1차 17%" not in blocked_labels
+        assert "2차 16%" not in blocked_labels
+        assert "3차 17%" not in blocked_labels
     finally:
         bundled_consensus_path.write_bytes(bundled_consensus_bytes)
 

@@ -410,10 +410,15 @@ def _render_decision_model_v2(
     decision: dict[str, Any], update_status: dict[str, Any]
 ) -> None:
     st.subheader("NVDA Decision Model v2.1")
-    st.warning(
-        "개인 행동 상태 active_proxy · provider_homogeneous_proxy. "
+    blocked = decision["decision_status"] == "blocked"
+    status_message = (
+        f"개인 행동 상태 {decision['personal_action_status']} · provider_homogeneous_proxy. "
         "verified_action=null이며 공개 운영·자동주문 자격은 비활성입니다."
     )
+    if blocked:
+        st.error(status_message)
+    else:
+        st.warning(status_message)
     if update_status.get("new_input_available"):
         st.info("새 입력 있음·판단 갱신 필요 · 기존 판단과 입력 번들의 무결성은 유지됩니다.")
     price = decision["current_price"]
@@ -422,29 +427,43 @@ def _render_decision_model_v2(
     peer_gate = decision["peer_gate"]
     with st.container(horizontal=True):
         st.metric("현재 행동 · 프록시", decision["action"], decision["personal_action_status"], border=True)
-        st.metric("판단 시각", decision["decision_time"], decision["market_session"], border=True)
+        st.metric(
+            "최대 허용 투입",
+            f"계획 비중의 {decision['position_budget_percent']}%",
+            decision["personal_action_tier"],
+            border=True,
+        )
+
+    if blocked:
+        st.error(decision["action_text"])
+    else:
+        st.success(decision["action_text"])
+    execution = decision.get("execution_buy_prices")
+    weights = decision.get("execution_allocation_weights")
+    if execution and weights and not blocked:
+        st.markdown("#### 3회 실행 계획")
+        with st.container(horizontal=True):
+            for index, (value, weight) in enumerate(zip(execution, weights), start=1):
+                st.metric(f"{index}차 {weight}%", f"${value:,.2f}", border=True)
+        unallocated = 100 - int(decision["position_budget_percent"])
+        st.caption(
+            f"정책 {decision['execution_policy_version']} · 각 비율은 계획한 NVDA 전체 비중 기준 · "
+            f"현재가 / -5% / -10% · 미투입 {unallocated}%는 데이터·성과 확인 전 보류"
+        )
+    elif blocked:
+        st.info("차단 조건이 해소되기 전에는 실행 가격과 배분을 생성하지 않습니다.")
+    else:
+        st.info("현재 행동에서는 실제 실행 주문 가격을 생성하지 않습니다.")
+
+    with st.container(horizontal=True):
         st.metric(
             "판단 신뢰도",
             f"{decision['confidence']['score']}/100",
             decision["confidence"]["label"],
             border=True,
         )
+        st.metric("판단 시각", decision["decision_time"], decision["market_session"], border=True)
         st.metric("데이터 등급", decision["data_grade"], "operational=false", border=True)
-
-    st.success(decision["action_text"])
-    execution = decision.get("execution_buy_prices")
-    weights = decision.get("execution_allocation_weights")
-    if execution and weights:
-        st.markdown("#### 3회 실행 계획")
-        with st.container(horizontal=True):
-            for index, (value, weight) in enumerate(zip(execution, weights), start=1):
-                st.metric(f"{index}차 {weight}%", f"${value:,.2f}", border=True)
-        st.caption(
-            f"정책 {decision['execution_policy_version']} · 계획한 전체 NVDA 진입 비중 기준 · "
-            "현재가 / -5% / -10%"
-        )
-    else:
-        st.info("현재 행동에서는 실제 실행 주문 가격을 생성하지 않습니다.")
     st.metric(
         "신규 매수 중단·비중 축소 검토",
         f"${decision['reduction_review_price']:,.2f}",
@@ -1483,6 +1502,13 @@ if ticker == "NVDA":
             _render_decision_model_v2(decision_v2, update_status)
         except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
             st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
+            with st.container(horizontal=True):
+                st.metric("현재 행동 · 프록시", "신규 진입 중단", "blocked", border=True)
+                st.metric("최대 허용 투입", "계획 비중의 0%", "blocked", border=True)
+            st.caption(
+                "decision_status=blocked · personal_action_status=blocked · "
+                "입력·피어·시점·무결성 조건이 복구되기 전에는 실행 가격을 표시하지 않습니다."
+            )
     else:
         st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
 

@@ -9,6 +9,8 @@ import pytest
 
 from stocklens.personal.decision_model_v2 import (
     DecisionModelV2Error,
+    _confidence_position_policy,
+    _decision_calculation_sha256,
     build_proxy_decision,
     build_proxy_decision_from_bundle,
     load_decision,
@@ -135,7 +137,7 @@ def test_proxy_action_is_price_invariant_and_non_operational(tmp_path: Path) -> 
     bases = [row["scenario_values"]["base"] for row in results]
     assert multiples[0] == pytest.approx(multiples[1]) == pytest.approx(multiples[2])
     assert bases[0] == pytest.approx(bases[1]) == pytest.approx(bases[2])
-    assert [row["action"] for row in results] == ["분할매수 시작", "분할매수 시작", "신규 매수 중단·비중 축소 검토"]
+    assert [row["action"] for row in results] == ["제한적 분할매수", "제한적 분할매수", "신규 매수 중단·비중 축소 검토"]
     assert all(row["calculation"]["current_price_used_in_target_multiple"] is False for row in results)
     assert all(row["peer_gate"]["stability"]["current_price_used"] is False for row in results)
     assert all(row["verified_action"] is None and row["operational_eligible"] is False for row in results)
@@ -273,7 +275,7 @@ def test_build_write_load_recalculate_round_trip(tmp_path: Path) -> None:
     assert loaded == built == rebuilt
     assert loaded["calculation_sha256"] == rebuilt["calculation_sha256"]
     assert loaded["code_commit_sha"] == TEST_COMMIT_SHA
-    assert loaded["generator_version"] == "decision-model-v2.1-generator-v3"
+    assert loaded["generator_version"] == "decision-model-v2.1-generator-v4"
 
 
 def test_legacy_v21_missing_meets_minimum_has_specific_error(tmp_path: Path) -> None:
@@ -318,7 +320,7 @@ def test_artifact_and_source_hashes_fail_closed_and_ledger_is_versioned(tmp_path
     assert ledger["ledger_version"] == "decision-model-v2.1-signal-ledger-v1"
     assert len(ledger["records"]) == 1
     assert ledger["records"][0]["performance"]["return_6m"] is None
-    assert ledger["records"][0]["execution_policy_version"] == "current-price-ladder-v1"
+    assert ledger["records"][0]["execution_policy_version"] == "current-price-ladder-confidence-cap-v1"
 
     tampered = copy.deepcopy(result)
     tampered["calculation"]["target_forward_multiple"] += 1
@@ -464,4 +466,53 @@ def test_bundle_sources_are_internal_and_manifest_hash_is_recorded(tmp_path: Pat
     for source in decision["sources"].values():
         Path(source["path"]).resolve().relative_to(bundle_dir.resolve())
     assert decision["personal_action_status"] == "active_proxy"
-    assert decision["execution_allocation_weights"] == [33, 33, 34]
+    assert decision["personal_action_tier"] == "limited"
+    assert decision["position_budget_percent"] == 50
+    assert decision["execution_allocation_weights"] == [17, 16, 17]
+
+
+@pytest.mark.parametrize(
+    ("score", "tier", "budget", "weights", "action"),
+    [
+        (15, "exploratory", 25, [8, 8, 9], "탐색적 분할매수"),
+        (35, "limited", 50, [17, 16, 17], "제한적 분할매수"),
+        (50, "moderate", 75, [25, 25, 25], "분할매수"),
+        (60, "full", 100, [33, 33, 34], "분할매수"),
+    ],
+)
+def test_confidence_score_caps_position_budget(
+    score: int, tier: str, budget: int, weights: list[int], action: str
+) -> None:
+    policy = _confidence_position_policy(score)
+    assert policy == {
+        "personal_action_tier": tier,
+        "position_budget_percent": budget,
+        "execution_allocation_weights": weights,
+        "buy_action": action,
+    }
+    assert sum(policy["execution_allocation_weights"]) == policy["position_budget_percent"]
+
+
+def test_allocation_sum_must_equal_position_budget(tmp_path: Path) -> None:
+    decision = _build(_fixture(tmp_path))
+    decision["execution_allocation_weights"] = [8, 8, 8]
+    decision["calculation_sha256"] = _decision_calculation_sha256(decision)
+    with pytest.raises(DecisionModelV2Error, match="execution allocation"):
+        validate_decision(decision)
+
+
+def test_fundamental_invalidation_blocks_action_and_capital(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    consensus = json.loads(paths["consensus"].read_text(encoding="utf-8"))
+    consensus["records"]["NVDA"]["nextConsensusEps"] = 10.0
+    paths["consensus"].write_text(json.dumps(consensus), encoding="utf-8")
+    decision = _build(paths)
+    assert decision["fundamental_invalidation"]["triggered"] is True
+    assert decision["decision_status"] == "blocked"
+    assert decision["personal_action_status"] == "blocked"
+    assert decision["action"] == "신규 진입 중단"
+    assert decision["personal_action_tier"] == "blocked"
+    assert decision["position_budget_percent"] == 0
+    assert decision["execution_buy_prices"] is None
+    assert decision["execution_allocation_weights"] is None
+    validate_decision(decision)

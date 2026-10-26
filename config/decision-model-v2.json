@@ -1,7 +1,7 @@
 {
   "model_version": "stocklens-decision-model-v2.1.0",
   "policy_version": "provider-homogeneous-proxy-v2.1.0",
-  "execution_policy_version": "current-price-ladder-v1",
+  "execution_policy_version": "current-price-ladder-confidence-cap-v1",
   "ticker": "NVDA",
   "minimum_peers": 5,
   "forward_period_tolerance_days": 90,

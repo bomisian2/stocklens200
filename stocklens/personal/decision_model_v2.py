@@ -26,9 +26,9 @@ from .storage import atomic_write_bytes, atomic_write_json
 
 MODEL_VERSION = "stocklens-decision-model-v2.1.0"
 POLICY_VERSION = "provider-homogeneous-proxy-v2.1.0"
-EXECUTION_POLICY_VERSION = "current-price-ladder-v1"
+EXECUTION_POLICY_VERSION = "current-price-ladder-confidence-cap-v1"
 LEDGER_VERSION = "decision-model-v2.1-signal-ledger-v1"
-GENERATOR_VERSION = "decision-model-v2.1-generator-v3"
+GENERATOR_VERSION = "decision-model-v2.1-generator-v4"
 EXPECTED_PROVIDER = "nasdaq-analyst-earnings-forecast"
 EXPECTED_TICKER = "NVDA"
 PEER_GROUP_REQUIRED_FIELDS = {
@@ -132,6 +132,41 @@ def _number(value: Any, label: str, *, positive: bool = False) -> float:
 
 def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
+
+
+def _confidence_position_policy(confidence_score: int) -> dict[str, Any]:
+    """Return the versioned maximum position budget for a proxy decision."""
+    if isinstance(confidence_score, bool) or not isinstance(confidence_score, int):
+        raise DecisionModelV2Error("confidence score must be an integer")
+    if not 0 <= confidence_score <= 100:
+        raise DecisionModelV2Error("confidence score is outside the allowed range")
+    if confidence_score < 20:
+        return {
+            "personal_action_tier": "exploratory",
+            "position_budget_percent": 25,
+            "execution_allocation_weights": [8, 8, 9],
+            "buy_action": "탐색적 분할매수",
+        }
+    if confidence_score < 40:
+        return {
+            "personal_action_tier": "limited",
+            "position_budget_percent": 50,
+            "execution_allocation_weights": [17, 16, 17],
+            "buy_action": "제한적 분할매수",
+        }
+    if confidence_score < 60:
+        return {
+            "personal_action_tier": "moderate",
+            "position_budget_percent": 75,
+            "execution_allocation_weights": [25, 25, 25],
+            "buy_action": "분할매수",
+        }
+    return {
+        "personal_action_tier": "full",
+        "position_budget_percent": 100,
+        "execution_allocation_weights": [33, 33, 34],
+        "buy_action": "분할매수",
+    }
 
 
 def _source(path: Path) -> dict[str, str]:
@@ -630,32 +665,6 @@ def build_proxy_decision(
     consensus_cut_floor = eps["base"] * (1.0 - float(fundamental_rules["consensus_eps_cut_fraction"]))
     growth_floor = peer_growth * float(fundamental_rules["growth_floor_relative_to_peer_median"])
     fundamental_triggered = target_growth < growth_floor
-    execution_prices: list[float] | None
-    if fundamental_triggered:
-        action = "판단 차단"
-        action_text = "예상 EPS 성장률이 피어 중앙 성장률 아래여서 proxy_action을 생성하지 않음"
-        execution_prices = None
-    elif current >= reduction:
-        action = "신규 매수 중단·비중 축소 검토"
-        action_text = f"${reduction:,.2f} 이상에서는 신규 매수 중단·비중 축소 검토"
-        execution_prices = None
-    elif current <= valuation_entry_ceiling:
-        action = "분할매수 시작"
-        execution_prices = [current * float(multiplier) for multiplier in config["execution_ladder_multipliers"]]
-        action_text = (
-            "현재 가격에서 1차 매수를 시작 · "
-            f"${execution_prices[0]:,.2f} / ${execution_prices[1]:,.2f} / "
-            f"${execution_prices[2]:,.2f} 3회 분할"
-        )
-    elif current < values["base"]:
-        action = "대기"
-        action_text = f"현재는 매수하지 말고 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
-        execution_prices = None
-    else:
-        action = "대기"
-        action_text = f"현재는 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
-        execution_prices = None
-    valuation_entry_eps_floor = current / (target_multiple * entry_multiplier)
     confidence_reasons = ["회계 basis와 원본 PIT가 미검증된 동일 공급자 프록시"]
     confidence_score = 35
     if stability["wide_distribution"]:
@@ -664,6 +673,60 @@ def build_proxy_decision(
     if stability["status"] == "peer_unstable":
         confidence_score -= 10
         confidence_reasons.append("단일 피어 제거 시 목표 배수 변화가 정책 한도를 초과")
+    position_policy = _confidence_position_policy(confidence_score)
+
+    execution_prices: list[float] | None
+    execution_weights: list[int] | None
+    if fundamental_triggered:
+        decision_status = "blocked"
+        personal_action_status = "blocked"
+        action = "신규 진입 중단"
+        action_text = "예상 EPS 성장률이 피어 중앙 성장률 아래여서 신규 진입을 중단"
+        personal_action_tier = "blocked"
+        position_budget_percent = 0
+        execution_prices = None
+        execution_weights = None
+    elif current >= reduction:
+        decision_status = "proxy_action"
+        personal_action_status = "active_proxy"
+        action = "신규 매수 중단·비중 축소 검토"
+        action_text = f"${reduction:,.2f} 이상에서는 신규 매수 중단·비중 축소 검토"
+        personal_action_tier = position_policy["personal_action_tier"]
+        position_budget_percent = position_policy["position_budget_percent"]
+        execution_prices = None
+        execution_weights = None
+    elif current <= valuation_entry_ceiling:
+        decision_status = "proxy_action"
+        personal_action_status = "active_proxy"
+        action = position_policy["buy_action"]
+        personal_action_tier = position_policy["personal_action_tier"]
+        position_budget_percent = position_policy["position_budget_percent"]
+        execution_prices = [current * float(multiplier) for multiplier in config["execution_ladder_multipliers"]]
+        execution_weights = position_policy["execution_allocation_weights"]
+        action_text = (
+            f"현재 가격에서 {action} 1차 실행 · "
+            f"${execution_prices[0]:,.2f} / ${execution_prices[1]:,.2f} / "
+            f"${execution_prices[2]:,.2f} 3회 분할 · 계획 비중 최대 {position_budget_percent}%"
+        )
+    elif current < values["base"]:
+        decision_status = "proxy_action"
+        personal_action_status = "active_proxy"
+        action = "대기"
+        action_text = f"현재는 매수하지 말고 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
+        personal_action_tier = position_policy["personal_action_tier"]
+        position_budget_percent = position_policy["position_budget_percent"]
+        execution_prices = None
+        execution_weights = None
+    else:
+        decision_status = "proxy_action"
+        personal_action_status = "active_proxy"
+        action = "대기"
+        action_text = f"현재는 가치평가상 진입 허용 상한 ${valuation_entry_ceiling:,.2f}까지 기다림"
+        personal_action_tier = position_policy["personal_action_tier"]
+        position_budget_percent = position_policy["position_budget_percent"]
+        execution_prices = None
+        execution_weights = None
+    valuation_entry_eps_floor = current / (target_multiple * entry_multiplier)
     sources = {role: _source(path) for role, path in paths.items()}
     decision: dict[str, Any] = {
         "code_commit_sha": commit_sha,
@@ -673,8 +736,10 @@ def build_proxy_decision(
         "ticker": EXPECTED_TICKER,
         "decision_time": decision_at.isoformat().replace("+00:00", "Z"),
         "generated_at": decision_at.isoformat().replace("+00:00", "Z"),
-        "decision_status": "proxy_action",
-        "personal_action_status": "active_proxy",
+        "decision_status": decision_status,
+        "personal_action_status": personal_action_status,
+        "personal_action_tier": personal_action_tier,
+        "position_budget_percent": position_budget_percent,
         "data_grade": "provider_homogeneous_proxy",
         "proxy_classification": "provider_homogeneous_proxy",
         "confidence": {
@@ -719,7 +784,7 @@ def build_proxy_decision(
         "execution_buy_prices": execution_prices,
         "execution_anchor_price": current if execution_prices else None,
         "execution_policy_version": EXECUTION_POLICY_VERSION,
-        "execution_allocation_weights": [33, 33, 34] if execution_prices else None,
+        "execution_allocation_weights": execution_weights,
         "legacy_buy_prices_status": "deprecated_v2.1",
         "reduction_review_price": reduction,
         "current_implied_forward_multiple": current / eps["base"],
@@ -819,9 +884,16 @@ def validate_decision(
     if decision.get("generator_version") != GENERATOR_VERSION:
         raise DecisionModelV2Error("Decision Model v2 generator version mismatch")
     _commit_sha(decision.get("code_commit_sha"))
-    if decision.get("decision_status") != "proxy_action" or decision.get("proxy_classification") != "provider_homogeneous_proxy":
+    if decision.get("proxy_classification") != "provider_homogeneous_proxy":
         raise DecisionModelV2Error("Decision Model v2 proxy state mismatch")
-    if decision.get("personal_action_status") != "active_proxy":
+    decision_status = decision.get("decision_status")
+    personal_action_status = decision.get("personal_action_status")
+    if decision_status not in {"proxy_action", "blocked"}:
+        raise DecisionModelV2Error("Decision Model v2 decision state mismatch")
+    if (decision_status, personal_action_status) not in {
+        ("proxy_action", "active_proxy"),
+        ("blocked", "blocked"),
+    }:
         raise DecisionModelV2Error("Decision Model v2 personal action state mismatch")
     if decision.get("data_grade") != "provider_homogeneous_proxy":
         raise DecisionModelV2Error("Decision Model v2 data grade mismatch")
@@ -843,6 +915,16 @@ def validate_decision(
         expected_minimum = int(group["count"]) >= int(group["minimum_required"])
         if group["meets_minimum"] is not expected_minimum:
             raise DecisionModelV2Error("peer_gate group schema mismatch: meets_minimum inconsistent")
+    early_weights = decision.get("execution_allocation_weights")
+    early_budget = decision.get("position_budget_percent")
+    if isinstance(early_weights, list) and sum(early_weights) != early_budget:
+        raise DecisionModelV2Error("execution allocation must equal position budget")
+    if decision_status == "blocked" and (
+        decision.get("execution_buy_prices") is not None
+        or early_weights is not None
+        or early_budget != 0
+    ):
+        raise DecisionModelV2Error("blocked decision must not allocate capital")
     if decision.get("calculation_sha256") != _decision_calculation_sha256(decision):
         raise DecisionModelV2Error("Decision Model v2 calculation SHA-256 mismatch")
     sources = decision.get("sources")
@@ -906,15 +988,39 @@ def validate_decision(
         raise DecisionModelV2Error("ambiguous legacy buy_prices field is not allowed")
     if decision.get("execution_policy_version") != EXECUTION_POLICY_VERSION:
         raise DecisionModelV2Error("Decision Model v2 execution policy mismatch")
-    expected_weights = [33, 33, 34] if decision.get("execution_buy_prices") else None
-    if decision.get("execution_allocation_weights") != expected_weights:
-        raise DecisionModelV2Error("Decision Model v2 execution allocation mismatch")
+    confidence_score = int(_number(decision.get("confidence", {}).get("score"), "confidence score"))
+    position_policy = _confidence_position_policy(confidence_score)
+    action = decision.get("action")
+    ladder = decision.get("execution_buy_prices")
+    weights = decision.get("execution_allocation_weights")
+    position_budget = decision.get("position_budget_percent")
+    if decision_status == "blocked":
+        if action != "신규 진입 중단" or decision.get("personal_action_tier") != "blocked":
+            raise DecisionModelV2Error("blocked decision action mismatch")
+        if position_budget != 0 or ladder is not None or weights is not None:
+            raise DecisionModelV2Error("blocked decision must not allocate capital")
+        if decision.get("fundamental_invalidation", {}).get("triggered") is not True:
+            raise DecisionModelV2Error("blocked decision reason mismatch")
+    else:
+        if decision.get("personal_action_tier") != position_policy["personal_action_tier"]:
+            raise DecisionModelV2Error("Decision Model v2 personal action tier mismatch")
+        if position_budget != position_policy["position_budget_percent"]:
+            raise DecisionModelV2Error("Decision Model v2 position budget mismatch")
+        buy_actions = {"탐색적 분할매수", "제한적 분할매수", "분할매수"}
+        if action in buy_actions:
+            if action != position_policy["buy_action"]:
+                raise DecisionModelV2Error("Decision Model v2 confidence action mismatch")
+            if weights != position_policy["execution_allocation_weights"]:
+                raise DecisionModelV2Error("Decision Model v2 execution allocation mismatch")
+            if sum(weights) != position_budget:
+                raise DecisionModelV2Error("execution allocation must equal position budget")
+        elif weights is not None:
+            raise DecisionModelV2Error("non-buy action must not allocate execution weights")
     ceiling = _number(decision.get("valuation_entry_ceiling"), "entry ceiling", positive=True)
     if not math.isclose(ceiling, base * 0.97, rel_tol=1e-12):
         raise DecisionModelV2Error("Decision Model v2 entry ceiling arithmetic mismatch")
     current = _number(decision.get("current_price", {}).get("value"), "current price", positive=True)
-    ladder = decision.get("execution_buy_prices")
-    if decision.get("action") == "분할매수 시작":
+    if action in {"탐색적 분할매수", "제한적 분할매수", "분할매수"}:
         if not isinstance(ladder, list) or len(ladder) != 3:
             raise DecisionModelV2Error("Decision Model v2 execution ladder mismatch")
         expected = [current, current * 0.95, current * 0.90]
@@ -957,8 +1063,10 @@ def write_decision_and_ledger(
         "decision_time": decision["decision_time"], "model_version": MODEL_VERSION,
         "generator_version": decision["generator_version"],
         "code_commit_sha": decision["code_commit_sha"],
-        "decision_status": "proxy_action", "action": decision["action"],
+        "decision_status": decision["decision_status"], "action": decision["action"],
         "personal_action_status": decision["personal_action_status"],
+        "personal_action_tier": decision["personal_action_tier"],
+        "position_budget_percent": decision["position_budget_percent"],
         "data_grade": decision["data_grade"],
         "confidence_score": decision["confidence"]["score"],
         "confidence_label": decision["confidence"]["label"],
