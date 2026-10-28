@@ -267,6 +267,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
         ]},
     }), encoding="utf-8")
     monkeypatch.setenv("STOCKLENS_PERSONAL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STOCKLENS_DEFAULT_TICKER", "AMAT")
     v23_fixture_path = Path(__file__).parent / "fixtures" / "v23_public_ledger_minimal.json"
     v23_payload = json.loads(v23_fixture_path.read_text(encoding="utf-8"))
     for v23_ticker, count in EXPECTED_HISTORICAL_ROWS.items():
