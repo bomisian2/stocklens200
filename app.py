@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,7 +12,7 @@ from stocklens.storage import SnapshotError, SnapshotStore
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("STOCKLENS_DATA_DIR", ROOT / "data"))
 SOURCE_LABELS = {
     "nasdaq_screener": "Nasdaq 전체 상장 종목",
     "yahoo_screener": "Yahoo 거래소 스크리너",
@@ -58,6 +59,17 @@ def kst_display(value: str | None) -> str:
         return str(value)
 
 
+def load_optional_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 st.title("StockLens 200 v2")
 st.caption("미국 거래소 상장기업 시가총액 Top 200 · Actions 수집 / 앱은 검증된 스냅샷만 표시")
 
@@ -95,6 +107,42 @@ metrics[0].metric("검증 기업 수", f"{len(frame):,}개")
 metrics[1].metric("후보 상장증권", f"{int(status.get('candidate_count') or 0):,}개")
 metrics[2].metric("200위 시가총액", f"${frame['market_cap'].iloc[-1] / 1e9:,.1f}B")
 metrics[3].metric("거래 세션", market_session)
+
+signal_status = load_optional_json(DATA_DIR / "signal_status.json")
+signals_path = DATA_DIR / "signals.csv"
+top_signals = pd.DataFrame()
+if (
+    signals_path.exists()
+    and signal_status.get("data_state") in {"healthy", "degraded"}
+    and str(signal_status.get("market_session_date")) == market_session
+    and bool(signal_status.get("eligible_for_display"))
+):
+    try:
+        top_signals = pd.read_csv(signals_path)
+    except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        top_signals = pd.DataFrame()
+if not top_signals.empty:
+    st.subheader("검증된 단기 매수 신호")
+    st.caption(
+        "고정 규칙의 시점별 검증에서 최소 표본, QQQ 초과수익, 손익비, "
+        "95% 신뢰구간과 다중검정 보정을 모두 통과한 현재 신호만 표시합니다."
+    )
+    top_view = top_signals[
+        [
+            "ticker", "strategy_label", "signal_date", "entry_expected_date",
+            "best_horizon", "validation_samples", "win_rate", "expected_return",
+            "average_excess_return", "payoff_ratio", "mtm_max_drawdown",
+            "average_mae", "confidence",
+        ]
+    ].rename(columns={
+        "ticker": "티커", "strategy_label": "전략", "signal_date": "신호일",
+        "entry_expected_date": "진입 예정일", "best_horizon": "검증기간",
+        "validation_samples": "독립표본", "win_rate": "승률",
+        "expected_return": "기대수익", "average_excess_return": "QQQ 초과수익",
+        "payoff_ratio": "손익비", "mtm_max_drawdown": "보유 중 MTM 낙폭",
+        "average_mae": "평균 MAE", "confidence": "신뢰도",
+    })
+    st.dataframe(top_view, hide_index=True, width="stretch")
 
 with st.sidebar:
     st.header("데이터 상태")
@@ -169,9 +217,46 @@ with tab_value:
         st.write("예정 검증: EPS 일관성 · 이익/매출 성장 · 잉여현금흐름 · 순부채 · 업종별 PER 범위")
 
 with tab_signal:
-    signals_path = DATA_DIR / "signals.csv"
-    if signals_path.exists():
-        st.dataframe(pd.read_csv(signals_path), hide_index=True, width="stretch")
+    backtests_path = DATA_DIR / "signal_backtests.csv"
+    if signals_path.exists() and backtests_path.exists():
+        if signal_status.get("data_state") != "healthy":
+            st.warning("가격 이력의 일부가 누락되거나 최신성이 검증되지 않아 신규 신호 게시를 보류합니다.")
+        if top_signals.empty:
+            st.info("현재 최소 표본과 통계 검증을 모두 통과한 활성 매수 신호가 없습니다.")
+        else:
+            st.dataframe(top_signals, hide_index=True, width="stretch")
+        backtests = pd.read_csv(backtests_path)
+        state_labels = {
+            "research_candidate": "연구 후보",
+            "independent_validated": "독립 검증 통과",
+            "data_insufficient": "데이터 불충분",
+            "not_validated": "검증 미통과",
+        }
+        if "validation_state" in backtests:
+            backtests["validation_state_label"] = backtests["validation_state"].map(
+                state_labels
+            ).fillna(backtests["validation_state"])
+        st.subheader("전략별 워크포워드·최종 독립 검증")
+        st.dataframe(
+            backtests[
+                [
+                    "ticker", "strategy_label", "horizon", "train_samples",
+                    "walk_forward_samples", "final_samples", "final_win_rate",
+                    "final_average_return", "final_payoff_ratio",
+                    "final_mtm_max_drawdown", "final_average_mae", "final_average_mfe",
+                    "final_average_excess_return", "fdr_qvalue",
+                    "validation_state_label", "hold_reason",
+                ]
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "신호일 종가까지의 정보만 사용하고 다음 거래일 시가에 진입합니다. "
+            "개발 구간의 순차 워크포워드와 마지막 20% 독립 확인 구간을 분리합니다. "
+            "거래비용 0.2%, 0.6% 스트레스, 블록 부트스트랩과 의존성 보수 FDR을 반영합니다. "
+            "현재 Top 200을 과거 전체에 적용하므로 과거 구성종목 편향은 아직 남아 있습니다."
+        )
     else:
         st.warning("3단계 미완료: 워크포워드 단기 신호와 QQQ 초과수익 검증 결과가 아직 없습니다.")
         st.write("표본 수 기준을 통과하기 전에는 대시보드 상단에 매수 신호를 표시하지 않습니다.")
