@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "dataset_kind": "isolated_research_preview",
+  "fixture": false,
+  "ticker": "GOOGL",
+  "company_name": "Alphabet Inc.",
+  "research_grade": "B",
+  "status_label": "연구 참고",
+  "judgement": "hold",
+  "operational_use": false,
+  "eligible_for_signals": false,
+  "eligible_for_ranking": false,
+  "eligible_for_alerts": false,
+  "price_comparison_enabled": false,
+  "formal_fair_value": null,
+  "official_midpoint": null,
+  "financial_as_of": "2026-06-30",
+  "market_session_date": "2026-10-09",
+  "market_price_as_of_utc": "2026-10-09T20:00:00Z",
+  "research_per_share_range": {
+    "low": 41.63,
+    "high": 84.88,
+    "currency": "USD",
+    "range_type": "outer_mechanical_research_envelope",
+    "confidence_interval": false
+  },
+  "branches": [
+    {
+      "id": "preferred_as_claim",
+      "title": "우선주 청구권 차감",
+      "low": 41.63,
+      "high": 83.33,
+      "description": "의무전환우선주 $19.0B를 청구권으로 차감하고 전환 희석은 적용하지 않습니다.",
+      "share_range_billions": "12.230~12.524"
+    },
+    {
+      "id": "preferred_if_converted",
+      "title": "우선주 전환 희석",
+      "low": 42.96,
+      "high": 84.88,
+      "description": "우선주 청구권은 차감하지 않고 최대 전환비율과 미가득 주식보상 희석 경계를 사용합니다.",
+      "share_range_billions": "12.230~12.578"
+    }
+  ],
+  "top_uncertainties": [
+    {
+      "rank": 1,
+      "name": "WACC",
+      "mechanical_per_share_span": 63.36,
+      "basis": "9%~15% 연구 그리드. 정식 beta와 WACC는 아직 없습니다.",
+      "warning": "낮은 WACC 영역에는 터미널가치 비중 80% 초과 셀이 포함됩니다."
+    },
+    {
+      "rank": 2,
+      "name": "5년 성장·영업마진",
+      "mechanical_per_share_span": 40.36,
+      "basis": "기존 v2.3 명시적 연구 경로이며 회사 가이던스나 컨센서스가 아닙니다.",
+      "warning": "비교용 진단값으로 공식 전망이 아닙니다."
+    },
+    {
+      "rank": 3,
+      "name": "투자자산 경제가치",
+      "mechanical_per_share_span": 31.29,
+      "basis": "공식 장부가 $388.061B의 0%~100% 인식 경계입니다.",
+      "warning": "세금, 유동성, 매각제한과 전략적 보유 목적이 미확정입니다."
+    }
+  ],
+  "bridge_summary": {
+    "enterprise_value_low_billions": 647.648,
+    "enterprise_value_high_billions": 757.346,
+    "cash_and_investments_billions": 388.061,
+    "financial_debt_billions": 100.164,
+    "nci_proxy_billions": 7.1,
+    "preferred_liquidation_billions": 19.0,
+    "operating_lease_policy": "GAAP EBIT에 리스비용이 포함되므로 별도 차감하지 않음",
+    "investment_recognition_policy": "0%~100% 장부가 경계, 선택된 haircut 없음"
+  },
+  "official_source": {
+    "url": "https://www.sec.gov/Archives/edgar/data/1652044/000165204426000071/goog-20260630.htm",
+    "filing_index_url": "https://www.sec.gov/Archives/edgar/data/1652044/000165204426000071/0001652044-26-000071-index.htm",
+    "accession": "0001652044-26-000071",
+    "accepted_at_utc": "2026-07-23T01:15:54Z",
+    "raw_file_hash_verified": false,
+    "local_acquisition_status": "HTTP 403 · 재시도 및 우회 없음"
+  },
+  "formal_blockers": [
+    "정식 beta·WACC와 검증된 다년간 전망이 없습니다.",
+    "투자자산의 세금·유동성·영업/비영업 분류가 확정되지 않았습니다.",
+    "point-in-time 완전희석주식과 capped-call 효과가 미확정입니다.",
+    "공식 10-Q 로컬 원본 해시를 확보하지 못했습니다."
+  ],
+  "disclaimer": "이 범위는 목표가격·매수구간·저평가율·투자 권고가 아닙니다."
+}
