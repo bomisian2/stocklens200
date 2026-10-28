@@ -26,6 +26,7 @@ from stocklens.personal.decision_model_v2 import (
     load_decision as load_decision_v2,
 )
 from stocklens.personal.decision_input_bundle import detect_parent_input_updates
+from stocklens.personal.decision_freshness import assess_decision_freshness
 from stocklens.personal.market_data import compute_technical_snapshot
 from stocklens.personal.nvda_research_p511 import (
     NvdaResearchP511Error,
@@ -407,26 +408,61 @@ def _render_nvda_p512_research(
 
 
 def _render_decision_model_v2(
-    decision: dict[str, Any], update_status: dict[str, Any]
+    decision: dict[str, Any], update_status: dict[str, Any], *, evaluated_at: datetime
 ) -> None:
-    st.subheader("NVDA Decision Model v2.1")
+    st.subheader("NVDA · 오늘의 개인 운용 판단")
     blocked = decision["decision_status"] == "blocked"
     status_message = (
         f"개인 행동 상태 {decision['personal_action_status']} · provider_homogeneous_proxy. "
         "verified_action=null이며 공개 운영·자동주문 자격은 비활성입니다."
     )
-    if blocked:
-        st.error(status_message)
-    else:
-        st.warning(status_message)
-    if update_status.get("new_input_available"):
-        st.info("새 입력 있음·판단 갱신 필요 · 기존 판단과 입력 번들의 무결성은 유지됩니다.")
     price = decision["current_price"]
     values = decision["scenario_values"]
     calculation = decision["calculation"]
     peer_gate = decision["peer_gate"]
+    execution = decision.get("execution_buy_prices")
+    weights = decision.get("execution_allocation_weights")
+    compact_plan = ""
+    if execution and weights and not blocked:
+        compact_plan = " · ".join(
+            f"{index}차 ${value:,.2f} ({weight}%)"
+            for index, (value, weight) in enumerate(zip(execution, weights), start=1)
+        )
+    st.markdown(
+        f"**현재 행동: {decision['action']}** · 현재가 ${price['value']:,.2f} · "
+        f"최대 투입 {decision['position_budget_percent']}%"
+    )
+    if compact_plan:
+        st.markdown(f"**실행 가격:** {compact_plan} · 미투입 {100 - int(decision['position_budget_percent'])}%")
+    freshness = assess_decision_freshness(
+        market_session=decision["market_session"],
+        evaluated_at=evaluated_at,
+    )
+    if blocked:
+        st.error(status_message)
+    elif freshness["status"] == "future_blocked":
+        st.error(
+            "가격 기준일이 마지막 완료 시장 세션보다 미래입니다. 신규 행동 판단을 생성하거나 실행하지 않습니다."
+        )
+    elif freshness["status"] == "stale":
+        st.warning(
+            "데이터 갱신 필요 · "
+            f"판단 가격일 {freshness['market_session']} / 마지막 완료 시장 세션 "
+            f"{freshness['expected_session']} / {freshness['lag_sessions']}거래일 지연. "
+            "아래 값은 기존 고정 판단이며 stale 자료로 새 판단을 생성하지 않습니다."
+        )
+    else:
+        st.success(f"데이터 최신 · 마지막 완료 시장 세션 {freshness['expected_session']}")
+    if update_status.get("new_input_available"):
+        st.info("새 입력 있음·판단 갱신 필요 · 기존 판단과 입력 번들의 무결성은 유지됩니다.")
     with st.container(horizontal=True):
         st.metric("현재 행동 · 프록시", decision["action"], decision["personal_action_status"], border=True)
+        st.metric(
+            "현재가격",
+            f"${price['value']:,.2f}",
+            f"가격 기준일 {price['as_of']}",
+            border=True,
+        )
         st.metric(
             "최대 허용 투입",
             f"계획 비중의 {decision['position_budget_percent']}%",
@@ -436,12 +472,12 @@ def _render_decision_model_v2(
 
     if blocked:
         st.error(decision["action_text"])
-    else:
+    elif freshness["status"] == "current":
         st.success(decision["action_text"])
-    execution = decision.get("execution_buy_prices")
-    weights = decision.get("execution_allocation_weights")
+    else:
+        st.warning(f"기존 고정 행동 · {decision['action_text']}")
     if execution and weights and not blocked:
-        st.markdown("#### 3회 실행 계획")
+        st.markdown("#### 3회 실행 가격과 전체 계획 비중 배분")
         with st.container(horizontal=True):
             for index, (value, weight) in enumerate(zip(execution, weights), start=1):
                 st.metric(f"{index}차 {weight}%", f"${value:,.2f}", border=True)
@@ -462,178 +498,97 @@ def _render_decision_model_v2(
             decision["confidence"]["label"],
             border=True,
         )
-        st.metric("판단 시각", decision["decision_time"], decision["market_session"], border=True)
-        st.metric("데이터 등급", decision["data_grade"], "operational=false", border=True)
-    st.metric(
-        "신규 매수 중단·비중 축소 검토",
-        f"${decision['reduction_review_price']:,.2f}",
-        "proxy 기준 연구값 대비 +15%",
-        border=True,
-    )
-    st.caption(
-        f"가격 {price['as_of']} · 컨센서스 {decision['consensus']['period']} / "
-        f"{decision['consensus']['available_at']} · 무효화 조건: "
-        f"{decision['invalidation_conditions'][0]}"
-    )
-
-    st.markdown("#### 가치평가와 입력 상태")
-    with st.container(horizontal=True):
-        st.metric("Nasdaq Top10 proxy price", f"${price['value']:,.2f}", price["as_of"], border=True)
-        st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
-        st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
-        st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
-    st.metric(
-        "가치평가상 진입 허용 상한",
-        f"${decision['valuation_entry_ceiling']:,.2f}",
-        "실제 주문 가격 아님",
-        border=True,
-    )
-    st.caption(
-        f"decision_time {decision['decision_time']} · 가격 {price['as_of']} · "
-        f"컨센서스 {decision['consensus']['period']} / {decision['consensus']['available_at']} · "
-        f"회계 basis={decision['consensus']['accounting_basis']} · EPS basis={decision['consensus']['eps_basis']}"
-    )
-
-    st.markdown("#### 계산 경로")
-    calculation_rows = [
-        {"단계": "피어 중앙값", "값": f"{calculation['peer_median_before_adjustment']:.2f}배", "조정": "없음"},
-        {
-            "단계": "성장률·추정치 변화",
-            "값": f"{calculation['multiple_after_growth_revision']:.2f}배",
-            "조정": f"{calculation['combined_growth_revision_adjustment']:+.1%}",
-        },
-        {
-            "단계": "시장 국면",
-            "값": f"{calculation['target_forward_multiple']:.2f}배",
-            "조정": f"{calculation['regime']['adjustment']:+.1%}",
-        },
-    ]
-    st.dataframe(pd.DataFrame(calculation_rows), hide_index=True, width="stretch")
-    st.write(
-        f"NVDA EPS 성장률 {calculation['target_eps_growth']:.1%} vs 피어 중앙값 "
-        f"{calculation['peer_median_eps_growth']:.1%} · 성장 조정 {calculation['growth_adjustment']:+.1%}"
-    )
-    st.write(
-        f"NVDA 수정 점수 {calculation['target_revision_score']:.1%} vs 피어 중앙값 "
-        f"{calculation['peer_median_revision_score']:.1%} · 수정 조정 {calculation['revision_adjustment']:+.1%}"
-    )
-    st.write(
-        f"시장 국면 **{calculation['regime']['state']}** · score {calculation['regime']['score']} · "
-        f"배수 조정 {calculation['regime']['adjustment']:+.1%}"
-    )
-
-    stability = peer_gate["stability"]
-    st.markdown("#### 피어 배수 안정성")
-    with st.container(horizontal=True):
-        st.metric("안정성", stability["status"], f"최대 LOO 변화 {stability['maximum_leave_one_out_change']:.1%}", border=True)
+        st.metric("판단 시각", decision["decision_time"], f"생성 {decision['generated_at']}", border=True)
         st.metric(
-            "피어 배수 min / median / max",
-            f"{stability['minimum_forward_per']:.2f} / {stability['median_forward_per']:.2f} / {stability['maximum_forward_per']:.2f}",
-            f"IQR {stability['iqr']:.2f}",
+            "시장 국면",
+            calculation["regime"]["state"],
+            f"배수 조정 {calculation['regime']['adjustment']:+.1%}",
             border=True,
         )
-        st.metric(
-            "trimmed 목표 배수",
-            f"{stability['trimmed_target_multiple']:.2f}배",
-            "상·하 1개 제외",
-            border=True,
-        )
-    if stability["wide_distribution"] or stability["status"] == "peer_unstable":
-        proxy_range = decision["proxy_value_range"]
-        st.warning(
-            "피어 분포가 넓거나 단일 피어 민감도가 높아 단일 연구값의 신뢰도를 낮췄습니다. "
-            f"안정성 기반 좁은 proxy 범위: ${proxy_range['low']:,.2f} ~ ${proxy_range['high']:,.2f}"
-        )
-    st.dataframe(
-        pd.DataFrame(stability["leave_one_out"]),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "target_multiple_without_peer": st.column_config.NumberColumn(format="%.2f배"),
-            "relative_change": st.column_config.NumberColumn(format="%.1%%"),
-            "peer_forward_per": st.column_config.NumberColumn(format="%.2f배"),
-        },
-    )
-    with st.expander("피어별 배수 기여도", expanded=False):
-        st.dataframe(
-            pd.DataFrame(stability["peer_contributions"]),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "forward_per": st.column_config.NumberColumn(format="%.2f배"),
-                "distance_from_peer_median": st.column_config.NumberColumn(format="%+.2f배"),
-                "leave_one_out_target_change": st.column_config.NumberColumn(format="%.1%%"),
-            },
-        )
 
-    st.markdown("#### 피어 집단 진단")
-    st.dataframe(
-        pd.DataFrame(peer_gate["groups"]),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "median_forward_per": st.column_config.NumberColumn(format="%.2f배"),
-            "median_eps_growth": st.column_config.NumberColumn(format="%.1%%"),
-            "median_revision_score": st.column_config.NumberColumn(format="%.1%%"),
-            "adjusted_nvda_multiple": st.column_config.NumberColumn(format="%.2f배"),
-        },
-    )
-    st.caption("5개 미만 집단은 진단 전용이며 전체 proxy 목표 배수 계산에는 사용하지 않습니다.")
-
-    st.markdown("#### EPS 민감도")
-    eps = decision["consensus"]["eps"]
-    st.dataframe(
-        pd.DataFrame([
-            {"시나리오": "low", "Forward EPS": eps["low"], "proxy 연구값": values["low"]},
-            {"시나리오": "base", "Forward EPS": eps["base"], "proxy 연구값": values["base"]},
-            {"시나리오": "high", "Forward EPS": eps["high"], "proxy 연구값": values["high"]},
-        ]),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Forward EPS": st.column_config.NumberColumn(format="$%.2f"),
-            "proxy 연구값": st.column_config.NumberColumn(format="$%.2f"),
-        },
-    )
-    st.write(f"현재 implied Forward multiple: **{decision['current_implied_forward_multiple']:.2f}배**")
-
-    st.markdown("#### 피어 게이트와 제외 사유")
-    st.write(
-        f"이상치 제거 전 {peer_gate['pre_outlier_count']}개 · 제거 후 {peer_gate['post_outlier_count']}개 · "
-        f"최소 {peer_gate['minimum']}개 · 기간 허용 ±{peer_gate['period_tolerance_days']}일"
-    )
-    st.dataframe(
-        pd.DataFrame(peer_gate["post_outlier_peers"]),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "forward_per": st.column_config.NumberColumn(format="%.2f배"),
-            "eps_growth": st.column_config.NumberColumn(format="%.1%%"),
-            "revision_score": st.column_config.NumberColumn(format="%.1%%"),
-        },
-    )
-    with st.expander(f"제외 피어 {len(peer_gate['excluded_peers'])}개"):
-        st.dataframe(pd.DataFrame(peer_gate["excluded_peers"]), hide_index=True, width="stretch")
-
-    st.markdown("#### EPS 기준과 판단 무효화 조건")
-    eps_floor = decision["valuation_entry_eps_floor"]
-    st.write(
-        f"- 가치평가 진입 EPS floor: ${eps_floor['value']:,.2f} · "
-        f"공식 `{eps_floor['formula']}` · 가격 기준일 {eps_floor['price_as_of']}"
-    )
-    st.caption(eps_floor["meaning"] + "이며 기업 펀더멘털 무효화 조건과 다릅니다.")
-    fundamental = decision["fundamental_invalidation"]
-    st.write(
-        f"- fundamental_invalidation: triggered={fundamental['triggered']} · "
-        f"상태={fundamental['evaluation_status']} · as_of={fundamental['as_of']}"
-    )
-    st.dataframe(pd.DataFrame(fundamental["conditions"]), hide_index=True, width="stretch")
+    st.markdown("#### 판단 무효화 조건")
     for condition in decision["invalidation_conditions"]:
         st.write(f"- {condition}")
     st.caption(
-        f"proxy_action · verified_action=null · operational_eligible=false · "
-        f"성과 추적={decision['performance_tracking']['status']} · 계산 SHA {decision['calculation_sha256'][:16]}…"
+        f"데이터 생성 {decision['generated_at']} · 가격 {price['as_of']} · "
+        f"컨센서스 {decision['consensus']['period']} / {decision['consensus']['available_at']} · "
+        "verified_action=null · operational_eligible=false"
     )
+
+    with st.expander("판단 근거·계산 상세", expanded=False):
+        with st.container(horizontal=True):
+            st.metric("Nasdaq Top10 proxy price", f"${price['value']:,.2f}", price["as_of"], border=True)
+            st.metric("StockLens 공식 가격 원장", "unavailable", "proxy와 구분", border=True)
+            st.metric("proxy 기준 연구값", f"${values['base']:,.2f}", "낮은 신뢰도", border=True)
+            st.metric("목표 Forward 배수", f"{calculation['target_forward_multiple']:.2f}배", "현재가 미사용", border=True)
+        st.metric(
+            "가치평가상 진입 허용 상한",
+            f"${decision['valuation_entry_ceiling']:,.2f}",
+            "실제 주문 가격 아님",
+            border=True,
+        )
+        st.metric(
+            "신규 매수 중단·비중 축소 검토",
+            f"${decision['reduction_review_price']:,.2f}",
+            "proxy 기준 연구값 대비 +15%",
+            border=True,
+        )
+        calculation_rows = [
+            {"단계": "피어 중앙값", "값": f"{calculation['peer_median_before_adjustment']:.2f}배", "조정": "없음"},
+            {
+                "단계": "성장률·추정치 변화",
+                "값": f"{calculation['multiple_after_growth_revision']:.2f}배",
+                "조정": f"{calculation['combined_growth_revision_adjustment']:+.1%}",
+            },
+            {
+                "단계": "시장 국면",
+                "값": f"{calculation['target_forward_multiple']:.2f}배",
+                "조정": f"{calculation['regime']['adjustment']:+.1%}",
+            },
+        ]
+        st.dataframe(pd.DataFrame(calculation_rows), hide_index=True, width="stretch")
+        stability = peer_gate["stability"]
+        st.write(
+            f"피어 안정성 **{stability['status']}** · min/median/max "
+            f"{stability['minimum_forward_per']:.2f}/{stability['median_forward_per']:.2f}/"
+            f"{stability['maximum_forward_per']:.2f}배 · 최대 LOO 변화 "
+            f"{stability['maximum_leave_one_out_change']:.1%}"
+        )
+        st.dataframe(pd.DataFrame(peer_gate["groups"]), hide_index=True, width="stretch")
+        eps = decision["consensus"]["eps"]
+        st.dataframe(
+            pd.DataFrame([
+                {"시나리오": "low", "Forward EPS": eps["low"], "proxy 연구값": values["low"]},
+                {"시나리오": "base", "Forward EPS": eps["base"], "proxy 연구값": values["base"]},
+                {"시나리오": "high", "Forward EPS": eps["high"], "proxy 연구값": values["high"]},
+            ]),
+            hide_index=True,
+            width="stretch",
+        )
+        st.write(f"현재 implied Forward multiple: **{decision['current_implied_forward_multiple']:.2f}배**")
+        eps_floor = decision["valuation_entry_eps_floor"]
+        st.write(
+            f"가치평가 진입 EPS floor ${eps_floor['value']:,.2f} · "
+            f"공식 `{eps_floor['formula']}` · 가격 기준일 {eps_floor['price_as_of']}"
+        )
+        st.dataframe(
+            pd.DataFrame(decision["fundamental_invalidation"]["conditions"]),
+            hide_index=True,
+            width="stretch",
+        )
+
+    with st.expander("입력 무결성·버전 상세", expanded=False):
+        st.write(f"- model_version: `{decision['model_version']}`")
+        st.write(f"- policy_version: `{decision['policy_version']}`")
+        st.write(f"- generator_version: `{decision['generator_version']}`")
+        st.write(f"- execution_policy_version: `{decision['execution_policy_version']}`")
+        st.write(f"- code_commit_sha: `{decision['code_commit_sha']}`")
+        st.write(f"- input bundle SHA-256: `{decision['input_bundle']['manifest_sha256']}`")
+        st.write(f"- calculation SHA-256: `{decision['calculation_sha256']}`")
+        st.caption(
+            "proxy_action · verified_action=null · operational_eligible=false · "
+            f"성과 추적={decision['performance_tracking']['status']}"
+        )
 
 
 def _metric_value(metrics: dict[str, Any], key: str) -> Any:
@@ -1128,9 +1083,9 @@ def _render_v23_comparison(
     return self_history
 
 
-st.set_page_config(page_title="StockLens 200 개인 연구", page_icon="🔒", layout="wide")
-st.title("🔒 StockLens 200 개인 연구")
-st.caption("로컬 전용 · 원시 데이터는 Git에 저장되지 않음 · 연구 참고이며 투자 권고 아님")
+st.set_page_config(page_title="StockLens 200 개인 운용", page_icon="📈", layout="wide")
+st.title("📈 StockLens 200 개인 운용")
+st.caption("로컬 전용 · 프록시 행동, 데이터 최신성, 검증 상태를 분리 표시")
 
 status_path = DATA_DIR / "status.json"
 status = load_json(str(status_path), _mtime(status_path))
@@ -1143,6 +1098,30 @@ st.info(
     f"{status.get('financial_tickers_available', status.get('financial_tickers_verified', 0))}종목 / "
     f"{status.get('financial_periods_available', status.get('financial_periods_verified', 0))}개 기간 · "
     f"시장 데이터 {status.get('market', {}).get('status', 'unavailable')}"
+)
+
+financial_dir = DATA_DIR / "normalized" / "financials"
+existing_tickers = [path.stem for path in sorted(financial_dir.glob("*.json"))]
+selection_options = list(pilot_tickers()) + [
+    value for value in existing_tickers if value not in PERSONAL_PILOT_UNIVERSE
+]
+preferred_ticker = os.environ.get("STOCKLENS_DEFAULT_TICKER", "NVDA").upper()
+if preferred_ticker in existing_tickers:
+    default_ticker = preferred_ticker
+elif "AMAT" in existing_tickers:
+    default_ticker = "AMAT"
+elif existing_tickers:
+    default_ticker = existing_tickers[0]
+else:
+    default_ticker = selection_options[0]
+ticker = st.selectbox(
+    "기업",
+    selection_options,
+    index=selection_options.index(default_ticker),
+    format_func=lambda value: (
+        f"{value} · {PERSONAL_PILOT_UNIVERSE[value]['company']}"
+        if value in PERSONAL_PILOT_UNIVERSE else value
+    ),
 )
 
 qqq_path = DATA_DIR / "market" / "QQQ.csv"
@@ -1171,6 +1150,37 @@ try:
 except (OSError, json.JSONDecodeError, MarketRegimeError, ValueError) as exc:
     regime_error = str(exc)
     market_regime = build_market_regime([], analysis_as_of=analysis_as_of)
+
+if ticker == "NVDA":
+    if DECISION_V2_PATH.is_file():
+        try:
+            decision_v2 = load_decision_v2_artifact(
+                str(DECISION_V2_PATH),
+                _mtime(DECISION_V2_PATH),
+                _sha256(DECISION_V2_PATH),
+                _decision_bundle_signature(DECISION_V2_PATH),
+            )
+            bundle_path = str(decision_v2["input_bundle"]["path"])
+            update_status = load_decision_v2_update_status(
+                bundle_path,
+                _decision_parent_signature(decision_v2),
+            )
+            _render_decision_model_v2(
+                decision_v2,
+                update_status,
+                evaluated_at=datetime.fromisoformat(analysis_as_of.replace("Z", "+00:00")),
+            )
+        except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
+            st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
+            with st.container(horizontal=True):
+                st.metric("현재 행동 · 프록시", "신규 진입 중단", "blocked", border=True)
+                st.metric("최대 허용 투입", "계획 비중의 0%", "blocked", border=True)
+            st.caption(
+                "decision_status=blocked · personal_action_status=blocked · "
+                "입력·피어·시점·무결성 조건이 복구되기 전에는 실행 가격을 표시하지 않습니다."
+            )
+    else:
+        st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
 
 cross_project_market_proxy: dict[str, Any] | None = None
 cross_project_proxy_error: str | None = None
@@ -1298,7 +1308,6 @@ st.dataframe(
 )
 st.caption("실제 로컬 캐시만 표시합니다. 기술지표 계산 성공은 검증된 매수 신호를 뜻하지 않습니다.")
 
-financial_dir = DATA_DIR / "normalized" / "financials"
 financial_summary_rows: list[dict[str, Any]] = []
 for registered_ticker, registry in PERSONAL_PILOT_UNIVERSE.items():
     registered_path = financial_dir / f"{registered_ticker}.json"
@@ -1322,18 +1331,6 @@ st.dataframe(
 )
 st.caption("verified와 partial만 실제 로컬 원문·해시 검사를 통과한 자료입니다. blocked는 숫자를 생성하지 않습니다.")
 
-existing_tickers = [path.stem for path in sorted(financial_dir.glob("*.json"))]
-selection_options = list(pilot_tickers()) + [value for value in existing_tickers if value not in PERSONAL_PILOT_UNIVERSE]
-default_ticker = "AMAT" if "AMAT" in existing_tickers else (existing_tickers[0] if existing_tickers else selection_options[0])
-ticker = st.selectbox(
-    "기업",
-    selection_options,
-    index=selection_options.index(default_ticker),
-    format_func=lambda value: (
-        f"{value} · {PERSONAL_PILOT_UNIVERSE[value]['company']}"
-        if value in PERSONAL_PILOT_UNIVERSE else value
-    ),
-)
 financial_path = financial_dir / f"{ticker}.json"
 financial = load_json(str(financial_path), _mtime(financial_path))
 if not financial:
@@ -1486,32 +1483,6 @@ elif ticker in DECISION_SUPPORTED_TICKERS:
             )
 
 if ticker == "NVDA":
-    if DECISION_V2_PATH.is_file():
-        try:
-            decision_v2 = load_decision_v2_artifact(
-                str(DECISION_V2_PATH),
-                _mtime(DECISION_V2_PATH),
-                _sha256(DECISION_V2_PATH),
-                _decision_bundle_signature(DECISION_V2_PATH),
-            )
-            bundle_path = str(decision_v2["input_bundle"]["path"])
-            update_status = load_decision_v2_update_status(
-                bundle_path,
-                _decision_parent_signature(decision_v2),
-            )
-            _render_decision_model_v2(decision_v2, update_status)
-        except (OSError, json.JSONDecodeError, DecisionModelV2Error, KeyError, TypeError, ValueError) as exc:
-            st.error(f"Decision Model v2.1 무결성 검증 실패: {exc}")
-            with st.container(horizontal=True):
-                st.metric("현재 행동 · 프록시", "신규 진입 중단", "blocked", border=True)
-                st.metric("최대 허용 투입", "계획 비중의 0%", "blocked", border=True)
-            st.caption(
-                "decision_status=blocked · personal_action_status=blocked · "
-                "입력·피어·시점·무결성 조건이 복구되기 전에는 실행 가격을 표시하지 않습니다."
-            )
-    else:
-        st.caption("Decision Model v2.1 프록시 산출물이 아직 생성되지 않았습니다.")
-
     p512_paths = (
         NVDA_P512_SUPERSESSION_PATH,
         NVDA_P512_PEER_PROXY_PATH,
@@ -1527,7 +1498,8 @@ if ticker == "NVDA":
                 str(NVDA_P512_DECISION_PATH),
                 _mtime(NVDA_P512_DECISION_PATH),
             )
-            _render_nvda_p512_research(p512_supersession, p512_peer_proxy, p512_decision)
+            with st.expander("P5.1.2 보관 진단·개발 감사", expanded=False):
+                _render_nvda_p512_research(p512_supersession, p512_peer_proxy, p512_decision)
         except (OSError, json.JSONDecodeError, NvdaResearchP511Error, KeyError, TypeError, ValueError) as exc:
             if "source mismatch" in str(exc):
                 st.info("P5.1.2 보관 진단 자료")

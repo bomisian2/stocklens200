@@ -204,7 +204,7 @@ def test_personal_app_renders_financials_without_market_signal(tmp_path, monkeyp
 
     assert not app.exception
     rendered = " ".join(item.value for item in [*app.title, *app.caption, *app.warning, *app.error])
-    assert "개인 연구" in rendered
+    assert "개인 운용" in rendered
     assert "운영 판단: hold" in rendered
     assert "공식 목표가격" not in rendered
     assert any("개인용 시장 데이터 현황" in item.value for item in app.subheader)

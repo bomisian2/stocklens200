@@ -26,6 +26,11 @@ Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시�
 
 지원·CI 실행 환경은 **Python 3.12**입니다. `.python-version`과 GitHub Actions를 3.12로 고정했습니다. Python 3.14와 Streamlit 1.65 조합의 AppTest는 독립 환경에서 반환되지 않은 사례가 있어 현재 지원 범위에 포함하지 않습니다.
 
+개인용 Decision Model v2.1 화면은 저장소 루트의 **`Start StockLens 200.cmd`**를 더블클릭하면
+`http://127.0.0.1:8512/`에서 열립니다. 이미 실행 중이면 기존 프로세스를 재사용하며 중복 실행하지
+않습니다. 8512를 다른 프로그램이 사용하면 그 프로세스를 종료하지 않고 원인을 창에 표시합니다.
+기본 선택 종목은 NVDA이며 Python 3.12 환경만 사용합니다.
+
 ```bash
 python -m pip install -r requirements.txt
 python scripts/update_data.py
