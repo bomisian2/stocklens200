@@ -423,9 +423,10 @@ def _render_decision_model_v2(
     execution = decision.get("execution_buy_prices")
     weights = decision.get("execution_allocation_weights")
     compact_plan = ""
+    escaped_action_text = decision["action_text"].replace("$", "\\$")
     if execution and weights and not blocked:
         compact_plan = " · ".join(
-            f"{index}차 ${value:,.2f} ({weight}%)"
+            f"{index}차 \\${value:,.2f} ({weight}%)"
             for index, (value, weight) in enumerate(zip(execution, weights), start=1)
         )
     st.markdown(
@@ -473,9 +474,9 @@ def _render_decision_model_v2(
     if blocked:
         st.error(decision["action_text"])
     elif freshness["status"] == "current":
-        st.success(decision["action_text"])
+        st.success(escaped_action_text)
     else:
-        st.warning(f"기존 고정 행동 · {decision['action_text']}")
+        st.warning(f"기존 고정 행동 · {escaped_action_text}")
     if execution and weights and not blocked:
         st.markdown("#### 3회 실행 가격과 전체 계획 비중 배분")
         with st.container(horizontal=True):
