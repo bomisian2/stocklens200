@@ -621,7 +621,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     for withdrawn in ("214.08", "203.42", "195.93", "188.43"):
         assert withdrawn not in nvda_rendered
     assert "operational_decision=null · operational_eligible=false" in nvda_rendered
-    assert "NVDA Decision Model v2.1" in nvda_rendered
+    assert "NVDA · 오늘의 개인 운용 판단" in nvda_rendered
     assert "provider_homogeneous_proxy" in nvda_rendered
     assert "verified_action=null · operational_eligible=false" in nvda_rendered
     assert "현재 가격에서 제한적 분할매수 1차 실행" in nvda_rendered
@@ -700,7 +700,7 @@ def test_personal_app_integrates_amat_without_promoting_research_values(tmp_path
     assert "P5.1.2 보관 진단 자료" in stale_rendered
     assert "현재 macro 원본과 SHA가 달라 최신 계산에는 사용하지 않음" in stale_rendered
     assert "Decision Model v2.1 계산에는 유입되지 않음" in stale_rendered
-    assert "NVDA Decision Model v2.1" in stale_rendered
+    assert "NVDA · 오늘의 개인 운용 판단" in stale_rendered
 
     original_builder = decision_model.build_decision_analysis_snapshot
 
