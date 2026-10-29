@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stocklens://decision-model-v2-consensus-source-v1",
+  "title": "Decision Model v2 consensus source contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "provider",
+    "ticker",
+    "evidence_kind",
+    "provider_native_raw_bytes",
+    "source_url",
+    "source_hash",
+    "captured_at",
+    "available_at",
+    "fiscal_period",
+    "accounting_basis",
+    "eps_share_basis",
+    "split_adjustment",
+    "security_form",
+    "adr_share_conversion",
+    "currency",
+    "usage_rights"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "decision-model-v2-consensus-source-contract-v1"
+    },
+    "provider": { "type": "string", "minLength": 1 },
+    "ticker": { "const": "NVDA" },
+    "evidence_kind": { "const": "street_consensus" },
+    "provider_native_raw_bytes": { "type": "boolean" },
+    "source_url": { "type": "string", "format": "uri" },
+    "source_hash": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "available_at": { "type": "string", "format": "date-time" },
+    "fiscal_period": { "type": "string", "minLength": 1 },
+    "accounting_basis": {
+      "enum": ["gaap", "non_gaap", "adjusted", "unknown"]
+    },
+    "eps_share_basis": { "enum": ["basic", "diluted", "unknown"] },
+    "split_adjustment": {
+      "enum": ["adjusted", "unadjusted", "not_applicable", "unknown"]
+    },
+    "security_form": {
+      "enum": ["common_stock", "ordinary_share", "adr", "ads", "unknown"]
+    },
+    "adr_share_conversion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "ratio", "source_hash"],
+      "properties": {
+        "status": { "enum": ["verified", "not_applicable", "unknown"] },
+        "ratio": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "source_hash": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        }
+      }
+    },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "usage_rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storage", "derived_analysis", "local_display", "public_display"],
+      "properties": {
+        "storage": {
+          "enum": ["authorized", "not_authorized", "manual_review_required", "unknown"]
+        },
+        "derived_analysis": {
+          "enum": ["authorized", "not_authorized", "manual_review_required", "unknown"]
+        },
+        "local_display": {
+          "enum": ["authorized", "not_authorized", "manual_review_required", "unknown"]
+        },
+        "public_display": {
+          "enum": ["authorized", "not_authorized", "manual_review_required", "unknown"]
+        }
+      }
+    }
+  }
+}
