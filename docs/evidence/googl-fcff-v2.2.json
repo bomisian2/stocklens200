@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "ticker": "GOOGL",
+  "evidence_as_of_utc": "2026-07-22T20:01:36+00:00",
+  "operational_use": false,
+  "sources": {
+    "fy2025": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2025/q4/2025q4-alphabet-earnings-release.pdf",
+      "sha256": "8bb2778772fc60c0290cfeac3b24d345a07b8918a7708ec8fcef7239243922f9"
+    },
+    "h1_2025": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2025/q2/2025q2-alphabet-earnings-release.pdf",
+      "sha256": "3581be042fcbda6ea71185d5aef47458ce3a56cf6b16022d61a997d1807a4de5"
+    },
+    "h1_2026": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf",
+      "sha256": "65f35a2e9c287112121f736321c7526d603ba8e0dae27acac56c7d7357602aa8"
+    },
+    "treasury": {
+      "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=2026",
+      "as_of": "2026-10-09"
+    }
+  },
+  "identified_equity_security_gains": {
+    "pretax_total": 135946000000,
+    "issuer_stated_after_tax_net_income_effect_total": 105800000000,
+    "periods": [
+      {
+        "period": "2026-Q1",
+        "pretax_gain": 36915000000,
+        "after_tax_net_income_effect": 28700000000,
+        "diluted_eps_effect": 2.35
+      },
+      {
+        "period": "2026-Q2",
+        "pretax_gain": 99031000000,
+        "after_tax_net_income_effect": 77100000000,
+        "diluted_eps_effect": 6.26
+      }
+    ],
+    "limitation": "The event-adjusted consolidated effective rate is not a verified tax rate on operating income."
+  },
+  "working_capital_snapshots": {
+    "prior_2025_06_30": {
+      "accounts_receivable": 55048000000,
+      "inventory": null,
+      "other_current_assets": 16020000000,
+      "accounts_payable": 8347000000,
+      "accrued_compensation": 12168000000,
+      "accrued_expenses_other_current_liabilities": 52039000000,
+      "accrued_revenue_share": 9787000000,
+      "deferred_revenue": 4969000000
+    },
+    "current_2026_06_30": {
+      "accounts_receivable": 69175000000,
+      "inventory": 9991000000,
+      "other_current_assets": 21884000000,
+      "accounts_payable": 20258000000,
+      "accrued_compensation": 15086000000,
+      "accrued_expenses_other_current_liabilities": 73014000000,
+      "accrued_revenue_share": 10599000000,
+      "deferred_revenue": 7154000000
+    },
+    "unclassified_components": [
+      "other_current_assets",
+      "accrued_expenses_other_current_liabilities"
+    ],
+    "limitation": "Inventory was not separately disclosed in the 2025 comparative balance sheet, while other-current and accrued-other captions mix operating and non-operating items."
+  },
+  "capital_structure_2026_06_30": {
+    "cash": 55911000000,
+    "marketable_securities": 186563000000,
+    "non_marketable_securities": 131461000000,
+    "reported_long_term_debt": 98165000000,
+    "reported_noncurrent_operating_lease_liabilities": 14591000000,
+    "preferred_equity_liquidation_preference": 18023000000,
+    "noncontrolling_interest": null,
+    "other_verified_potential_claims": null,
+    "limitations": [
+      "The current portion of debt-like lease and financing claims is not isolated from accrued liabilities.",
+      "Non-marketable securities are not yet classified between operating/strategic and distributable non-operating assets.",
+      "Current noncontrolling interests and other potential claims are not verified."
+    ]
+  },
+  "wacc_evidence": {
+    "risk_free_rate": 0.0524,
+    "risk_free_rate_verified": true,
+    "beta": null,
+    "equity_risk_premium": 0.05,
+    "equity_risk_premium_verified": false,
+    "pretax_cost_of_debt": null,
+    "marginal_operating_tax_rate": null,
+    "debt_market_value": null,
+    "legacy_data_quality_premium": 0.015,
+    "legacy_data_quality_premium_is_economic_risk": false
+  },
+  "forecast_evidence": {
+    "official_2026_capex_guidance_low": 175000000000,
+    "official_2026_capex_guidance_high": 185000000000,
+    "official_revenue_growth_guidance": null,
+    "official_operating_margin_guidance": null,
+    "verified_operating_working_capital_forecast": null,
+    "verified_depreciation_forecast": null
+  }
+}

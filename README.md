@@ -2,7 +2,7 @@
 
 미국 거래소 상장기업 전체에서 시가총액 상위 200개 **기업**을 매일 선정하고, 저장된 결과만 빠르게 보여 주는 Streamlit 대시보드입니다.
 
-## 현재 완료 범위: v2 1단계
+## 현재 완료 범위
 
 - Yahoo 거래소 스크리너를 1차 공급원으로 사용합니다.
 - Nasdaq 미국 상장증권 전체 스크리너를 독립 시총·구성 검증 및 섹터·국가 보강 소스로 사용합니다.
@@ -20,14 +20,50 @@
 
 Nasdaq 무료 스크리너는 현재 신뢰할 수 있는 종목별 거래 시각을 제공하지 않으므로 수집 실행 시각을 거래 시각으로 대체하지 않습니다. 따라서 Nasdaq 결과만으로 최신 스냅샷을 덮어쓰지 않으며, Yahoo 결과의 독립 검증과 메타데이터 보강에 사용합니다.
 
-`engine.py`의 기존 적정가/신호 코드는 프로토타입 참고용이며 v2 앱에 연결되어 있지 않습니다. 재무 데이터의 시점 일관성, QQQ 벤치마크, 워크포워드 검증이 끝나기 전까지 정상 기능으로 표시하지 않습니다.
+`engine.py`의 기존 적정가/신호 코드는 프로토타입 참고용이며 v2 앱에 연결하지 않습니다. 2단계 적정가는 `stocklens/valuation.py`의 버전 고정 모델만 사용하고, 3단계 신호는 QQQ 벤치마크와 워크포워드 검증이 끝나기 전까지 정상 기능으로 표시하지 않습니다.
+
+### v2 2단계 Draft: 자동 적정가 엔진
+
+- 공식 SEC EDGAR `companyfacts`와 `submissions` 파일에서 최근 5개 연도의 GAAP 재무와 실제 이용 가능 시각을 수집합니다.
+- 공식 U.S. Treasury 10년 금리를 시장 기준일 이전의 할인율 입력으로 사용합니다.
+- 정규화 EPS×PER, FCF DCF, EV/EBITDA 및 금융업 전용 residual P/B 중 시점 일치 입력 게이트를 통과한 모델만 자동 선택합니다. PER과 EV/EBITDA에는 고정 업종 배수를 사용하지 않습니다.
+- PER은 최소 5년·20개 이상의 당시 공개 EPS/실제 가격 관측치가 필요하며 음수·구조적 손실·근거 없는 조정 EPS에서는 보류합니다.
+- 보수·기본·낙관 범위와 안전마진은 모델 분산, 예측오차, 재무위험과 데이터 품질로 자동 계산하며 고정 90~110% 밴드를 사용하지 않습니다.
+- 모델 버전, 원천 URL, 제출일, 접수시각, 보수/기본/낙관 값, 자동 안전마진, 신뢰도와 보류 사유를 저장합니다.
+- 현재 주가는 적정가 계산식에서 제외하고 계산이 끝난 뒤 저평가율과 판단에만 사용합니다.
+- REIT의 검증된 FFO/AFFO, IFRS ADR, 재배포 가능한 분석가 컨센서스가 없으면 정상 값으로 대체하지 않고 판단을 보류합니다.
+- 앱은 `data/valuations.csv`와 이력 파일만 읽으며 SEC나 Treasury에 직접 접속하지 않습니다.
+- SEC API 403은 재시도하지 않으며 HTTP 상태·도메인·DNS/TLS/timeout·허용된 응답 헤더만 진단합니다. 응답 본문과 쿠키는 로그에 남기지 않습니다.
+- 기본 경로는 사용자가 합법적으로 내려받은 공식 SEC 개별 JSON 또는 벌크 ZIP을 SHA-256 manifest로 검증하는 오프라인 import입니다. 직접 API는 명시적 `--financial-source sec-api` 선택 때만 사용하며 403 뒤 자동 재시도·우회·벌크 전환을 하지 않습니다.
+- 원본 파일 해시·출처 URL·획득 시각과 정규화 결과 해시·버전을 기록하며, `fixture=false`가 아닌 manifest는 운영 입력으로 거부합니다.
+- acceptance timestamp가 없으면 filed 날짜 당일 00:00으로 간주하지 않고 다음 UTC 날짜 23:59:59까지 보수적으로 지연하며 추정 시각임을 저장합니다.
+- 과거 재무 캐시는 stale로 표시하고 신규 매매 신호에 사용할 수 없게 하며, 전체 공급자 장애 시 마지막 정상 CSV를 덮어쓰지 않습니다.
+
+설계 결정과 데이터 이용 범위는 [`docs/adr/0002-point-in-time-valuation-engine.md`](docs/adr/0002-point-in-time-valuation-engine.md), FCFF·WACC·주주가치 변환 게이트는 [`docs/adr/0003-fcff-economic-definition-gate.md`](docs/adr/0003-fcff-economic-definition-gate.md), 연구 시나리오의 증거 상태 경계는 [`docs/adr/0004-research-scenario-evidence-states.md`](docs/adr/0004-research-scenario-evidence-states.md), EV→보통주 가치 게이트는 [`docs/adr/0005-enterprise-to-common-equity-bridge.md`](docs/adr/0005-enterprise-to-common-equity-bridge.md), 시점 일치 PER·EPS 입력은 [`docs/valuation-evidence.md`](docs/valuation-evidence.md), GOOGL 공식 IR·TTM 실증은 [`docs/googl-ir-pilot.md`](docs/googl-ir-pilot.md), DCF·역산 DCF 감사는 [`docs/googl-dcf-audit.md`](docs/googl-dcf-audit.md), FCFF v2.2 감사는 [`docs/googl-fcff-v2.2-audit.md`](docs/googl-fcff-v2.2-audit.md), v2.3 연구 시나리오 결과는 [`docs/googl-scenario-v2.3-audit.md`](docs/googl-scenario-v2.3-audit.md), v2.4 주주가치 브리지 감사는 [`docs/googl-equity-bridge-v2.4-audit.md`](docs/googl-equity-bridge-v2.4-audit.md), v2.4.1 실무형 참고 가치 검증은 [`docs/googl-practical-value-v2.4.1.md`](docs/googl-practical-value-v2.4.1.md), 격리 연구 UI는 [`docs/googl-research-preview.md`](docs/googl-research-preview.md), 외부 라이브러리 격리 PoC는 [`docs/open-source-library-poc.md`](docs/open-source-library-poc.md), v2.1 검증 결과는 [`docs/valuation-v2.1-validation.md`](docs/valuation-v2.1-validation.md), Windows 단일 실행 절차와 실제 접근 결과는 [`docs/sec-windows-collection.md`](docs/sec-windows-collection.md), 오프라인 절차는 [`docs/sec-offline-import.md`](docs/sec-offline-import.md), 공급원 약관 검토는 [`docs/financial-source-review.md`](docs/financial-source-review.md), 자동 수집 대안은 [`docs/automatic-financial-ingestion.md`](docs/automatic-financial-ingestion.md)에 기록했습니다.
 
 ## 로컬 실행
 
 ```bash
 python -m pip install -r requirements.txt
 python scripts/update_data.py
+python scripts/update_valuations.py --financial-source offline --sec-manifest data/sec-import/manifest.json
 streamlit run app.py
+```
+
+Windows PC에서 공식 SEC 접근을 한 번만 진단하고, 성공할 때만 5개 표본을 수집·평가하는 명령은 다음과 같습니다. SEC User-Agent에 들어갈 실제 수신 가능한 연락처를 환경변수 또는 `-Contact`로 제공해야 하며 이 값은 결과 파일이나 로그에 저장하지 않습니다.
+
+```powershell
+$env:STOCKLENS_SEC_CONTACT = 'your-monitored-email@example.com'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_sec_windows.ps1
+Remove-Item Env:STOCKLENS_SEC_CONTACT
+```
+
+첫 GOOGL Company Facts 요청이 403이면 재시도, 프록시, IP 변경, Submissions 및 다른 기업 요청 없이 종료합니다. 성공하면 공식 ticker map과 GOOGL·AMAT·AVGO·QCOM·INTC의 Company Facts/Submissions를 0.6초 이상 간격으로 각각 한 번만 받아 SHA-256 manifest 및 검증 결과를 `data/sec-import/<UTC 실행시각>/`에 저장합니다. 이 원본 디렉터리는 Git에서 제외됩니다.
+
+GOOGL B등급 연구 결과를 운영 앱과 분리해 확인하려면 다음 명령을 사용합니다. 이 앱은 `research/`의 비운영 스냅샷만 읽으며 `data/valuations.csv`, 신호, 알림 및 Top 200 정렬에 연결되지 않습니다.
+
+```powershell
+streamlit run research_preview.py
 ```
 
 테스트:
@@ -36,12 +72,18 @@ streamlit run app.py
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python scripts/validate_snapshot.py --strict
+python scripts/validate_valuations.py
 ```
 
 ## 데이터 파일
 
 - `data/universe.csv`: 순위, 티커, 기업명, 섹터/국가, 시가총액, 최근가, 거래 시각, 별도 수집 시각, 데이터·메타데이터 공급원
 - `data/status.json`: 거래 세션, 시각 범위와 중앙값, 수집 시각, `healthy/degraded/stale/unverified`, 캐시 여부, 품질·교차검증 결과
+- `data/financials.csv`: SEC 제출 재무, 회계연도·양식·접수번호·시장 이용 가능 시각과 검증 상태
+- `data/valuations.csv`: 기업별 시나리오 적정가, 매수 유리 구간, 신뢰도, 판단과 모델 근거
+- `data/valuation_history.csv`: 날짜별 적정가 변화 이력
+- `data/valuation_status.json`: 모델 버전, 평가/보류 수, 공식 금리 입력, 공급원 오류와 알려진 제약
+- `data/financial_provenance.json`: 공식 SEC 원본 파일 SHA-256, 출처·획득시각, 정규화 버전과 결과 SHA-256
 
 스냅샷 저장은 임시 파일 작성 후 교체하는 원자적 방식입니다. 200개 미만, 중복 기업, 비정상 순위, 음수/누락 시가총액, 가격·거래량 커버리지 미달, 거래·수집 시각 오류, 독립 검증 실패, 섹터·국가 커버리지 80% 미만이면 새 스냅샷으로 인정하지 않습니다. 실패 시 CSV를 덮어쓰지 않고 상태만 갱신하며 `eligible_for_signals=false`로 기록합니다.
 
@@ -77,14 +119,14 @@ Nasdaq 전체 시장 ─── 독립 시총/구성 ───┘                
 
 ## 다음 단계(아직 미완료)
 
-1. SEC 재무 원천과 보조 공급원을 이용한 EPS·실적·FCF·성장률·PER 교차검증
-2. 보수/기본/낙관 적정가, 저평가율, 자동 매수 유리 구간, 신뢰도와 근거의 날짜별 저장
-3. 가격 이력의 point-in-time 저장과 EMA Crossback, 돌파, 눌림목, RSI 회복 워크포워드 검증
-4. 5/10/20거래일 승률·평균수익·손익비·최대낙폭·QQQ 초과수익 및 최소 표본 게이트
-5. 검증 통과 신호만 상단에 표시하고 모바일 카드형 기록 화면 제공
+1. 재배포 가능한 독립 재무 공급원을 확보해 SEC 재무를 교차검증
+2. 무료·point-in-time 분석가 컨센서스 및 기업 가이던스 출처 확보
+3. IFRS ADR 태그와 REIT FFO/AFFO 전용 정규화
+4. 가격 이력의 point-in-time 저장과 EMA Crossback, 돌파, 눌림목, RSI 회복 워크포워드 검증
+5. 5/10/20거래일 승률·평균수익·손익비·최대낙폭·QQQ 초과수익 및 최소 표본 게이트
 
 ## 데이터 한계
 
 무료 공급원의 시가총액, 가격, 기업 분류는 지연되거나 정정될 수 있습니다. 미국 거래소 상장 여부와 기업 소재국은 서로 다른 개념이므로 해외 기업의 ADR도 포함될 수 있습니다. 이 프로젝트는 연구용이며 투자 권유가 아닙니다.
 
-Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가와 3단계 단기 신호는 아직 구현·검증되지 않았으며, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.
+Nasdaq 무료 스크리너의 거래 기준시각은 검증용으로 사용할 수 없고, 일부 종목의 섹터·국가가 비어 있어 현재 메타데이터 커버리지는 100%가 아닙니다. 2단계 적정가 엔진은 Draft입니다. GOOGL은 공식 IR 원본 6개에서 원시 10개 기간과 교차검증된 TTM 1개를 확보했고, v2.3에서 관측·회사 가이던스·모델 가정·결측을 분리한 연구 시나리오와 WACC/영구성장률 민감도를 추가했습니다. v2.4는 공식 10-Q의 현금·투자자산·부채·리스·NCI·전환우선주·주식 수를 `공식 확인/장부가 대용치/추정/미확보`로 분리했습니다. v2.4.1은 공식 잔액의 0~100% 경제가치 인식과 상호배타적인 우선주 처리, 명시적인 희석주식 경계를 적용해 $41.63~$84.88의 B등급 연구용 주당 참고 범위를 재현하지만 중간값·확률·매매 판단은 만들지 않습니다. 공식 10-Q 원본의 로컬 요청은 HTTP 403이었고 재시도하지 않아 원본 해시는 여전히 미확보입니다. 정식 FCFF와 정식 평가는 0/5이고 운영 판단은 보류입니다. 기존 $64.44는 CFO-CAPEX 기반 연구용 주주현금흐름 대용치로만 유지됩니다. 나머지 4개 표본은 실데이터가 없습니다. 3단계 단기 신호도 아직 운영 검증되지 않았고, 사용자가 EPS·PER·안전마진을 입력하는 기능은 추가하지 않습니다.
