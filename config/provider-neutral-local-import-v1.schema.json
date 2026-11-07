@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "provider-neutral-local-import-v1",
+  "title": "StockLens provider-neutral local import manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data_kind",
+    "evidence_class",
+    "provider",
+    "ticker",
+    "source_file",
+    "source_format",
+    "source_hash",
+    "as_of",
+    "available_at",
+    "captured_at",
+    "accounting_basis",
+    "horizon",
+    "currency",
+    "per_share_unit",
+    "analyst_count",
+    "revision_or_vintage",
+    "usage_scope",
+    "price_adjustment_policy",
+    "rights"
+  ],
+  "properties": {
+    "schema_version": {"const": "provider-neutral-local-import-v1"},
+    "data_kind": {"enum": ["forward_estimates", "daily_prices"]},
+    "evidence_class": {"enum": ["user_provided_real", "synthetic_fixture"]},
+    "provider": {"type": "string", "minLength": 1},
+    "ticker": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
+    "source_file": {"type": "string", "pattern": "^imports/"},
+    "source_format": {"enum": ["csv", "json"]},
+    "source_hash": {"type": "string", "pattern": "^[0-9A-Fa-f]{64}$"},
+    "as_of": {"type": "string", "format": "date"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "accounting_basis": {"enum": ["GAAP", "NON_GAAP", "not_applicable"]},
+    "horizon": {"enum": ["FY1", "FY2", "NTM", "not_applicable"]},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "per_share_unit": {
+      "enum": [
+        "currency_per_basic_share",
+        "currency_per_diluted_share",
+        "not_applicable"
+      ]
+    },
+    "analyst_count": {"type": ["integer", "null"], "minimum": 1},
+    "revision_or_vintage": {"type": "string", "minLength": 1},
+    "usage_scope": {"const": "personal_local_research"},
+    "price_adjustment_policy": {"enum": ["adjusted", "unadjusted", "not_applicable"]},
+    "rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storage", "derived_analysis", "local_display", "public_display"],
+      "properties": {
+        "storage": {"const": "authorized"},
+        "derived_analysis": {"const": "authorized"},
+        "local_display": {"const": "authorized"},
+        "public_display": {"enum": ["authorized", "not_authorized"]}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"data_kind": {"const": "forward_estimates"}}},
+      "then": {
+        "properties": {
+          "accounting_basis": {"enum": ["GAAP", "NON_GAAP"]},
+          "horizon": {"enum": ["FY1", "FY2", "NTM"]},
+          "per_share_unit": {
+            "enum": ["currency_per_basic_share", "currency_per_diluted_share"]
+          },
+          "analyst_count": {"type": "integer", "minimum": 1},
+          "price_adjustment_policy": {"const": "not_applicable"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"data_kind": {"const": "daily_prices"}}},
+      "then": {
+        "properties": {
+          "accounting_basis": {"const": "not_applicable"},
+          "horizon": {"const": "not_applicable"},
+          "per_share_unit": {"const": "not_applicable"},
+          "analyst_count": {"type": "null"},
+          "price_adjustment_policy": {"enum": ["adjusted", "unadjusted"]}
+        }
+      }
+    }
+  ]
+}
