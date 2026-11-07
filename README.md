@@ -2,6 +2,23 @@
 
 미국 거래소 상장기업 전체에서 시가총액 상위 200개 **기업**을 매일 선정하고, 저장된 결과만 빠르게 보여 주는 Streamlit 대시보드입니다.
 
+## MVP 공통 분석 화면(Draft)
+
+`feat/v2-mvp-analysis-shell`은 `main`의 시장 수집 기능 위에 읽기 전용 공통 분석 화면을
+추가합니다. 전체 종목, 종목 상세, GOOGL 연구, 단기 신호 연구, 데이터 상태를 분리하며
+사업·재무·전망·가치·기술 영역은 각각 독립된 상태와 보류 사유를 가집니다.
+
+- GOOGL: 공식 재무기간 11개와 B등급 연구 참고 범위만 표시하며 운영 자격은 `false/hold`입니다.
+- AMAT·AVGO·QCOM: 검증된 시장 데이터와 필요한 공식 자료만 표시하고 적정가를 생성하지 않습니다.
+- PR #2·#3의 엔진을 병합하지 않으며 검토된 연구 요약 계약만 `research/`에 격리합니다.
+- 연구 가격으로 종목을 정렬하거나 추천하지 않고, 독립 검증 통과 신호와 활성 신호는 0개로 표시합니다.
+- 저장 당시 최신성과 앱 실행 시점 최신성을 분리하고, 마지막 완료 XNYS 세션보다 오래된
+  스냅샷은 자동으로 `stale` 처리해 신규 신호 자격을 차단합니다.
+
+설계와 안전 경계는 [`docs/mvp-analysis-shell.md`](docs/mvp-analysis-shell.md)에 기록했습니다.
+운영 전 기준선, 최신성·예약 수집·데이터 이용권 검토와 복구 절차는
+[`docs/predeployment-review.md`](docs/predeployment-review.md)를 참고하세요.
+
 ## 현재 완료 범위: v2 1단계
 
 - Yahoo 거래소 스크리너를 1차 공급원으로 사용합니다.
@@ -36,7 +53,14 @@ streamlit run app.py
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python scripts/validate_snapshot.py --strict
+python scripts/validate_snapshot.py --strict --require-current
+python scripts/check_deployment_readiness.py
 ```
+
+`--strict`는 저장 당시 스냅샷의 재현성·스키마·품질을 검사합니다. 현재 운영 시점에도
+최신이어야 하는 라이브 수집과 예약 갱신에는 `--require-current`를 함께 사용합니다.
+공개 배포 게이트는 최신성에 더해 `docs/market-data-rights.json`의 공개 표시·재배포 권한을
+검사하며, 권한이 확인되지 않은 현재 상태에서는 의도적으로 실패합니다.
 
 ## 데이터 파일
 

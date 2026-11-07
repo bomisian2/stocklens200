@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-13",
+  "public_deployment_allowed": false,
+  "scope": "public Streamlit display, stored snapshots, and derived public signals",
+  "providers": [
+    {
+      "id": "yahoo_screener",
+      "terms_url": "https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html",
+      "library_notice_url": "https://github.com/ranaroussi/yfinance#readme",
+      "collection": "research_only",
+      "public_display": "unconfirmed",
+      "snapshot_redistribution": "unconfirmed",
+      "derived_signal_publication": "unconfirmed"
+    },
+    {
+      "id": "nasdaq_screener",
+      "terms_url": "https://www.nasdaq.com/legal",
+      "collection": "blocked_for_automated_operation",
+      "public_display": "blocked_without_written_permission",
+      "snapshot_redistribution": "blocked_without_written_permission",
+      "derived_signal_publication": "unconfirmed"
+    }
+  ]
+}

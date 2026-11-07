@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Record trigger provenance
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "schedule=${{ github.event.schedule || 'manual' }}"
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
@@ -32,7 +37,7 @@ jobs:
       - name: Refresh last-good snapshot
         run: python scripts/update_data.py
       - name: Validate refreshed snapshot
-        run: python scripts/validate_snapshot.py --strict
+        run: python scripts/validate_snapshot.py --strict --require-current
       - name: Commit changed snapshots
         run: |
           if git diff --quiet -- data/; then
