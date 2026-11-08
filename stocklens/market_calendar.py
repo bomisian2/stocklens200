@@ -38,6 +38,13 @@ class FreshnessAssessment:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class LiveCollectionWindow:
+    collect: bool
+    reason: str
+    active_session_date: str | None
+
+
 @lru_cache(maxsize=1)
 def _xnys_calendar():
     # Explicit bounds avoid depending on the package's moving default window.
@@ -71,6 +78,31 @@ def latest_completed_session(now: datetime) -> MarketSession:
         session_date=session.date().isoformat(),
         open_utc=opened.to_pydatetime().astimezone(timezone.utc).replace(microsecond=0).isoformat(),
         close_utc=close.to_pydatetime().astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+    )
+
+
+def live_collection_window(now: datetime, settlement_minutes: int = 15) -> LiveCollectionWindow:
+    """Return whether PR CI can request an unambiguous completed-session snapshot."""
+    if settlement_minutes < 0:
+        raise ValueError("settlement_minutes cannot be negative")
+    current = _as_utc(now)
+    calendar = _xnys_calendar()
+    start = (current - timedelta(days=2)).date().isoformat()
+    end = (current + timedelta(days=1)).date().isoformat()
+    current_timestamp = pd.Timestamp(current)
+    for session in calendar.sessions_in_range(start, end):
+        opened = calendar.session_open(session)
+        settled = calendar.session_close(session) + pd.Timedelta(minutes=settlement_minutes)
+        if opened <= current_timestamp <= settled:
+            return LiveCollectionWindow(
+                collect=False,
+                reason="regular_session_active_or_settling",
+                active_session_date=session.date().isoformat(),
+            )
+    return LiveCollectionWindow(
+        collect=True,
+        reason="outside_regular_session_and_settlement_window",
+        active_session_date=None,
     )
 
 
