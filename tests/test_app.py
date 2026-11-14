@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
+
+
+pytestmark = pytest.mark.streamlit
 
 
 def test_streamlit_snapshot_smoke() -> None:
