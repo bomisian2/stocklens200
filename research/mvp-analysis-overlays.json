@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "dataset_kind": "mvp_analysis_overlays",
+  "operational_valuation_source": false,
+  "source_branches": {
+    "valuation": "feat/v2-valuation-engine@92a5109f4320e1999059e730459d080f9b15b0c6",
+    "signals": "feat/v2-short-term-signals@b3a6b24043995c415042d40da2d010fe9e2323fd"
+  },
+  "companies": [
+    {
+      "ticker": "GOOGL",
+      "operational_eligible": false,
+      "official_financial_periods": 11,
+      "areas": {
+        "business": {
+          "state": "partial",
+          "as_of": "2026-06-30",
+          "summary": "광고와 클라우드가 핵심 현금창출원이며 AI 인프라 투자가 크게 확대된 상태입니다.",
+          "hold_reason": "경쟁력·고객집중·사업부별 전망을 공통 정량 기준으로 검증하지 않았습니다.",
+          "sources": [{"label": "Alphabet investor relations", "url": "https://abc.xyz/investor/"}],
+          "details": ["광고·클라우드 현금흐름", "AI 제품 확장", "규제와 투자자산 변동 위험"]
+        },
+        "financial": {
+          "state": "research_only",
+          "as_of": "2026-06-30",
+          "summary": "공식 IR 자료에서 10개 원시 기간과 1개 TTM 기간을 정규화했습니다.",
+          "hold_reason": "정규화 EPS와 독립 재무 교차검증이 없어 운영 입력으로 승격하지 않았습니다.",
+          "sources": [{"label": "Alphabet Q2 2026 earnings release", "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf"}],
+          "details": ["TTM 매출 $445.866B", "TTM 영업이익 $147.628B", "TTM CFO $185.675B", "TTM CAPEX $132.402B", "TTM FCF $53.273B", "일회성 투자증권 평가이익으로 GAAP EPS 왜곡"]
+        },
+        "outlook": {
+          "state": "partial",
+          "as_of": "2026-07-22",
+          "summary": "2026년 CAPEX $175B~$185B 회사 가이던스만 명시적으로 분리해 보유합니다.",
+          "hold_reason": "검증된 다년 매출·마진·FCF 전망과 재배포 가능한 컨센서스가 없습니다.",
+          "sources": [{"label": "Alphabet Q2 2026 earnings release", "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf"}],
+          "details": ["공식 회사 가이던스와 연구 가정을 분리", "다년 전망은 미확보"]
+        },
+        "valuation": {
+          "state": "research_only",
+          "as_of": "2026-10-09",
+          "summary": "B등급 연구 참고 범위만 있으며 정식 적정가와 공식 중간값은 없습니다.",
+          "hold_reason": "정식 WACC·다년 전망·투자자산 경제가치·완전희석주식 검증이 부족합니다.",
+          "sources": [{"label": "StockLens PR #2 research audit", "url": "https://github.com/bomisian2/stocklens200/pull/2"}],
+          "details": ["연구 참고 범위 $41.63~$84.88", "운영 자격 false", "최종 판단 hold"]
+        },
+        "technical": {
+          "state": "unavailable",
+          "as_of": null,
+          "summary": "이 MVP에는 GOOGL 종목별 기술 결과를 가져오지 않았습니다.",
+          "hold_reason": "PR #3 전체 코드와 원시 시세를 운영 앱에 연결하지 않았습니다.",
+          "sources": [{"label": "StockLens PR #3 signal research", "url": "https://github.com/bomisian2/stocklens200/pull/3"}],
+          "details": []
+        }
+      },
+      "research_value": {
+        "grade": "B",
+        "range": {"low": 41.63, "high": 84.88, "currency": "USD"},
+        "formal_value": null,
+        "midpoint": null,
+        "operational_eligible": false,
+        "automatic_price_comparison": false,
+        "judgement": "hold",
+        "top_uncertainties": [
+          {"rank": 1, "name": "WACC", "mechanical_span": 63.36},
+          {"rank": 2, "name": "향후 5년 성장·영업마진", "mechanical_span": 40.36},
+          {"rank": 3, "name": "투자자산 경제적 가치", "mechanical_span": 31.29}
+        ],
+        "bridge_branches": [
+          {"name": "우선주 청구권 차감", "low": 41.63, "high": 83.33, "basis": "우선주 $19.0B를 차감하고 전환 희석은 적용하지 않음"},
+          {"name": "우선주 전환 희석", "low": 42.96, "high": 84.88, "basis": "우선주 청구권은 차감하지 않고 최대 전환 희석 경계를 적용"}
+        ],
+        "source_status": {
+          "accession": "0001652044-26-000071",
+          "accepted_at_utc": "2026-07-23T01:15:54Z",
+          "raw_file_hash_verified": false,
+          "acquisition_state": "SEC 원본 로컬 요청 HTTP 403 · 재시도 및 우회 없음"
+        },
+        "source_pr": "https://github.com/bomisian2/stocklens200/pull/2",
+        "disclaimer": "목표가격·매수가·저평가율·투자 권고가 아닙니다."
+      },
+      "risks": ["AI 인프라 CAPEX 확대", "광고 경기민감도", "규제", "투자증권 평가손익 변동"],
+      "invalidation_conditions": ["공식 공시와 정규화 결과 불일치", "원천 자료 시점 또는 해시 검증 실패", "연구 결과의 운영 파일 유입"]
+    },
+    {
+      "ticker": "AMAT",
+      "operational_eligible": false,
+      "official_financial_periods": 0,
+      "areas": {
+        "business": {"state": "unavailable", "as_of": null, "summary": "사업 경쟁력 분석 미연결", "hold_reason": "출처가 연결된 사업 구조 자료가 없습니다.", "sources": [], "details": []},
+        "financial": {"state": "unavailable", "as_of": null, "summary": "공식 재무자료 미확보", "hold_reason": "해시 검증된 연차·분기 자료와 FinancialPeriod가 없습니다.", "sources": [], "details": ["필요 자료: 매출·영업이익·EPS·CFO·CAPEX·FCF", "필요 검증: 반도체 설비투자 사이클과 정상화 이익"]},
+        "outlook": {"state": "unavailable", "as_of": null, "summary": "공식 전망 미확보", "hold_reason": "수주·가이던스·사이클 자료를 검증하지 않았습니다.", "sources": [], "details": []},
+        "valuation": {"state": "blocked", "as_of": null, "summary": "정식 적정가 없음", "hold_reason": "공식 재무와 정상화 사이클 증거가 없습니다.", "sources": [], "details": []},
+        "technical": {"state": "unavailable", "as_of": null, "summary": "종목별 기술 결과 미연결", "hold_reason": "PR #3 결과를 운영 앱에 연결하지 않았습니다.", "sources": [{"label": "StockLens PR #3 signal research", "url": "https://github.com/bomisian2/stocklens200/pull/3"}], "details": []}
+      },
+      "research_value": null,
+      "risks": ["설비투자 사이클", "수주와 고객·지역 집중"],
+      "invalidation_conditions": ["공식 재무자료 미확보", "정상화 이익 근거 미확보"]
+    },
+    {
+      "ticker": "AVGO",
+      "operational_eligible": false,
+      "official_financial_periods": 0,
+      "areas": {
+        "business": {"state": "unavailable", "as_of": null, "summary": "사업 경쟁력 분석 미연결", "hold_reason": "출처가 연결된 AI 반도체·VMware 사업 자료가 없습니다.", "sources": [], "details": []},
+        "financial": {"state": "unavailable", "as_of": null, "summary": "공식 재무자료 미확보", "hold_reason": "해시 검증된 연차·분기 자료와 FinancialPeriod가 없습니다.", "sources": [], "details": ["필요 자료: GAAP/조정 EPS 조정표", "필요 검증: VMware 현금흐름과 인수회계"]},
+        "outlook": {"state": "unavailable", "as_of": null, "summary": "공식 전망 미확보", "hold_reason": "AI 반도체 및 VMware 전망을 검증하지 않았습니다.", "sources": [], "details": []},
+        "valuation": {"state": "blocked", "as_of": null, "summary": "정식 적정가 없음", "hold_reason": "공식 재무와 GAAP/조정 이익 조정 증거가 없습니다.", "sources": [], "details": []},
+        "technical": {"state": "unavailable", "as_of": null, "summary": "종목별 기술 결과 미연결", "hold_reason": "PR #3 결과를 운영 앱에 연결하지 않았습니다.", "sources": [{"label": "StockLens PR #3 signal research", "url": "https://github.com/bomisian2/stocklens200/pull/3"}], "details": []}
+      },
+      "research_value": null,
+      "risks": ["인수부채", "VMware 통합", "무형자산 상각과 GAAP EPS 왜곡"],
+      "invalidation_conditions": ["공식 재무자료 미확보", "인수회계와 조정 EPS 연결 미확보"]
+    },
+    {
+      "ticker": "QCOM",
+      "operational_eligible": false,
+      "official_financial_periods": 0,
+      "areas": {
+        "business": {"state": "unavailable", "as_of": null, "summary": "사업 경쟁력 분석 미연결", "hold_reason": "라이선스·칩 사업을 출처 기반으로 분리하지 않았습니다.", "sources": [], "details": []},
+        "financial": {"state": "unavailable", "as_of": null, "summary": "공식 재무자료 미확보", "hold_reason": "해시 검증된 연차·분기 자료와 FinancialPeriod가 없습니다.", "sources": [], "details": ["필요 자료: 매출·영업이익·EPS·CFO·CAPEX·FCF", "필요 검증: 라이선스와 칩 사업 수익성 분리"]},
+        "outlook": {"state": "unavailable", "as_of": null, "summary": "공식 전망 미확보", "hold_reason": "스마트폰·자동차·IoT 가이던스를 검증하지 않았습니다.", "sources": [], "details": []},
+        "valuation": {"state": "blocked", "as_of": null, "summary": "정식 적정가 없음", "hold_reason": "공식 재무와 사업부별 전망 근거가 없습니다.", "sources": [], "details": []},
+        "technical": {"state": "unavailable", "as_of": null, "summary": "종목별 기술 결과 미연결", "hold_reason": "PR #3 결과를 운영 앱에 연결하지 않았습니다.", "sources": [{"label": "StockLens PR #3 signal research", "url": "https://github.com/bomisian2/stocklens200/pull/3"}], "details": []}
+      },
+      "research_value": null,
+      "risks": ["스마트폰 업황", "고객 내재화", "라이선스 규제"],
+      "invalidation_conditions": ["공식 재무자료 미확보", "사업부별 경제성 검증 미완료"]
+    }
+  ]
+}

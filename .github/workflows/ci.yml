@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  stored-snapshot-integrity:
+    name: A · stored snapshot integrity
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,11 +25,10 @@ jobs:
       - name: Validate committed Top-200 snapshot
         run: python scripts/validate_snapshot.py --strict
 
-  live-collection:
-    # A temporary runner directory has no last-good cache. The job therefore
-    # succeeds only when the providers return a fresh, cross-validated Top 200.
+  live-freshness:
+    name: B · current market freshness
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -37,7 +37,29 @@ jobs:
           cache: pip
       - name: Install runtime dependencies
         run: pip install -r requirements.txt
-      - name: Collect a fresh Top-200 snapshot without a cache
-        run: python scripts/update_data.py --data-dir "$RUNNER_TEMP/stocklens-live"
-      - name: Validate the fresh snapshot
-        run: python scripts/validate_snapshot.py --strict --data-dir "$RUNNER_TEMP/stocklens-live"
+      - name: Compare committed snapshot with the latest completed XNYS session
+        run: python scripts/validate_snapshot.py --strict --require-current
+
+  deployment-gate:
+    name: C · public deployment readiness
+    needs: [stored-snapshot-integrity, live-freshness]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Record prerequisite results
+        env:
+          STORED_RESULT: ${{ needs.stored-snapshot-integrity.result }}
+          LIVE_RESULT: ${{ needs.live-freshness.result }}
+        run: |
+          echo "stored_snapshot_integrity=$STORED_RESULT"
+          echo "current_market_freshness=$LIVE_RESULT"
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Enforce freshness and public-data rights gate
+        run: python scripts/check_deployment_readiness.py
