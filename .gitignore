@@ -5,3 +5,5 @@ __pycache__/
 .tmp/
 *.py[cod]
 .streamlit/secrets.toml
+data/sec-import/
+data/price-history-cache/

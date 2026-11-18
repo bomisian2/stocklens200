@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from stocklens.market_calendar import assess_market_times, latest_completed_session
+from stocklens.market_calendar import (
+    assess_market_times,
+    latest_completed_session,
+    next_session_date,
+)
 
 
 def test_calendar_skips_us_market_holiday() -> None:
@@ -15,6 +19,10 @@ def test_calendar_close_reflects_daylight_saving_time() -> None:
     summer = latest_completed_session(datetime(2026, 7, 7, 1, tzinfo=timezone.utc))
     assert winter.close_utc.endswith("21:00:00+00:00")
     assert summer.close_utc.endswith("20:00:00+00:00")
+
+
+def test_next_session_skips_weekend_and_holiday() -> None:
+    assert next_session_date("2026-07-02") == "2026-07-06"
 
 
 def test_freshness_states_verified_stale_unverified_and_degraded() -> None:
