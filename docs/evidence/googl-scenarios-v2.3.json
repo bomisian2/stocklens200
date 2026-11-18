@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "ticker": "GOOGL",
+  "evidence_as_of_utc": "2026-07-22T20:01:36+00:00",
+  "operational_use": false,
+  "sources": {
+    "alphabet_fy2025": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2025/q4/2025q4-alphabet-earnings-release.pdf",
+      "sha256": "8bb2778772fc60c0290cfeac3b24d345a07b8918a7708ec8fcef7239243922f9"
+    },
+    "alphabet_h1_2026": {
+      "url": "https://s206.q4cdn.com/479360582/files/doc_financials/2026/q2/2026q2-alphabet-earnings-release.pdf",
+      "sha256": "65f35a2e9c287112121f736321c7526d603ba8e0dae27acac56c7d7357602aa8"
+    },
+    "us_treasury_2026_10_01": {
+      "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?field_tdr_date_value=2026&field_tdr_date_value_month=202610&type=daily_treasury_yield_curve",
+      "as_of": "2026-10-01"
+    },
+    "damodaran_erp_2026_09": {
+      "url": "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm",
+      "as_of": "2026-09-01",
+      "limitation": "Research estimate, not an official market fact or a StockLens-validated operating WACC input."
+    }
+  },
+  "observed_ttm": {
+    "revenue": {"value": 445866000000, "state": "observed", "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"], "as_of_utc": "2026-07-22T20:01:36+00:00", "unit": "USD"},
+    "operating_income": {"value": 147628000000, "state": "observed", "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"], "as_of_utc": "2026-07-22T20:01:36+00:00", "unit": "USD"},
+    "depreciation_amortization": {"value": 25237000000, "state": "observed", "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"], "as_of_utc": "2026-07-22T20:01:36+00:00", "unit": "USD"},
+    "capex": {"value": 132402000000, "state": "observed", "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"], "as_of_utc": "2026-07-22T20:01:36+00:00", "unit": "USD"},
+    "diluted_shares": {"value": 12274000000, "state": "observed", "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"], "as_of_utc": "2026-07-22T20:01:36+00:00", "unit": "shares"}
+  },
+  "observed_historical_anchors": {
+    "annual_revenue_growth_range": [0.0868, 0.1509],
+    "annual_operating_margin_range": [0.2646, 0.3211],
+    "ttm_operating_margin": 0.3311,
+    "status": "comparators_not_forecasts",
+    "source_ids": ["alphabet_fy2025", "alphabet_h1_2026"]
+  },
+  "issuer_guidance": {
+    "2026_capex_low": {"value": 175000000000, "state": "issuer_guidance", "source_ids": ["alphabet_fy2025"]},
+    "2026_capex_high": {"value": 185000000000, "state": "issuer_guidance", "source_ids": ["alphabet_fy2025"]},
+    "revenue_growth": {"value": null, "state": "missing", "source_ids": []},
+    "operating_margin": {"value": null, "state": "missing", "source_ids": []},
+    "post_2026_capex": {"value": null, "state": "missing", "source_ids": []}
+  },
+  "scenario_method": {
+    "reinvestment_efficiency_ceiling": {
+      "value": 4.0,
+      "state": "model_assumption",
+      "source_ids": [],
+      "rationale": "A transparent stress-test ceiling used only to reject internally inconsistent high-growth/low-reinvestment paths; it is not an Alphabet estimate."
+    },
+    "working_capital_method": "Apply a non-zero scenario ratio to incremental revenue because verified operating working-capital history is incomplete.",
+    "capex_lag_method": "Record one-to-three-year research lag tags across scenarios; no causal effect is asserted.",
+    "no_official_base_case": true
+  },
+  "scenarios": [
+    {
+      "name": "downside_research",
+      "display_role": "conservative research scenario",
+      "revenue_growth": [0.08, 0.07, 0.06, 0.05, 0.04],
+      "operating_margin": [0.30, 0.295, 0.29, 0.29, 0.29],
+      "operating_tax_rate": [0.20, 0.20, 0.20, 0.20, 0.20],
+      "depreciation_to_revenue": [0.060, 0.065, 0.070, 0.070, 0.070],
+      "capex_to_revenue": [0.384185, 0.34, 0.28, 0.22, 0.18],
+      "change_nwc_to_incremental_revenue": [0.020, 0.020, 0.020, 0.020, 0.020],
+      "growth_capex_lag_years": [3, 3, 3, 3, 3],
+      "assumption_basis": "Historical growth/margin comparators plus the high end of the official 2026 CAPEX guide; every forward number remains a model assumption."
+    },
+    {
+      "name": "reference_research",
+      "display_role": "central research scenario, not an official base fair value",
+      "revenue_growth": [0.12, 0.11, 0.10, 0.09, 0.08],
+      "operating_margin": [0.32, 0.325, 0.33, 0.335, 0.34],
+      "operating_tax_rate": [0.184, 0.184, 0.184, 0.184, 0.184],
+      "depreciation_to_revenue": [0.060, 0.065, 0.070, 0.070, 0.070],
+      "capex_to_revenue": [0.360455, 0.31, 0.25, 0.20, 0.16],
+      "change_nwc_to_incremental_revenue": [0.010, 0.010, 0.010, 0.010, 0.010],
+      "growth_capex_lag_years": [2, 2, 2, 2, 2],
+      "assumption_basis": "Historical comparator envelope and the midpoint of official 2026 CAPEX guidance; no management multi-year outlook or analyst consensus is asserted."
+    },
+    {
+      "name": "upside_research",
+      "display_role": "optimistic research scenario",
+      "revenue_growth": [0.15, 0.14, 0.13, 0.12, 0.10],
+      "operating_margin": [0.335, 0.345, 0.355, 0.36, 0.365],
+      "operating_tax_rate": [0.152569, 0.152569, 0.152569, 0.152569, 0.152569],
+      "depreciation_to_revenue": [0.060, 0.065, 0.070, 0.070, 0.070],
+      "capex_to_revenue": [0.341301, 0.28, 0.22, 0.17, 0.14],
+      "change_nwc_to_incremental_revenue": [0.005, 0.005, 0.005, 0.005, 0.005],
+      "growth_capex_lag_years": [1, 1, 1, 1, 1],
+      "assumption_basis": "Upper historical growth comparator, margin expansion, and low end of official 2026 CAPEX guidance; not a forecast or consensus."
+    }
+  ],
+  "wacc_review": {
+    "risk_free_rate": {"value": 0.0524, "state": "observed", "source_ids": ["us_treasury_2026_10_01"]},
+    "erp_reference": {"value": 0.0414, "state": "model_assumption", "source_ids": ["damodaran_erp_2026_09"], "rationale": "External research estimate retained only as a WACC component reference."},
+    "point_in_time_beta": {"value": null, "state": "missing", "source_ids": []},
+    "beta_candidate_review": {
+      "status": "not_accepted",
+      "accepted_candidates": [],
+      "reason": "No redistribution-safe, traceable point-in-time Alphabet beta series with a documented lookback, benchmark, sampling frequency, and observation date is connected."
+    },
+    "pretax_cost_of_debt": {"value": null, "state": "missing", "source_ids": []},
+    "debt_market_value": {"value": null, "state": "missing", "source_ids": []},
+    "marginal_operating_tax_rate": {"value": null, "state": "missing", "source_ids": []},
+    "formal_wacc": null,
+    "sensitivity_candidates": [0.09, 0.105, 0.12, 0.135, 0.15],
+    "candidate_rationale": "Mechanical research grid around risk-free-plus-ERP cost-of-equity references; no candidate is designated as the correct or default WACC."
+  },
+  "terminal_growth_review": {
+    "sensitivity_candidates": [0.015, 0.02, 0.025, 0.03],
+    "candidate_rationale": "Stress grid only. No candidate is an issuer forecast, consensus, or selected terminal growth rate."
+  },
+  "equity_bridge_missing_components": [
+    "current debt-like lease and financing claims",
+    "classification of non-marketable securities",
+    "current noncontrolling interests",
+    "other verified potential claims"
+  ]
+}
