@@ -1,13 +1,13 @@
 {
   "schema_version": 2,
-  "generated_at_utc": "2026-11-17T05:04:25+00:00",
-  "data_generated_at_utc": "2026-11-17T05:04:25+00:00",
-  "market_session_date": "2026-11-16",
-  "market_data_as_of_utc": "2026-11-16T21:00:02+00:00",
-  "market_time_min_utc": "2026-11-16T21:00:00+00:00",
-  "market_time_max_utc": "2026-11-16T21:04:17+00:00",
-  "collected_at_min_utc": "2026-11-17T05:04:27+00:00",
-  "collected_at_max_utc": "2026-11-17T05:04:27+00:00",
+  "generated_at_utc": "2026-11-18T04:18:13+00:00",
+  "data_generated_at_utc": "2026-11-18T04:18:13+00:00",
+  "market_session_date": "2026-11-17",
+  "market_data_as_of_utc": "2026-11-17T21:00:02+00:00",
+  "market_time_min_utc": "2026-11-17T21:00:00+00:00",
+  "market_time_max_utc": "2026-11-17T21:04:34+00:00",
+  "collected_at_min_utc": "2026-11-18T04:18:14+00:00",
+  "collected_at_max_utc": "2026-11-18T04:18:14+00:00",
   "source": "yahoo_screener",
   "data_source": "yahoo_screener",
   "verification_source": "nasdaq_screener",
@@ -22,16 +22,16 @@
   "provider_errors": [],
   "freshness": {
     "state": "verified",
-    "expected_session_date": "2026-11-16",
+    "expected_session_date": "2026-11-17",
     "observed_session_dates": [
-      "2026-11-16"
+      "2026-11-17"
     ],
     "valid_time_count": 200,
     "missing_time_count": 0,
     "invalid_time_count": 0,
-    "market_time_min_utc": "2026-11-16T21:00:00+00:00",
-    "market_time_median_utc": "2026-11-16T21:00:02+00:00",
-    "market_time_max_utc": "2026-11-16T21:04:17+00:00",
+    "market_time_min_utc": "2026-11-17T21:00:00+00:00",
+    "market_time_median_utc": "2026-11-17T21:00:02+00:00",
+    "market_time_max_utc": "2026-11-17T21:04:34+00:00",
     "reason": "all market timestamps match the latest completed XNYS session"
   },
   "cross_validation": {
@@ -41,8 +41,8 @@
     "overlapping_tickers": 192,
     "overlap_ratio": 0.96,
     "comparable_market_caps": 192,
-    "market_caps_within_35_percent": 191,
-    "market_cap_agreement_ratio": 0.9948,
+    "market_caps_within_35_percent": 190,
+    "market_cap_agreement_ratio": 0.9896,
     "reason": "independent Top-200 membership and market-cap checks passed"
   },
   "quality": {
