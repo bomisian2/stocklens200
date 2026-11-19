@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-10-14T12:30:00Z",
+  "records": [
+    {
+      "ticker": "AVGO",
+      "date": "2026-10-13",
+      "price": 357.31,
+      "inputs": {
+        "priceAsOf": "2026-10-13T20:00:00Z",
+        "sectorState": "약세/실패",
+        "sectorEtf": "SOXX",
+        "rsi": 48.0,
+        "sma50": "아래",
+        "sma200": "아래"
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "date": "2026-10-13",
+      "price": 228.52,
+      "inputs": {
+        "priceAsOf": "2026-10-13T20:00:00Z",
+        "sectorState": "약세/실패",
+        "sectorEtf": "SOXX",
+        "rsi": 52.0,
+        "sma50": "위",
+        "sma200": "위"
+      }
+    }
+  ]
+}

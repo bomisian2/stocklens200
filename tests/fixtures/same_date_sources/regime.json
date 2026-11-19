@@ -1,0 +1,14 @@
+{
+  "generatedAt": "2026-10-13T22:35:27.276Z",
+  "state": "중립",
+  "score": 3,
+  "methodology": "synthetic cross-project proxy fixture",
+  "indicators": {
+    "tenYear": {"asOf": "2026-10-13", "value": 5.22, "above20": true, "above50": true},
+    "oil": {"asOf": "2026-10-13", "value": 94.70, "above20": true, "above50": true},
+    "vix": {"asOf": "2026-10-13", "value": 15.27, "above20": false, "above50": false},
+    "qqq": {"asOf": "2026-10-13", "value": 743.57, "change20": 5.54, "above20": true, "above50": true},
+    "rsp": {"asOf": "2026-10-13", "value": 213.30, "above20": true, "above50": false},
+    "hyg": {"asOf": "2026-10-13", "value": 77.09, "above20": false, "above50": false}
+  }
+}

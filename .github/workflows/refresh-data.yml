@@ -25,6 +25,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Enforce provider rights manifest before network access
+        run: >-
+          python scripts/check_provider_rights.py
+          --manifest config/provider-rights.json
+          --purpose scheduled_refresh
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Run tests

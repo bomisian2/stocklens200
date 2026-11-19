@@ -1,0 +1,58 @@
+name: Provider live diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      rights_review_confirmed:
+        description: Confirm the repository rights manifest has been reviewed before any provider call
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stocklens-provider-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  rights-gate:
+    name: provider-rights-gate (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check provider rights manifest and operator confirmation
+        env:
+          OPERATOR_CONFIRMED: ${{ inputs.rights_review_confirmed }}
+        run: >-
+          python scripts/check_provider_rights.py
+          --manifest config/provider-rights.json
+          --purpose manual_diagnostic
+          --operator-confirmed "$OPERATOR_CONFIRMED"
+
+  live-collection-diagnostic:
+    name: live-collection-diagnostic (external, no cache)
+    needs: rights-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Record diagnostic clock context
+        run: python scripts/market_clock_context.py
+      - name: Collect a fresh Top-200 diagnostic snapshot without a cache
+        run: python scripts/update_data.py --data-dir "$RUNNER_TEMP/stocklens-provider-diagnostic"
+      - name: Validate current-session freshness and snapshot integrity
+        run: >-
+          python scripts/validate_snapshot.py --strict
+          --data-dir "$RUNNER_TEMP/stocklens-provider-diagnostic"
